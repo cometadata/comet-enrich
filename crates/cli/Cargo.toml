@@ -1,0 +1,25 @@
+[package]
+name = "comet-enrich"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+comet-enrichment-core = { workspace = true }
+jsonschema = { version = "0.18", default-features = false, features = ["resolve-file"] }
+log = "0.4"
+simple_logger = "5"
+rtg = { package = "comet-enrich-datacite-resource-type-general", path = "../datacite-resource-type-general" }
+affiliations = { package = "comet-enrich-datacite-affiliations", path = "../datacite-affiliations" }
+funders = { package = "comet-enrich-datacite-funders", path = "../datacite-funders" }
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
+
+[lints]
+workspace = true
