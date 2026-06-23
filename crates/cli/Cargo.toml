@@ -7,11 +7,11 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-anyhow = "1"
+anyhow = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 comet-enrichment-core = { workspace = true }
-jsonschema = { version = "0.18", default-features = false, features = ["resolve-file"] }
-log = "0.4"
+jsonschema = { workspace = true }
+log = { workspace = true }
 simple_logger = "5"
 rtg = { package = "comet-enrich-datacite-resource-type-general", path = "../datacite-resource-type-general" }
 affiliations = { package = "comet-enrich-datacite-affiliations", path = "../datacite-affiliations" }
