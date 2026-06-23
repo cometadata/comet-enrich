@@ -260,7 +260,13 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "comet-enrichment-core",
+ "flate2",
+ "regex",
+ "serde",
  "serde_json",
+ "serde_yaml",
+ "strsim",
+ "tempfile",
 ]
 
 [[package]]

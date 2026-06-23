@@ -25,9 +25,9 @@ fn a_stage_has_its_own_help() {
 }
 
 #[test]
-fn every_method_reports_unimplemented() {
-    let cases: [(&str, &[&str]); 3] = [
-        ("resource-type-general", &["--rules", "r.yaml"]),
+fn lookup_methods_report_unimplemented() {
+    // The lookup methods are still stubs; resource-type-general is wired (see below).
+    let cases: [(&str, &[&str]); 2] = [
         ("affiliations", &["--ror-data", "ror.json"]),
         ("funders", &["--ror-data", "ror.json"]),
     ];
@@ -50,6 +50,28 @@ fn every_method_reports_unimplemented() {
                 "{method}: not yet implemented"
             )));
     }
+}
+
+#[test]
+fn resource_type_general_is_wired() {
+    // No longer a stub: it loads the rules file, so a missing path fails while reading it
+    // rather than reporting "not yet implemented".
+    cli()
+        .args([
+            "resource-type-general",
+            "-i",
+            "in",
+            "-o",
+            "out.jsonl",
+            "--enrichment",
+            "e.yaml",
+            "--rules",
+            "r.yaml",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("reading r.yaml"))
+        .stderr(predicate::str::contains("not yet implemented").not());
 }
 
 #[test]
