@@ -15,8 +15,18 @@ fmt:
 > cargo fmt --all
 > rumdl fmt
 
+# Check formatting without modifying files
+fmt-ci:
+> cargo fmt --all -- --check
+
 lint:
 > cargo clippy --workspace --all-targets --all-features
+> cargo deny check
+> rumdl check
+
+# Lint without modifying files, failing on warnings
+lint-ci:
+> cargo clippy --workspace --all-targets --all-features -- -D warnings
 > cargo deny check
 > rumdl check
 
