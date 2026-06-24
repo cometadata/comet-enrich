@@ -1,9 +1,9 @@
-//! Fuzzy-match a free-text `resourceType` against the DataCite vocabulary.
+//! Match free-text `resourceType` values to DataCite type names.
 //!
-//! [`Matcher::fuzzy_match`] runs a small cascade: exact normalized lookup, then a
-//! whitespace-concatenated retry, then a camelCase-split retry, then a Levenshtein fallback
-//! gated by the configured threshold. Any hit is checked against the redundancy exclusions
-//! before it is returned.
+//! Matching starts with normalized exact matches, then tries a few common
+//! formatting variants before falling back to Levenshtein similarity. Matches
+//! listed as redundant are reported separately so callers can avoid emitting
+//! unnecessary changes.
 
 use regex::Regex;
 use std::collections::{HashMap, HashSet};
@@ -22,7 +22,8 @@ pub fn tokenize_camelcase(text: &str) -> Vec<String> {
     s2.split_whitespace().map(str::to_string).collect()
 }
 
-static PUNCT_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"[-_.,;:!?()\[\]{}'"/\\]"#).unwrap());
+static PUNCT_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"[-_.,;:!?()\[\]{}'"/\\]"#).unwrap());
 
 pub fn smart_normalize(text: &str, typo_corrections: &HashMap<String, String>) -> String {
     if text.is_empty() {
@@ -42,7 +43,6 @@ pub struct Matcher {
     pub threshold: f64,
     pub typo_corrections: HashMap<String, String>,
     pub normalized_to_original: HashMap<String, String>,
-    // The membership set; fuzzy_match works off the sorted vec, so this is only read in tests.
     #[allow(dead_code)]
     pub normalized_values: HashSet<String>,
     pub normalized_values_sorted: Vec<String>,
@@ -142,9 +142,9 @@ impl Matcher {
     }
 
     fn is_redundant(&self, normalized_input: &str, matched: &str) -> bool {
-        self.redundancy_exclusions
-            .iter()
-            .any(|rule| rule.normalized.contains(normalized_input) && rule.matches.contains(matched))
+        self.redundancy_exclusions.iter().any(|rule| {
+            rule.normalized.contains(normalized_input) && rule.matches.contains(matched)
+        })
     }
 }
 
@@ -154,8 +154,16 @@ mod tests {
 
     #[test]
     fn tokenize_camelcase_splits_boundaries() {
-        assert_eq!(tokenize_camelcase("JournalArticle"), vec!["Journal", "Article"]);
-        assert_eq!(tokenize_camelcase("XMLHttpRequest"), vec!["XML", "Http", "Request"]);
+        // Checks that camelCase and acronym boundaries are split without
+        // changing plain single-token strings.
+        assert_eq!(
+            tokenize_camelcase("JournalArticle"),
+            vec!["Journal", "Article"]
+        );
+        assert_eq!(
+            tokenize_camelcase("XMLHttpRequest"),
+            vec!["XML", "Http", "Request"]
+        );
         assert_eq!(tokenize_camelcase("plain"), vec!["plain"]);
         assert_eq!(tokenize_camelcase("ABC"), vec!["ABC"]);
         assert_eq!(tokenize_camelcase(""), Vec::<String>::new());
@@ -163,21 +171,29 @@ mod tests {
 
     #[test]
     fn smart_normalize_empty_returns_empty() {
+        // Checks that an empty resource type stays empty.
         let typo = HashMap::new();
         assert_eq!(smart_normalize("", &typo), "");
     }
 
     #[test]
     fn smart_normalize_lowercases_and_concats() {
+        // Checks that normalization removes separators and makes matching
+        // insensitive to case and punctuation.
         let typo = HashMap::new();
         assert_eq!(smart_normalize("Journal Article", &typo), "journalarticle");
         assert_eq!(smart_normalize("Data-Paper", &typo), "datapaper");
         assert_eq!(smart_normalize("Book/Chapter", &typo), "bookchapter");
-        assert_eq!(smart_normalize("Conference, Paper!", &typo), "conferencepaper");
+        assert_eq!(
+            smart_normalize("Conference, Paper!", &typo),
+            "conferencepaper"
+        );
     }
 
     #[test]
     fn smart_normalize_applies_typo_corrections() {
+        // Checks that configured word-level typo corrections are applied before
+        // the words are joined.
         let mut typo = HashMap::new();
         typo.insert("sofware".to_string(), "software".to_string());
         typo.insert("otput".to_string(), "output".to_string());
@@ -187,12 +203,16 @@ mod tests {
 
     #[test]
     fn matcher_new_builds_normalized_tables() {
+        // Checks that the matcher stores normalized lookup keys while preserving
+        // the original DataCite type names for output.
         let cfg = crate::config::RulesConfig {
             threshold: 0.85,
             reference_values: vec!["JournalArticle".into(), "Dataset".into()],
             typo_corrections: HashMap::new(),
             redundancy_exclusions: vec![],
-            scope: crate::config::ScopeConfig { target_resource_type_general: vec![] },
+            scope: crate::config::ScopeConfig {
+                target_resource_type_general: vec![],
+            },
         };
         let m = Matcher::from_config(&cfg);
         assert!(m.normalized_values.contains("journalarticle"));
@@ -205,66 +225,100 @@ mod tests {
 
     #[test]
     fn fuzzy_match_exact_normalized() {
+        // Checks that direct normalized matches return the original reference
+        // value.
         let cfg = crate::config::RulesConfig {
             threshold: 0.85,
             reference_values: vec!["JournalArticle".into(), "Dataset".into()],
             typo_corrections: HashMap::new(),
             redundancy_exclusions: vec![],
-            scope: crate::config::ScopeConfig { target_resource_type_general: vec![] },
+            scope: crate::config::ScopeConfig {
+                target_resource_type_general: vec![],
+            },
         };
         let m = Matcher::from_config(&cfg);
-        assert_eq!(m.fuzzy_match("Journal article"), MatchOutcome::Matched("JournalArticle".into()));
-        assert_eq!(m.fuzzy_match("dataset"), MatchOutcome::Matched("Dataset".into()));
+        assert_eq!(
+            m.fuzzy_match("Journal article"),
+            MatchOutcome::Matched("JournalArticle".into())
+        );
+        assert_eq!(
+            m.fuzzy_match("dataset"),
+            MatchOutcome::Matched("Dataset".into())
+        );
     }
 
     #[test]
     fn fuzzy_match_whitespace_concat() {
+        // Checks that separated words can still match a compact reference value.
         let cfg = crate::config::RulesConfig {
             threshold: 0.85,
             reference_values: vec!["ConferencePaper".into()],
             typo_corrections: HashMap::new(),
             redundancy_exclusions: vec![],
-            scope: crate::config::ScopeConfig { target_resource_type_general: vec![] },
+            scope: crate::config::ScopeConfig {
+                target_resource_type_general: vec![],
+            },
         };
         let m = Matcher::from_config(&cfg);
-        assert_eq!(m.fuzzy_match("CONFERENCE PAPER"), MatchOutcome::Matched("ConferencePaper".into()));
+        assert_eq!(
+            m.fuzzy_match("CONFERENCE PAPER"),
+            MatchOutcome::Matched("ConferencePaper".into())
+        );
     }
 
     #[test]
     fn fuzzy_match_camelcase_concat() {
+        // Checks that different camelCase casing still resolves to the same
+        // reference value.
         let cfg = crate::config::RulesConfig {
             threshold: 0.85,
             reference_values: vec!["BookChapter".into()],
             typo_corrections: HashMap::new(),
             redundancy_exclusions: vec![],
-            scope: crate::config::ScopeConfig { target_resource_type_general: vec![] },
+            scope: crate::config::ScopeConfig {
+                target_resource_type_general: vec![],
+            },
         };
         let m = Matcher::from_config(&cfg);
-        assert_eq!(m.fuzzy_match("bookChapter"), MatchOutcome::Matched("BookChapter".into()));
+        assert_eq!(
+            m.fuzzy_match("bookChapter"),
+            MatchOutcome::Matched("BookChapter".into())
+        );
     }
 
     #[test]
     fn fuzzy_match_levenshtein_fallback() {
+        // Checks that near misses can match through the Levenshtein fallback,
+        // while unrelated text is rejected.
         let cfg = crate::config::RulesConfig {
             threshold: 0.85,
             reference_values: vec!["Dataset".into(), "JournalArticle".into()],
             typo_corrections: HashMap::new(),
             redundancy_exclusions: vec![],
-            scope: crate::config::ScopeConfig { target_resource_type_general: vec![] },
+            scope: crate::config::ScopeConfig {
+                target_resource_type_general: vec![],
+            },
         };
         let m = Matcher::from_config(&cfg);
-        assert_eq!(m.fuzzy_match("Datasett"), MatchOutcome::Matched("Dataset".into()));
+        assert_eq!(
+            m.fuzzy_match("Datasett"),
+            MatchOutcome::Matched("Dataset".into())
+        );
         assert_eq!(m.fuzzy_match("completely unrelated"), MatchOutcome::NoMatch);
     }
 
     #[test]
     fn fuzzy_match_levenshtein_respects_threshold() {
+        // Checks that the Levenshtein fallback does not match below the
+        // configured threshold.
         let cfg = crate::config::RulesConfig {
             threshold: 0.99,
             reference_values: vec!["Dataset".into()],
             typo_corrections: HashMap::new(),
             redundancy_exclusions: vec![],
-            scope: crate::config::ScopeConfig { target_resource_type_general: vec![] },
+            scope: crate::config::ScopeConfig {
+                target_resource_type_general: vec![],
+            },
         };
         let m = Matcher::from_config(&cfg);
         assert_eq!(m.fuzzy_match("Datasett"), MatchOutcome::NoMatch);
@@ -272,6 +326,8 @@ mod tests {
 
     #[test]
     fn fuzzy_match_redundant_is_excluded() {
+        // Checks that matches covered by a redundancy rule are reported as
+        // redundant instead of as a normal match.
         let cfg = crate::config::RulesConfig {
             threshold: 0.85,
             reference_values: vec!["Text".into(), "Other".into()],
@@ -280,7 +336,9 @@ mod tests {
                 normalized: vec!["text".into(), "txt".into()],
                 matches: vec!["Text".into(), "Other".into()],
             }],
-            scope: crate::config::ScopeConfig { target_resource_type_general: vec![] },
+            scope: crate::config::ScopeConfig {
+                target_resource_type_general: vec![],
+            },
         };
         let m = Matcher::from_config(&cfg);
         assert_eq!(m.fuzzy_match("Text"), MatchOutcome::Redundant);
@@ -288,6 +346,8 @@ mod tests {
 
     #[test]
     fn fuzzy_match_non_redundant_still_matches() {
+        // Checks that redundancy rules only block the configured input/match
+        // pairs.
         let cfg = crate::config::RulesConfig {
             threshold: 0.85,
             reference_values: vec!["Dataset".into(), "Text".into()],
@@ -296,9 +356,14 @@ mod tests {
                 normalized: vec!["text".into()],
                 matches: vec!["Text".into()],
             }],
-            scope: crate::config::ScopeConfig { target_resource_type_general: vec![] },
+            scope: crate::config::ScopeConfig {
+                target_resource_type_general: vec![],
+            },
         };
         let m = Matcher::from_config(&cfg);
-        assert_eq!(m.fuzzy_match("Dataset"), MatchOutcome::Matched("Dataset".into()));
+        assert_eq!(
+            m.fuzzy_match("Dataset"),
+            MatchOutcome::Matched("Dataset".into())
+        );
     }
 }

@@ -1,32 +1,39 @@
-//! `resource-type` method: reclassify DataCite `types.resourceTypeGeneral`.
+//! DataCite resource type reclassification.
 //!
-//! A pure transform. For each record in scope, the free-text `resourceType` is fuzzy-matched
-//! against the DataCite vocabulary (see [`matcher`]) and, when the match differs from the
-//! current `resourceTypeGeneral`, a corrected `types` object is emitted as an enrichment. The
-//! rules driving the match — threshold, vocabulary, typo corrections, redundancy exclusions,
-//! and scope — come from `reclassification_rules.yaml` (see [`config`]).
+//! Reclassifies `types.resourceTypeGeneral` from the free-text
+//! `types.resourceType` value in DataCite records.
+//!
+//! Records are processed when their current `resourceTypeGeneral` value is in
+//! scope according to the configured rules. Matching uses the DataCite resource
+//! type vocabulary, typo corrections, redundancy exclusions, and threshold from
+//! `reclassification_rules.yaml`.
 
-// Brand names (DataCite, …) recur in the docs as prose, not code identifiers.
+// DataCite, ROR, and COMET are names, not Rust identifiers.
 #![allow(clippy::doc_markdown)]
 
 mod config;
 mod matcher;
 
 use anyhow::Result;
-use comet_enrichment_core::{EnrichmentAction, EnrichmentMethod, EnrichmentParts, Extracted, Lookups};
+use comet_enrichment_core::{
+    EnrichmentAction, EnrichmentMethod, EnrichmentParts, Extracted, Lookups,
+};
 use matcher::{MatchOutcome, Matcher};
 use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-/// Method-specific configuration, built by the CLI from its arguments.
+/// Configuration for resource type reclassification.
 pub struct Config {
-    /// Reclassification rules (reclassification_rules.yaml).
+    /// Path to the reclassification rules YAML file.
     pub rules: PathBuf,
 }
 
-/// The set of `resourceTypeGeneral` values the method is allowed to overwrite. A record is in
-/// scope when its current value (or `null`, when missing) is listed in the rules' `scope`.
+/// Resource type values that may be reclassified.
+///
+/// A record is in scope when its current `resourceTypeGeneral` value is listed
+/// in the rules. Missing values are allowed only when `null` appears in the
+/// configured scope.
 struct Scope {
     allow_null: bool,
     allow_values: HashSet<String>,
@@ -44,7 +51,10 @@ impl Scope {
                 }
             }
         }
-        Scope { allow_null, allow_values }
+        Scope {
+            allow_null,
+            allow_values,
+        }
     }
 
     fn allows(&self, rtg: Option<&str>) -> bool {
@@ -55,19 +65,25 @@ impl Scope {
     }
 }
 
-/// Reclassify `types.resourceTypeGeneral` over a DataCite snapshot.
+/// Reclassifies DataCite `types.resourceTypeGeneral` values.
 ///
-/// A pure transform: each record's `resourceType` is fuzzy-matched against the DataCite
-/// vocabulary and a corrected `resourceTypeGeneral` is emitted as an enrichment.
+/// The method compares each record's free-text `resourceType` value with the
+/// configured DataCite resource type vocabulary. When the accepted match differs
+/// from the current `resourceTypeGeneral`, it emits an updated `types` object as
+/// an enrichment.
 pub struct ResourceTypeGeneral {
     matcher: Matcher,
     scope: Scope,
 }
 
 impl ResourceTypeGeneral {
-    /// Build the method from its configuration, loading and validating the rules YAML.
+    /// Builds the reclassification method from its configuration.
+    ///
+    /// This loads and validates the rules YAML, then constructs the matcher and
+    /// scope used by the method.
     ///
     /// # Errors
+    ///
     /// Returns an error if the rules file cannot be read, parsed, or validated.
     pub fn try_new(config: Config) -> Result<Self> {
         let rules = config::load_rules(config.rules)?;
@@ -152,7 +168,9 @@ mod tests {
                 normalized: vec!["text".into(), "txt".into()],
                 matches: vec!["Text".into(), "Other".into()],
             }],
-            scope: config::ScopeConfig { target_resource_type_general: scope_targets },
+            scope: config::ScopeConfig {
+                target_resource_type_general: scope_targets,
+            },
         };
         let matcher = Matcher::from_config(&rules);
         let scope = Scope::from_config(&rules.scope);
@@ -165,6 +183,8 @@ mod tests {
 
     #[test]
     fn extract_emits_on_match() {
+        // Tests that a record is updated when `resourceType` matches a
+        // different DataCite resource type.
         let m = test_method(scope_text_other_null());
         let rec = json!({"id": "10.5281/x", "attributes": {
             "types": {"resourceType": "Journal article", "resourceTypeGeneral": "Text"}}});
@@ -173,7 +193,10 @@ mod tests {
                 assert_eq!(items.len(), 1);
                 assert_eq!(items[0].doi, "10.5281/x");
                 assert_eq!(items[0].action, EnrichmentAction::Update);
-                assert_eq!(items[0].enriched["resourceTypeGeneral"], json!("JournalArticle"));
+                assert_eq!(
+                    items[0].enriched["resourceTypeGeneral"],
+                    json!("JournalArticle")
+                );
                 // The original `types` is preserved untouched.
                 assert_eq!(items[0].original["resourceTypeGeneral"], json!("Text"));
             }
@@ -183,6 +206,8 @@ mod tests {
 
     #[test]
     fn extract_skips_out_of_scope() {
+        // Tests that records outside the configured `resourceTypeGeneral` scope are
+        // not reclassified.
         let m = test_method(scope_text_other_null());
         let rec = json!({"id": "10.5281/x", "attributes": {
             "types": {"resourceType": "Dataset", "resourceTypeGeneral": "Image"}}});
@@ -191,6 +216,7 @@ mod tests {
 
     #[test]
     fn extract_skips_redundant() {
+        // Tests that values covered by a redundancy rule are not reclassified.
         let m = test_method(scope_text_other_null());
         let rec = json!({"id": "10.5281/x", "attributes": {
             "types": {"resourceType": "Text", "resourceTypeGeneral": "Text"}}});
@@ -199,6 +225,8 @@ mod tests {
 
     #[test]
     fn extract_skips_no_match() {
+        // Tests that records are skipped when `resourceType` has no accepted
+        // vocabulary match.
         let m = test_method(scope_text_other_null());
         let rec = json!({"id": "10.5281/x", "attributes": {
             "types": {"resourceType": "Completely unrelated string", "resourceTypeGeneral": "Other"}}});
@@ -207,6 +235,8 @@ mod tests {
 
     #[test]
     fn extract_handles_null_rtg() {
+        // Tests that a missing `resourceTypeGeneral` can be filled when null is in
+        // the configured scope.
         let m = test_method(scope_text_other_null());
         let rec = json!({"id": "10.5281/x", "attributes": {
             "types": {"resourceType": "Dataset"}}});
@@ -220,6 +250,8 @@ mod tests {
 
     #[test]
     fn extract_skips_no_change() {
+        // Tests that no enrichment is emitted when the matched value is already the
+        // current `resourceTypeGeneral`.
         let m = test_method(vec![Some("Dataset".into())]);
         let rec = json!({"id": "10.5281/x", "attributes": {
             "types": {"resourceType": "Dataset", "resourceTypeGeneral": "Dataset"}}});
@@ -228,13 +260,19 @@ mod tests {
 
     #[test]
     fn extract_skips_malformed_types() {
+        // Tests that records without a usable DataCite `types` object are skipped.
         let m = test_method(scope_text_other_null());
         let rec = json!({"id": "10.5281/x", "attributes": {}});
-        assert!(matches!(m.extract(&rec), Extracted::Skip("malformed_types")));
+        assert!(matches!(
+            m.extract(&rec),
+            Extracted::Skip("malformed_types")
+        ));
     }
 
     #[test]
     fn extract_skips_no_doi() {
+        // Tests that a record is skipped when an enrichment cannot be associated
+        // with a DOI.
         let m = test_method(scope_text_other_null());
         let rec = json!({"attributes": {
             "types": {"resourceType": "Journal article", "resourceTypeGeneral": "Text"}}});

@@ -5,6 +5,14 @@ fn cli() -> Command {
     Command::cargo_bin("comet-enrich").unwrap()
 }
 
+/// Path to a committed provenance file used by CLI integration tests.
+fn provenance(method: &str) -> String {
+    format!(
+        "{}/../../configs/provenance/{method}.yaml",
+        env!("CARGO_MANIFEST_DIR")
+    )
+}
+
 #[test]
 fn help_lists_every_method() {
     cli()
@@ -26,20 +34,22 @@ fn a_stage_has_its_own_help() {
 
 #[test]
 fn lookup_methods_report_unimplemented() {
-    // The lookup methods are still stubs; resource-type-general is wired (see below).
+    // Temporary test: lookup methods should parse successfully before failing in their constructors.
+    // Replace this once affiliations and funders are implemented.
     let cases: [(&str, &[&str]); 2] = [
-        ("affiliations", &["--ror-data", "ror.json"]),
-        ("funders", &["--ror-data", "ror.json"]),
+        ("affiliations", &["--ror-file", "ror.json"]),
+        ("funders", &["--ror-file", "ror.json"]),
     ];
     for (method, extra) in cases {
+        let prov = provenance(method);
         let mut args = vec![
             method,
             "-i",
             "in",
             "-o",
             "out.jsonl",
-            "--enrichment",
-            "e.yaml",
+            "--provenance",
+            prov.as_str(),
         ];
         args.extend_from_slice(extra);
         cli()
@@ -54,8 +64,7 @@ fn lookup_methods_report_unimplemented() {
 
 #[test]
 fn resource_type_general_is_wired() {
-    // No longer a stub: it loads the rules file, so a missing path fails while reading it
-    // rather than reporting "not yet implemented".
+    // `resource-type-general` should load its rules file, not fail as an unimplemented stub.
     cli()
         .args([
             "resource-type-general",
@@ -63,8 +72,8 @@ fn resource_type_general_is_wired() {
             "in",
             "-o",
             "out.jsonl",
-            "--enrichment",
-            "e.yaml",
+            "--provenance",
+            provenance("resource_type_general").as_str(),
             "--rules",
             "r.yaml",
         ])
@@ -72,6 +81,27 @@ fn resource_type_general_is_wired() {
         .failure()
         .stderr(predicate::str::contains("reading r.yaml"))
         .stderr(predicate::str::contains("not yet implemented").not());
+}
+
+#[test]
+fn provenance_is_validated_before_the_method() {
+    // Provenance errors should be reported before method-specific files are read.
+    cli()
+        .args([
+            "resource-type-general",
+            "-i",
+            "in",
+            "-o",
+            "out.jsonl",
+            "--provenance",
+            "nope.yaml",
+            "--rules",
+            "r.yaml",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("nope.yaml"))
+        .stderr(predicate::str::contains("reading r.yaml").not());
 }
 
 #[test]

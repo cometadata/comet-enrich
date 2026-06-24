@@ -1,4 +1,4 @@
-//! Streaming JSONL writer that validates each record at the write boundary.
+//! JSONL writer for enrichment records.
 
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -13,9 +13,12 @@ pub struct JsonlWriter {
 }
 
 impl JsonlWriter {
-    /// Create a writer at `path`, optionally validating every record against `validator`.
+    /// Create a JSONL writer.
+    ///
+    /// Records are validated before writing when `validator` is provided.
     ///
     /// # Errors
+    ///
     /// Returns an error if the output file cannot be created.
     pub fn create<P: AsRef<Path>>(
         path: P,
@@ -30,12 +33,11 @@ impl JsonlWriter {
         })
     }
 
-    /// Validate (if configured) then write each record in `batch` as one JSONL line, in a single
-    /// pass. On a schema violation the records earlier in the batch have already been written;
-    /// the error is returned for the caller to handle.
+    /// Write records as JSONL, validating each one first if configured.
     ///
     /// # Errors
-    /// Returns an error on schema violation or underlying write failure.
+    ///
+    /// Returns an error if validation fails or a record cannot be written.
     pub fn write_batch(&mut self, batch: &[Value]) -> Result<()> {
         for rec in batch {
             if let Some(v) = &self.validator {
@@ -51,9 +53,10 @@ impl JsonlWriter {
         Ok(())
     }
 
-    /// Flush buffered output to disk.
+    /// Flush buffered output.
     ///
     /// # Errors
+    ///
     /// Returns an error if the underlying flush fails.
     pub fn flush(&mut self) -> Result<()> {
         self.inner.flush()?;

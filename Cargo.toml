@@ -12,7 +12,7 @@ members = [
 edition = "2024"
 version = "0.1.0"
 license = "MIT"
-repository = "https://github.com/cometadata/comet-enrichments"
+repository = "https://github.com/cometadata/comet-enrich"
 rust-version = "1.85"
 
 [workspace.lints.rust]

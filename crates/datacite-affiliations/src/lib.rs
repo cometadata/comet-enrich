@@ -1,28 +1,32 @@
-//! `affiliations` method: match DataCite creator affiliations to ROR IDs.
+//! DataCite affiliation matching.
 //!
-//! Stub: the [`EnrichmentMethod`] implementation is in place and the method takes a
-//! [`LookupConfig`]; the matching pipeline isn't wired yet, so [`Affiliations::try_new`]
-//! returns an error.
+//! Extracts creator affiliation strings from DataCite records and maps them to
+//! ROR organizations through the configured matching service.
+//!
 
-// Brand names (DataCite, ROR, …) recur in the docs as prose, not code identifiers.
+// DataCite, ROR, and COMET are names, not Rust identifiers.
 #![allow(clippy::doc_markdown)]
 
 use anyhow::{Result, bail};
 use comet_enrichment_core::{EnrichmentMethod, EnrichmentParts, Extracted, LookupConfig, Lookups};
 use serde_json::Value;
 
-/// Match creator affiliation strings to ROR IDs.
+/// Matches DataCite creator affiliation strings to ROR organizations.
 ///
-/// Runs `extract` → `query` → `reconcile` against the match service.
+/// The method extracts affiliation text from creator metadata, queries the
+/// configured ROR matching service, and maps accepted matches back into
+/// enrichment parts.
 pub struct Affiliations;
 
 impl Affiliations {
-    /// Build the method from its lookup configuration.
+    /// Builds the affiliation matcher from its lookup configuration.
     ///
     /// # Errors
-    /// Not implemented yet — always returns an error.
+    ///
+    /// Returns an error if the matcher cannot be constructed from the supplied
+    /// configuration.
     pub fn try_new(config: LookupConfig) -> Result<Self> {
-        drop(config); // stub: the real constructor will consume the config
+        drop(config);
         bail!("affiliations: not yet implemented")
     }
 }

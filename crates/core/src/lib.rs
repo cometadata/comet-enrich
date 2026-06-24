@@ -1,11 +1,11 @@
-//! Shared core for the COMET enrichment methods.
+//! Common code for COMET enrichment methods.
 //!
-//! Each method reads a directory of `*.jsonl.gz` DataCite shards, builds enrichment records,
-//! and writes them as JSONL. The shared read -> build -> validate -> write pipeline lives
-//! here; a method supplies only its own per-record logic by implementing [`EnrichmentMethod`].
+//! This crate provides the common code for reading DataCite *.jsonl.gz files,
+//! building enrichment records, validating them, and writing JSONL output.
+//! Individual enrichment crates provide the method-specific logic by implementing
+//! [EnrichmentMethod].
 
-// Brand and format names (DataCite, COMET, JSONL, xxh3, …) recur throughout the docs as
-// prose, not code identifiers.
+// DataCite, COMET, JSONL, and xxh3 are names, not Rust identifiers.
 #![allow(clippy::doc_markdown)]
 
 pub mod datacite_enums;
@@ -17,7 +17,7 @@ pub mod staged;
 pub mod writer;
 
 pub use method::{EnrichmentAction, EnrichmentMethod, EnrichmentParts, Extracted, Lookups};
-pub use provenance::{EnrichmentTemplate, build_enrichment_record};
+pub use provenance::{EnrichmentTemplate, build_enrichment_record, load_template};
 pub use reader::{RunOptions, RunStats, run};
 pub use schema::SCHEMA;
 pub use staged::{LookupConfig, Stage, WorkDir, stages_to_run};

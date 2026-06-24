@@ -1,9 +1,8 @@
-//! Staged execution for lookup methods (extract → query → reconcile).
+//! Stage planning for lookup methods.
 //!
-//! Lookup methods are too expensive to redo from scratch during local debugging, so each
-//! stage drops a marker in the work dir on success and a unified run skips the stages already
-//! marked complete. The stage bodies live with each method and aren't wired yet; the work-dir
-//! layout and resume planning live here.
+//! Lookup methods run as extract, query, and reconcile stages. Each completed
+//! stage writes a marker file in the work directory, allowing later runs to skip
+//! completed leading stages unless `from_scratch` is set.
 
 use std::path::{Path, PathBuf};
 
@@ -19,10 +18,10 @@ pub enum Stage {
 }
 
 impl Stage {
-    /// The stages in execution order.
+    /// Stages in execution order.
     pub const ALL: [Stage; 3] = [Stage::Extract, Stage::Query, Stage::Reconcile];
 
-    /// Name of the marker file written when this stage completes.
+    /// Marker file written when this stage completes.
     #[must_use]
     pub fn marker(self) -> &'static str {
         match self {
@@ -33,28 +32,25 @@ impl Stage {
     }
 }
 
-/// Connection and batching configuration for a lookup method's match-service calls.
-///
-/// Built by the CLI from its lookup flags and handed to a lookup method's constructor. The
-/// match pipeline that consumes it is not wired yet.
+/// Match-service configuration for a lookup method.
 pub struct LookupConfig {
-    /// Base URL of the match service (Marple).
-    pub match_url: String,
-    /// ROR data dump (JSON) used to reconcile matches.
-    pub ror_data: PathBuf,
-    /// Directory for intermediate stage artifacts; a temporary one is used if omitted.
+    /// Base URL of the ROR match service.
+    pub ror_service_url: String,
+    /// ROR registry dataset used to reconcile matched IDs.
+    pub ror_file: PathBuf,
+    /// Directory for stage outputs and completion markers.
     pub work_dir: Option<PathBuf>,
-    /// Inputs per match-service bulk request.
+    /// Inputs per match-service request.
     pub ror_batch_size: usize,
-    /// Concurrent in-flight match requests.
-    pub concurrency: usize,
-    /// Match-service request timeout (seconds).
-    pub timeout: u64,
-    /// Ignore any existing work-dir artifacts and run every stage from scratch.
-    pub restart: bool,
+    /// Concurrent match-service requests.
+    pub ror_concurrency: usize,
+    /// Match-service request timeout in seconds.
+    pub ror_timeout: u64,
+    /// Ignore existing stage outputs and rerun from the start.
+    pub from_scratch: bool,
 }
 
-/// A directory holding a lookup run's intermediate artifacts and stage markers.
+/// Work directory for a staged lookup run.
 pub struct WorkDir {
     pub path: PathBuf,
 }
@@ -70,19 +66,20 @@ impl WorkDir {
         self.path.join(stage.marker())
     }
 
-    /// Whether `stage`'s marker is present.
+    /// Return whether the stage marker exists.
     #[must_use]
     pub fn is_complete(&self, stage: Stage) -> bool {
         self.marker_path(stage).exists()
     }
 }
 
-/// The stages a unified run should execute: skip the already-complete leading stages unless
-/// `restart` is set. Once a stage runs, every later stage runs too (a re-run of an earlier
-/// stage invalidates the ones after it).
+/// Return the stages that should run.
+///
+/// Completed leading stages are skipped. Once a stage needs to run, all later
+/// stages run too, because rerunning an earlier stage invalidates later outputs.
 #[must_use]
-pub fn stages_to_run(work_dir: &Path, restart: bool) -> Vec<Stage> {
-    if restart {
+pub fn stages_to_run(work_dir: &Path, from_scratch: bool) -> Vec<Stage> {
+    if from_scratch {
         return Stage::ALL.to_vec();
     }
     let wd = WorkDir::new(work_dir);

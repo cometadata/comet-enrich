@@ -1,12 +1,11 @@
-//! Reads the `*.jsonl.gz` shards in parallel and runs a method over every record.
+//! Reads DataCite JSONL input files and runs enrichment methods over them.
 //!
-//! [`run`] globs the shards and processes them across a rayon pool. Each worker parses
-//! records and sends batches of emitted enrichment records through a bounded channel to a
-//! single writer thread, which validates each record before writing. Counts land in
-//! [`RunStats`]; the method supplies only the per-record logic.
+//! [`run`] finds `*.jsonl.gz` files under the input directory, processes them in
+//! parallel, and sends emitted enrichment records to a single writer. Records are
+//! validated at the write boundary when a schema validator is provided.
 
 use crate::method::{EnrichmentMethod, Extracted, Lookups};
-use crate::provenance::{self, EnrichmentTemplate, build_enrichment_record};
+use crate::provenance::{EnrichmentTemplate, build_enrichment_record};
 use crate::writer::JsonlWriter;
 
 use anyhow::Result;
@@ -23,22 +22,19 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-/// Inputs to a single enrichment run.
+/// Options for one enrichment run.
 pub struct RunOptions {
-    /// Directory globbed for `**/*.jsonl.gz` data shards.
+    /// Directory searched recursively for `*.jsonl.gz` files.
     pub input: PathBuf,
     /// Output JSONL file.
     pub output: PathBuf,
-    /// Provenance YAML, loaded into the [`EnrichmentTemplate`].
-    pub enrichment: PathBuf,
-    /// Worker threads; `0` means `num_cpus`.
+    /// Worker threads. Use `0` for all available CPUs.
     pub threads: usize,
-    /// Emitted records per batch handed to the writer.
+    /// Emitted records per writer batch.
     pub batch_size: usize,
 }
 
-/// Aggregated counters for a run. `skipped` is the per-reason histogram that replaces the
-/// method-specific stats fields of the original tool.
+/// Counters returned after an enrichment run.
 #[derive(Debug, Default)]
 pub struct RunStats {
     pub files_processed: u64,
@@ -57,22 +53,24 @@ struct Counters {
     files_failed: AtomicU64,
 }
 
-/// Run `method` over every shard under `opts.input`, writing enrichment records to
-/// `opts.output`. Every emitted record is validated at the write boundary iff `validator`
-/// is `Some`.
+/// Run an enrichment method over all input files.
+///
+/// The provenance template is supplied by the caller and cloned into each emitted
+/// record. If `validator` is set, each record is validated immediately before it
+/// is written.
 ///
 /// # Errors
-/// Returns an error if the provenance config fails to load, the output file cannot be
-/// created, or the rayon pool cannot be built. Per-file read failures are counted in
-/// [`RunStats::files_failed`] rather than aborting the run.
+///
+/// Returns an error if input files cannot be discovered, the output file cannot
+/// be created, the progress bar template is invalid, or the rayon pool cannot be
+/// built. Individual file read failures are counted in [`RunStats::files_failed`]
+/// and do not stop the run.
 pub fn run<M: EnrichmentMethod>(
     method: &M,
     opts: &RunOptions,
+    template: &EnrichmentTemplate,
     validator: Option<jsonschema::JSONSchema>,
 ) -> Result<RunStats> {
-    let cfg = provenance::load_enrichment(&opts.enrichment)?;
-    let template = EnrichmentTemplate::from_config(&cfg);
-
     let n_threads = if opts.threads == 0 {
         num_cpus::get()
     } else {
@@ -141,7 +139,7 @@ pub fn run<M: EnrichmentMethod>(
                 tx_w,
                 opts.batch_size,
                 method,
-                &template,
+                template,
                 &counters,
                 &skipped,
             ) {
@@ -181,8 +179,7 @@ fn process_file<M: EnrichmentMethod>(
     let mut batch: Vec<Value> = Vec::with_capacity(batch_size);
     let mut local_skips: BTreeMap<&'static str, u64> = BTreeMap::new();
 
-    // The transform path performs no lookups; this stays empty until the dedup store and
-    // resumable HTTP client that back `EnrichmentMethod::lookup` are wired in.
+    // This runner handles the transform path, so there are no external lookups.
     let lookups: Lookups<M::Lookup> = HashMap::new();
 
     for line in reader.lines() {

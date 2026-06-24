@@ -4,25 +4,29 @@
 //! [`LookupConfig`]; the matching pipeline isn't wired yet, so [`Funders::try_new`]
 //! returns an error.
 
-// Brand names (DataCite, ROR, …) recur in the docs as prose, not code identifiers.
+// DataCite, ROR, and COMET are names, not Rust identifiers.
 #![allow(clippy::doc_markdown)]
 
 use anyhow::{Result, bail};
 use comet_enrichment_core::{EnrichmentMethod, EnrichmentParts, Extracted, LookupConfig, Lookups};
 use serde_json::Value;
 
-/// Match funder names to ROR IDs.
+/// Matches DataCite funder names to ROR organizations.
 ///
-/// Runs `extract` → `query` → `reconcile` against the match service.
+/// The method extracts funder names from DataCite funding references, queries
+/// the configured ROR matching service, and maps accepted matches back into
+/// enrichment parts.
 pub struct Funders;
 
 impl Funders {
-    /// Build the method from its lookup configuration.
+    /// Builds the funder matcher from its lookup configuration.
     ///
     /// # Errors
-    /// Not implemented yet — always returns an error.
+    ///
+    /// Returns an error if the matcher cannot be constructed from the supplied
+    /// configuration.
     pub fn try_new(config: LookupConfig) -> Result<Self> {
-        drop(config); // stub: the real constructor will consume the config
+        drop(config);
         bail!("funders: not yet implemented")
     }
 }

@@ -1,10 +1,12 @@
-//! The reclassification rules (`reclassification_rules.yaml`): the fuzzy-match threshold, the
-//! reference vocabulary, the typo corrections, the redundancy exclusions, and the scope of
-//! `resourceTypeGeneral` values the method is allowed to overwrite.
+//! Rules for reclassifying DataCite `types.resourceTypeGeneral` values.
 //!
-//! Reference values, redundancy matches, and scope entries are validated against the
-//! schema-derived [`RESOURCE_TYPE_GENERAL`](comet_enrichment_core::datacite_enums::RESOURCE_TYPE_GENERAL)
-//! vocabulary in `core`, so the rules can never name a type the output schema would reject.
+//! The rules file controls the fuzzy-match threshold, the reference vocabulary,
+//! typo corrections, redundancy exclusions, and the set of existing
+//! `resourceTypeGeneral` values that may be overwritten.
+//!
+//! Reference values, redundancy matches, and scope entries are checked against
+//! [`RESOURCE_TYPE_GENERAL`](comet_enrichment_core::datacite_enums::RESOURCE_TYPE_GENERAL)
+//! from `core`, so invalid DataCite type names are rejected when the rules are loaded.
 
 use anyhow::{Context, Result, bail};
 use comet_enrichment_core::datacite_enums;
@@ -40,10 +42,12 @@ where
     Vec::<Option<String>>::deserialize(d)
 }
 
-/// Load and validate the reclassification rules YAML at `path`.
+/// Load the reclassification rules from a YAML file.
 ///
 /// # Errors
-/// Returns an error if the file cannot be read, parsed, or fails validation.
+///
+/// Returns an error if the file cannot be read, cannot be parsed as YAML, or
+/// contains values that are not valid for this method.
 pub fn load_rules<P: AsRef<Path>>(path: P) -> Result<RulesConfig> {
     let text = std::fs::read_to_string(path.as_ref())
         .with_context(|| format!("reading {}", path.as_ref().display()))?;
@@ -83,6 +87,8 @@ mod tests {
 
     #[test]
     fn load_rules_parses_sample_yaml() {
+        // Checks that a normal rules file parses into the expected Rust structs,
+        // including nullable scope entries.
         let yaml = r"
 threshold: 0.85
 reference_values:
@@ -104,7 +110,10 @@ scope:
         let cfg: RulesConfig = serde_yaml::from_str(yaml).unwrap();
         assert!((cfg.threshold - 0.85).abs() < f64::EPSILON);
         assert_eq!(cfg.reference_values.len(), 3);
-        assert_eq!(cfg.typo_corrections.get("otput"), Some(&"output".to_string()));
+        assert_eq!(
+            cfg.typo_corrections.get("otput"),
+            Some(&"output".to_string())
+        );
         assert_eq!(cfg.redundancy_exclusions.len(), 1);
         assert_eq!(
             cfg.scope.target_resource_type_general,
@@ -115,6 +124,8 @@ scope:
 
     #[test]
     fn validate_rules_rejects_unknown_reference_value() {
+        // Checks that reference values must come from the DataCite
+        // resourceTypeGeneral vocabulary.
         let yaml = r"
 threshold: 0.85
 reference_values: [Dataset, FakeType]
@@ -130,6 +141,8 @@ scope:
 
     #[test]
     fn validate_rules_rejects_bad_threshold() {
+        // Checks that the fuzzy-match threshold must be between 0 and 1,
+        // inclusive.
         let yaml = r"
 threshold: 1.5
 reference_values: [Dataset]

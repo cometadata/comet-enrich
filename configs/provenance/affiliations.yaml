@@ -1,0 +1,15 @@
+contributors:
+  - name: "COMET"
+    nameType: "Organizational"
+    contributorType: "Producer"
+
+resources:
+  # TODO: replace with the affiliations enrichment project documentation DOI
+  - relatedIdentifier: "10.82461/xxxx-xxxx"
+    relatedIdentifierType: "DOI"
+    relationType: "IsDocumentedBy"
+    resourceTypeGeneral: "Project"
+  - relatedIdentifier: "https://huggingface.co/datasets/cometadata/datacite-affiliations-matched-ror-ids-datacite-enrichment-format"
+    relatedIdentifierType: "URL"
+    relationType: "IsDerivedFrom"
+    resourceTypeGeneral: "Dataset"

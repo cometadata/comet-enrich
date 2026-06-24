@@ -1,8 +1,4 @@
-//! End-to-end exercise of the transform path through `core::run`.
-//!
-//! The only in-repo test of the full `EnrichmentMethod` pipeline: a small pure-transform
-//! mock method runs over a gzipped JSONL shard, and we assert on the emitted records (also
-//! schema-validated at the writer boundary) and the resulting `RunStats`.
+//! End-to-end test for running an enrichment method through `core::run`.
 
 use comet_enrichment_core::{
     EnrichmentAction, EnrichmentMethod, EnrichmentParts, Extracted, Lookups, RunOptions, run,
@@ -14,13 +10,13 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 
-/// Authoritative schema copy at the workspace root, relative to this crate.
+/// Schema file used to validate records written by the test.
 const SCHEMA_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../schema/enrichment_input_schema.json"
+    "/../../configs/schema/enrichment_input_schema.json"
 );
 
-/// Pure-transform method: rewrites every record's `resourceTypeGeneral` to `"Dataset"`.
+/// Test method that rewrites `resourceTypeGeneral` to `"Dataset"`.
 struct DatasetTagger;
 
 impl EnrichmentMethod for DatasetTagger {
@@ -67,25 +63,28 @@ impl EnrichmentMethod for DatasetTagger {
 }
 
 const ENRICHMENT_YAML: &str = r#"
-enrichment:
-  sources:
-    - name: COMET
-      nameType: Organizational
-      contributorType: Producer
-  resources:
-    - relatedIdentifier: "10.82461/bpzr-jd55"
-      relatedIdentifierType: DOI
-      relationType: IsDocumentedBy
-      resourceTypeGeneral: Project
+contributors:
+  - name: COMET
+    nameType: Organizational
+    contributorType: Producer
+resources:
+  - relatedIdentifier: "10.82461/bpzr-jd55"
+    relatedIdentifierType: DOI
+    relationType: IsDocumentedBy
+    resourceTypeGeneral: Project
+  - relatedIdentifier: "https://huggingface.co/datasets/cometadata/example"
+    relatedIdentifierType: URL
+    relationType: IsDerivedFrom
+    resourceTypeGeneral: Dataset
 "#;
 
 #[test]
-fn run_drives_transform_path_end_to_end() {
+fn run_drives_transform_end_to_end() {
     let dir = tempfile::tempdir().unwrap();
 
-    // Input shard, nested like the real data layout, gzip-compressed.
-    let shard_dir = dir.path().join("input/updated_2024-01");
-    fs::create_dir_all(&shard_dir).unwrap();
+    // Match the nested layout used by DataCite snapshots.
+    let input_dir = dir.path().join("input/updated_2024-01");
+    fs::create_dir_all(&input_dir).unwrap();
     let lines = [
         r#"{"id":"10.1/a","attributes":{"types":{"resourceType":"Journal article","resourceTypeGeneral":"Text"}}}"#,
         r#"{"id":"10.1/b","attributes":{"types":{"resourceType":"Spreadsheet"}}}"#,
@@ -93,27 +92,27 @@ fn run_drives_transform_path_end_to_end() {
         "",                                             // blank line: ignored, not malformed
         "{not valid json",                              // malformed
     ];
-    let shard = shard_dir.join("part_0000.jsonl.gz");
-    let f = fs::File::create(&shard).unwrap();
+    let file = input_dir.join("part_0000.jsonl.gz");
+    let f = fs::File::create(&file).unwrap();
     let mut enc = GzEncoder::new(f, Compression::default());
     enc.write_all(lines.join("\n").as_bytes()).unwrap();
     enc.finish().unwrap();
 
-    let enrichment = dir.path().join("enrichment.yaml");
-    fs::write(&enrichment, ENRICHMENT_YAML).unwrap();
+    let provenance = dir.path().join("enrichment.yaml");
+    fs::write(&provenance, ENRICHMENT_YAML).unwrap();
+    let template = comet_enrichment_core::load_template(&provenance).unwrap();
     let output = dir.path().join("out.jsonl");
 
     let opts = RunOptions {
         input: dir.path().join("input"),
         output: output.clone(),
-        enrichment,
         threads: 1,
         batch_size: 5000,
     };
 
-    // Exercise the schema validator at the write boundary.
+    // Validate records using the same schema check as a normal run.
     let validator = comet_enrichment_core::schema::compile(Path::new(SCHEMA_PATH)).unwrap();
-    let stats = run(&DatasetTagger, &opts, Some(validator)).unwrap();
+    let stats = run(&DatasetTagger, &opts, &template, Some(validator)).unwrap();
 
     assert_eq!(stats.files_processed, 1);
     assert_eq!(stats.files_failed, 0);

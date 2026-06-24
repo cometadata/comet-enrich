@@ -1,12 +1,11 @@
-//! End-to-end exercise of the resource-type reclassifier through `core::run`.
+//! End-to-end tests for the DataCite `resourceTypeGeneral` reclassifier.
 //!
-//! Drives the real [`ResourceTypeGeneral`] method, the ported `reclassification_rules.yaml`,
-//! and `enrichment_metadata.yaml` over the same dataset the source tool's golden e2e fixture
-//! used (12 DataCite records → 9 emitted). The records are inlined and gzipped at test time,
-//! so there is no committed binary fixture; the per-record expectations reproduce the source
-//! `golden.jsonl`. Emitted records are schema-validated at the writer boundary.
+//! These tests run the real [`ResourceTypeGeneral`] method through `core::run`,
+//! using the project rules, provenance template, and output schema. The input
+//! records are inlined and gzipped during the test so the fixture stays readable
+//! without committing a binary data file.
 
-// Brand names (DataCite, …) recur in the docs as prose, not code identifiers.
+// Brand names such as DataCite are prose, not Rust identifiers.
 #![allow(clippy::doc_markdown)]
 
 use comet_enrich_datacite_resource_type_general::{Config, ResourceTypeGeneral};
@@ -19,15 +18,22 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-/// Ported configs and schema, relative to this crate.
-const RULES_PATH: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/../../configs/reclassification_rules.yaml");
-const ENRICHMENT_PATH: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/../../configs/enrichment_metadata.yaml");
-const SCHEMA_PATH: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/../../schema/enrichment_input_schema.json");
+/// Method rules, provenance template, and schema used by the real pipeline.
+const RULES_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../configs/reclassification_rules.yaml"
+);
+const ENRICHMENT_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../configs/provenance/resource_type_general.yaml"
+);
+const SCHEMA_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../configs/schema/enrichment_input_schema.json"
+);
 
-/// The source repo's `tests/fixtures/e2e/input` records, verbatim.
+/// Representative DataCite records covering matches, skips, typo correction,
+/// camelCase handling, and compact/space-separated type names.
 const INPUT_RECORDS: &[&str] = &[
     r#"{"id":"10.x/1","attributes":{"types":{"resourceType":"Journal article","resourceTypeGeneral":"Text","bibtex":"article","schemaOrg":"ScholarlyArticle"}}}"#,
     r#"{"id":"10.x/2","attributes":{"types":{"resourceType":"Dataset","resourceTypeGeneral":"Other","ris":"DATA"}}}"#,
@@ -43,8 +49,10 @@ const INPUT_RECORDS: &[&str] = &[
     r#"{"id":"10.x/12","attributes":{"types":{"resourceType":"ConferencePaper","resourceTypeGeneral":"Text"}}}"#,
 ];
 
-/// `(doi, enriched resourceTypeGeneral)` for the 9 records the source `golden.jsonl` emits.
-/// Records 4 (out-of-scope), 5 (redundant), and 6 (no-match) are skipped.
+/// Expected `(doi, resourceTypeGeneral)` updates.
+///
+/// Records 4, 5, and 6 are intentionally skipped: one is out of scope, one is
+/// redundant, and one has no match.
 const EXPECTED_EMITTED: &[(&str, &str)] = &[
     ("10.x/1", "JournalArticle"),
     ("10.x/2", "Dataset"),
@@ -59,13 +67,15 @@ const EXPECTED_EMITTED: &[(&str, &str)] = &[
 
 #[test]
 fn reclassifier_matches_golden_outcomes() {
+    // Checks the full run path: read gzipped input, apply the real method,
+    // validate writer output against the schema, and verify emitted updates and
+    // skip counts.
     let dir = tempfile::tempdir().unwrap();
 
-    // Input shard, nested like the real data layout, gzip-compressed.
-    let shard_dir = dir.path().join("input/updated_2024-01");
-    fs::create_dir_all(&shard_dir).unwrap();
-    let shard = shard_dir.join("part_0000.jsonl.gz");
-    let f = fs::File::create(&shard).unwrap();
+    let input_dir = dir.path().join("input/updated_2024-01");
+    fs::create_dir_all(&input_dir).unwrap();
+    let file = input_dir.join("part_0000.jsonl.gz");
+    let f = fs::File::create(&file).unwrap();
     let mut enc = GzEncoder::new(f, Compression::default());
     enc.write_all(INPUT_RECORDS.join("\n").as_bytes()).unwrap();
     enc.finish().unwrap();
@@ -74,14 +84,17 @@ fn reclassifier_matches_golden_outcomes() {
     let opts = RunOptions {
         input: dir.path().join("input"),
         output: output.clone(),
-        enrichment: PathBuf::from(ENRICHMENT_PATH),
         threads: 1,
         batch_size: 5000,
     };
 
-    let method = ResourceTypeGeneral::try_new(Config { rules: PathBuf::from(RULES_PATH) }).unwrap();
+    let template = comet_enrichment_core::load_template(ENRICHMENT_PATH).unwrap();
+    let method = ResourceTypeGeneral::try_new(Config {
+        rules: PathBuf::from(RULES_PATH),
+    })
+    .unwrap();
     let validator = comet_enrichment_core::schema::compile(Path::new(SCHEMA_PATH)).unwrap();
-    let stats = run(&method, &opts, Some(validator)).unwrap();
+    let stats = run(&method, &opts, &template, Some(validator)).unwrap();
 
     assert_eq!(stats.files_processed, 1);
     assert_eq!(stats.files_failed, 0);
@@ -93,7 +106,10 @@ fn reclassifier_matches_golden_outcomes() {
     assert_eq!(stats.skipped.get("no_match"), Some(&1));
 
     let body = fs::read_to_string(&output).unwrap();
-    let recs: Vec<Value> = body.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+    let recs: Vec<Value> = body
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
     assert_eq!(recs.len(), 9);
 
     let mut emitted: HashMap<String, String> = HashMap::new();
@@ -101,12 +117,19 @@ fn reclassifier_matches_golden_outcomes() {
         assert_eq!(rec["field"], json!("types"));
         assert_eq!(rec["action"], json!("update"));
         let doi = rec["doi"].as_str().unwrap().to_string();
-        let rtg = rec["enrichedValue"]["resourceTypeGeneral"].as_str().unwrap().to_string();
+        let rtg = rec["enrichedValue"]["resourceTypeGeneral"]
+            .as_str()
+            .unwrap()
+            .to_string();
         emitted.insert(doi, rtg);
     }
 
     assert_eq!(emitted.len(), EXPECTED_EMITTED.len());
     for (doi, rtg) in EXPECTED_EMITTED {
-        assert_eq!(emitted.get(*doi).map(String::as_str), Some(*rtg), "doi {doi}");
+        assert_eq!(
+            emitted.get(*doi).map(String::as_str),
+            Some(*rtg),
+            "doi {doi}"
+        );
     }
 }
