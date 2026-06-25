@@ -28,16 +28,26 @@ Use the release binary for processing real data; it is faster.
 
 ### Target CPU
 
-`make build-release` sets `-C target-cpu` from `RUST_TARGET_CPU`. The default is `x86-64-v3`.
-Override it on the command line or in the environment:
+`make build-release` builds for the machine you are using by default.
+
+You can set `RUST_TARGET_CPU` when you want to tune the binary for a specific CPU:
 
 ```bash
-make build-release RUST_TARGET_CPU=native    # native means build for this machine's CPU
-RUST_TARGET_CPU=znver3 make build-release     # or set it in the environment
+make build-release RUST_TARGET_CPU=native      # this machine's exact CPU
+make build-release RUST_TARGET_CPU=x86-64-v3   # AVX2-class x86-64 baseline
+RUST_TARGET_CPU=znver3 make build-release      # or set it in the environment
 ```
 
-On non-x86-64 hosts, such as Apple silicon, use a value for your architecture, such as `native`
-or `apple-m4`.
+## Prebuilt binaries
+
+Tagged releases include prebuilt binaries on the
+[releases page](https://github.com/cometadata/comet-enrich/releases).
+
+Available builds:
+
+- Linux x86-64-v3: `comet-enrich-<tag>-x86_64-v3-unknown-linux-musl.tar.gz`
+- Linux arm64: `comet-enrich-<tag>-aarch64-unknown-linux-musl.tar.gz`
+- macOS Apple silicon: `comet-enrich-<tag>-aarch64-apple-darwin.tar.gz`
 
 ## Test
 
