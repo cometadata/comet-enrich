@@ -41,3 +41,12 @@ It currently provides three enrichment methods:
   - [resource-type-general](docs/commands/resource-type-general.md)
   - [affiliations](docs/commands/affiliations.md)
   - [funders](docs/commands/funders.md)
+
+## Acknowledgements
+
+This project includes code ported and adapted from the following COMET projects by
+[@adambuttrick](https://github.com/adambuttrick):
+
+- [`reclassify-resource-type-general`](https://github.com/cometadata/reclassify-resource-type-general)
+- [`match-datacite-affiliations-to-ror-ids`](https://github.com/cometadata/match-datacite-affiliations-to-ror-ids)
+- [`match-datacite-funders-to-ror-ids`](https://github.com/cometadata/match-datacite-funders-to-ror-ids)
