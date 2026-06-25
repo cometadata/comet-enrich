@@ -2,9 +2,10 @@
 
 SHELL=/bin/bash
 
-# Default CPU target for release build. Override on the command line or in the
-# environment, e.g. `make build-release RUST_TARGET_CPU=native`.
-RUST_TARGET_CPU ?= x86-64-v3
+# build-release builds for the current system by default. Set RUST_TARGET_CPU for a
+# micro architecture and RUST_TARGET to cross-compile. CI sets both per target.
+RUST_TARGET_CPU ?=
+RUST_TARGET ?=
 
 setup-rust:
 > rustup component add rustfmt clippy
@@ -37,7 +38,7 @@ build:
 > cargo build --workspace
 
 build-release:
-> RUSTFLAGS="-C target-cpu=$(RUST_TARGET_CPU)" cargo build --release --workspace
+> RUSTFLAGS="$(if $(RUST_TARGET_CPU),-C target-cpu=$(RUST_TARGET_CPU))" cargo build --release --workspace $(if $(RUST_TARGET),--target $(RUST_TARGET))
 
 clean:
 > cargo clean
