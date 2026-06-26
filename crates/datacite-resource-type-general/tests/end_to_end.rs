@@ -80,7 +80,7 @@ fn reclassifier_matches_golden_outcomes() {
     enc.write_all(INPUT_RECORDS.join("\n").as_bytes()).unwrap();
     enc.finish().unwrap();
 
-    let output = dir.path().join("out.jsonl");
+    let output = dir.path().join("out");
     let opts = RunOptions {
         input: dir.path().join("input"),
         output: output.clone(),
@@ -101,11 +101,12 @@ fn reclassifier_matches_golden_outcomes() {
     assert_eq!(stats.records_scanned, 12);
     assert_eq!(stats.lines_malformed, 0);
     assert_eq!(stats.emitted, 9);
+    assert_eq!(stats.schema_failures, 0);
     assert_eq!(stats.skipped.get("not_in_scope"), Some(&1));
     assert_eq!(stats.skipped.get("redundant"), Some(&1));
     assert_eq!(stats.skipped.get("no_match"), Some(&1));
 
-    let body = fs::read_to_string(&output).unwrap();
+    let body = fs::read_to_string(output.join(comet_enrichment_core::ENRICHMENTS_FILE)).unwrap();
     let recs: Vec<Value> = body
         .lines()
         .map(|l| serde_json::from_str(l).unwrap())

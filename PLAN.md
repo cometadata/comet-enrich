@@ -408,16 +408,17 @@ One stage at a time. Stages 1 to 6 are core work that lands before the first met
 stage is self-contained, testable against the already-working reclassifier where possible, and
 should not require reworking earlier stages.
 
-1. **Writer: divert schema failures.** Replace the `anyhow::bail!` on schema violation in
-   `crates/core/src/writer.rs` with diversion to `enrichments.failed.jsonl`, attaching the
-   validator error per record, and count failures. Validate against the reclassifier end-to-end
-   test. Features: 4a.4, 4b.2 (failure-diversion part). Decision: 8.5.
+1. **Writer: output directory + divert schema failures.** Make `--output` a directory: write the
+   main output to `<output>/enrichments.jsonl` and divert schema-validation failures to
+   `<output>/enrichments.failed.jsonl` (with the validator error per record) instead of aborting;
+   `RunStats` gains `schema_failures`. Remove `--work-dir` (the work area is fixed at
+   `<output>/.work`). Validate against the reclassifier end-to-end test. Flag the breaking
+   `--output` change for the `comet-data-infrastructure` DAG and the s5cmd exclude rule. Features:
+   4a.4, 4b.2 (failure-diversion part), 4b.3 (output-directory part). Decision: 8.5. Done.
 
-2. **Writer and layout: compressed parts and the run directory.** Change `--output` from a file to
-   a directory; write `enrichments/part_NNNN.jsonl.gz`, one part per input file written in
-   parallel. Establish the `<output>/.work` scratch location. Update the CLI and the reclassifier
-   end-to-end test. Flag the breaking CLI change for the `comet-data-infrastructure` DAG and the
-   s5cmd exclude rule. Features: 4b.2, 4b.3.
+2. **Writer: compressed split output.** Split `<output>/enrichments.jsonl` into
+   `<output>/enrichments/part_NNNN.jsonl.gz`, one part per input file written in parallel (removing
+   the single-writer bottleneck). Update the reclassifier end-to-end test. Features: 4b.2.
 
 3. **Core reporting: `report.json` and `manifest.json`.** Produce both in core. Validate on the
    reclassifier (transform path, no match block). Features: 4a.5, 4a.6, 4b.4. Decision: 8.4.

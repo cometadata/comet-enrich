@@ -12,9 +12,9 @@ The method runs as a three-stage pipeline:
    dataset, and emit enrichment records. This also uses Crossref Funder ID–to–ROR crosswalks from
    the registry data.
 
-Running `funders` without a stage runs the whole pipeline. Intermediate files are written to
-`--work-dir`. A later run resumes from completed stages in that directory unless `--from-scratch`
-is given.
+Running `funders` without a stage runs the whole pipeline. Intermediate files are written to a
+`.work` directory inside `--output`. A later run resumes from completed stages there unless
+`--from-scratch` is given.
 
 ## Prerequisites
 
@@ -27,7 +27,7 @@ is given.
 
 ```text
 comet-enrich funders \
-  --input <DIR> --output <FILE> \
+  --input <DIR> --output <DIR> \
   --provenance <FILE> --ror-file <FILE> \
   [OPTIONS] [extract|query|reconcile]
 ```
@@ -43,8 +43,7 @@ In addition to the [global options](../usage.md#global-options):
 | `--ror-batch-size <N>`    | `50`                    | Inputs per ROR match-service bulk request                                                  |
 | `--ror-concurrency <N>`   | `50`                    | Concurrent ROR match-service requests                                                      |
 | `--ror-timeout <SECS>`    | `30`                    | ROR match-service request timeout in seconds                                               |
-| `--work-dir <DIR>`        | _optional_              | Directory for extracted inputs and match results; use a stable path to resume runs |
-| `--from-scratch`          | off                     | Ignore existing work-dir artifacts and rerun all stages                                    |
+| `--from-scratch`          | off                     | Ignore existing stage outputs in `.work` and rerun all stages                             |
 
 ## Stages
 
@@ -63,11 +62,10 @@ Omit the stage to run all three in order.
 ```bash
 comet-enrich funders \
   --input      /data/datacite/DataCite_Public_Data_File_2024 \
-  --output     funders.jsonl \
+  --output     ./out \
   --provenance configs/provenance/funders.yaml \
   --ror-file   /data/ror/v2.6-2026-04-14-ror-data.json \
   --ror-service-url http://localhost:8000 \
-  --work-dir   /work/funders \
   --threads    16
 ```
 

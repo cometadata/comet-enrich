@@ -8,7 +8,7 @@ use crate::method::{EnrichmentMethod, Extracted, Lookups};
 use crate::provenance::{EnrichmentTemplate, build_enrichment_record};
 use crate::writer::JsonlWriter;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use crossbeam_channel::bounded;
 use flate2::read::GzDecoder;
 use glob::glob;
@@ -22,11 +22,17 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+/// File name for the main enrichment output, written inside the output directory.
+pub const ENRICHMENTS_FILE: &str = "enrichments.jsonl";
+/// File name for records diverted after failing schema validation.
+pub const ENRICHMENTS_FAILED_FILE: &str = "enrichments.failed.jsonl";
+
 /// Options for one enrichment run.
 pub struct RunOptions {
     /// Directory searched recursively for `*.jsonl.gz` files.
     pub input: PathBuf,
-    /// Output JSONL file.
+    /// Output directory. The run writes `enrichments.jsonl` here, plus
+    /// `enrichments.failed.jsonl` when records fail validation.
     pub output: PathBuf,
     /// Worker threads. Use `0` for all available CPUs.
     pub threads: usize,
@@ -42,6 +48,7 @@ pub struct RunStats {
     pub records_scanned: u64,
     pub lines_malformed: u64,
     pub emitted: u64,
+    pub schema_failures: u64,
     pub skipped: BTreeMap<&'static str, u64>,
 }
 
@@ -49,7 +56,6 @@ pub struct RunStats {
 struct Counters {
     records_scanned: AtomicU64,
     lines_malformed: AtomicU64,
-    emitted: AtomicU64,
     files_failed: AtomicU64,
 }
 
@@ -61,10 +67,11 @@ struct Counters {
 ///
 /// # Errors
 ///
-/// Returns an error if input files cannot be discovered, the output file cannot
-/// be created, the progress bar template is invalid, or the rayon pool cannot be
-/// built. Individual file read failures are counted in [`RunStats::files_failed`]
-/// and do not stop the run.
+/// Returns an error if input files cannot be discovered, the output directory or
+/// files cannot be created, the progress bar template is invalid, or the rayon
+/// pool cannot be built. A write or flush failure also aborts the run, since the
+/// output would be incomplete. Individual file read failures are counted in
+/// [`RunStats::files_failed`] and do not stop the run.
 pub fn run<M: EnrichmentMethod>(
     method: &M,
     opts: &RunOptions,
@@ -85,7 +92,15 @@ pub fn run<M: EnrichmentMethod>(
     let files: Vec<PathBuf> = glob(&pattern)?.filter_map(Result::ok).collect();
     log::info!("found {} input files", files.len());
 
-    let writer = Arc::new(Mutex::new(JsonlWriter::create(&opts.output, validator)?));
+    std::fs::create_dir_all(&opts.output)
+        .with_context(|| format!("creating output dir {}", opts.output.display()))?;
+    let out_path = opts.output.join(ENRICHMENTS_FILE);
+    let failed_path = opts.output.join(ENRICHMENTS_FAILED_FILE);
+    let writer = Arc::new(Mutex::new(JsonlWriter::create(
+        &out_path,
+        &failed_path,
+        validator,
+    )?));
 
     if files.is_empty() {
         return Ok(RunStats::default());
@@ -101,24 +116,19 @@ pub fn run<M: EnrichmentMethod>(
     let (tx, rx) = bounded::<Vec<Value>>(n_threads * 4);
     let writer_t = {
         let writer = Arc::clone(&writer);
-        std::thread::spawn(move || {
+        // A write or flush failure means the output is incomplete, so bail out: returning
+        // drops `rx`, which disconnects the channel and stops the workers sending.
+        std::thread::spawn(move || -> Result<()> {
             let mut batches = 0u32;
             while let Ok(batch) = rx.recv() {
                 let mut w = writer.lock().unwrap();
-                if let Err(e) = w.write_batch(&batch) {
-                    log::error!("write error: {e}");
-                    continue;
-                }
+                w.write_batch(&batch)?;
                 batches += 1;
                 if batches % 100 == 0 {
-                    if let Err(e) = w.flush() {
-                        log::error!("flush error: {e}");
-                    }
+                    w.flush()?;
                 }
             }
-            if let Err(e) = writer.lock().unwrap().flush() {
-                log::error!("final flush error: {e}");
-            }
+            writer.lock().unwrap().flush()
         })
     };
 
@@ -151,16 +161,22 @@ pub fn run<M: EnrichmentMethod>(
     });
 
     drop(tx);
-    writer_t.join().expect("writer thread panicked");
+    let writer_result = writer_t.join().expect("writer thread panicked");
+    writer_result?;
     pb.finish_with_message("done");
 
     let files_failed = counters.files_failed.load(Ordering::Relaxed);
+    let (emitted, schema_failures) = {
+        let w = writer.lock().unwrap();
+        (w.records_written, w.records_failed)
+    };
     Ok(RunStats {
         files_processed: files.len() as u64 - files_failed,
         files_failed,
         records_scanned: counters.records_scanned.load(Ordering::Relaxed),
         lines_malformed: counters.lines_malformed.load(Ordering::Relaxed),
-        emitted: counters.emitted.load(Ordering::Relaxed),
+        emitted,
+        schema_failures,
         skipped: skipped.into_inner().unwrap(),
     })
 }
@@ -212,7 +228,6 @@ fn process_file<M: EnrichmentMethod>(
                             parts.original,
                             parts.enriched,
                         ));
-                        counters.emitted.fetch_add(1, Ordering::Relaxed);
                         if batch.len() >= batch_size && tx.send(std::mem::take(&mut batch)).is_err()
                         {
                             merge_skips(skipped, local_skips);

@@ -101,7 +101,7 @@ fn run_drives_transform_end_to_end() {
     let provenance = dir.path().join("enrichment.yaml");
     fs::write(&provenance, ENRICHMENT_YAML).unwrap();
     let template = comet_enrichment_core::load_template(&provenance).unwrap();
-    let output = dir.path().join("out.jsonl");
+    let output = dir.path().join("out");
 
     let opts = RunOptions {
         input: dir.path().join("input"),
@@ -119,9 +119,10 @@ fn run_drives_transform_end_to_end() {
     assert_eq!(stats.records_scanned, 3);
     assert_eq!(stats.lines_malformed, 1);
     assert_eq!(stats.emitted, 2);
+    assert_eq!(stats.schema_failures, 0);
     assert_eq!(stats.skipped.get("no_resource_type"), Some(&1));
 
-    let body = fs::read_to_string(&output).unwrap();
+    let body = fs::read_to_string(output.join(comet_enrichment_core::ENRICHMENTS_FILE)).unwrap();
     let recs: Vec<Value> = body
         .lines()
         .map(|l| serde_json::from_str(l).unwrap())
@@ -136,4 +137,44 @@ fn run_drives_transform_end_to_end() {
         );
         assert!(rec["doi"].as_str().unwrap().starts_with("10.1/"));
     }
+}
+
+#[test]
+fn write_failure_fails_the_run() {
+    // A failed write must abort the run rather than being logged and dropped. We force
+    // the divert path to fail by putting a directory where the failures file should go:
+    // opening it for writing then errors the moment a record is diverted.
+    let dir = tempfile::tempdir().unwrap();
+
+    let input_dir = dir.path().join("input/updated_2024-01");
+    fs::create_dir_all(&input_dir).unwrap();
+    let line = r#"{"id":"10.1/a","attributes":{"types":{"resourceType":"Spreadsheet"}}}"#;
+    let file = input_dir.join("part_0000.jsonl.gz");
+    let f = fs::File::create(&file).unwrap();
+    let mut enc = GzEncoder::new(f, Compression::default());
+    enc.write_all(line.as_bytes()).unwrap();
+    enc.finish().unwrap();
+
+    let provenance = dir.path().join("enrichment.yaml");
+    fs::write(&provenance, ENRICHMENT_YAML).unwrap();
+    let template = comet_enrichment_core::load_template(&provenance).unwrap();
+
+    let output = dir.path().join("out");
+    // Block the failures file: a directory here cannot be opened for writing.
+    fs::create_dir_all(output.join(comet_enrichment_core::ENRICHMENTS_FAILED_FILE)).unwrap();
+
+    let opts = RunOptions {
+        input: dir.path().join("input"),
+        output,
+        threads: 1,
+        batch_size: 5000,
+    };
+
+    // A validator that rejects every record, so the one emitted record is diverted.
+    let validator = comet_enrichment_core::schema::compile_str(
+        r#"{"type":"object","required":["__never_present__"]}"#,
+    )
+    .unwrap();
+    let result = run(&DatasetTagger, &opts, &template, Some(validator));
+    assert!(result.is_err(), "write failure should fail the run");
 }

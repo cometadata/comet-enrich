@@ -33,15 +33,15 @@ pub enum Method {
     /// Match creator affiliation strings to ROR IDs.
     ///
     /// Runs the extract, query, and reconcile stages. Omit the stage to run the full
-    /// pipeline. Existing stage outputs are reused from `--work-dir` unless
-    /// `--from-scratch` is used.
+    /// pipeline. Intermediate files are written to a `.work` directory inside the output
+    /// directory, and existing stage outputs there are reused unless `--from-scratch` is used.
     Affiliations(RorLookupArgs),
 
     /// Match funder names to ROR IDs.
     ///
     /// Runs the extract, query, and reconcile stages. Omit the stage to run the full
-    /// pipeline. Existing stage outputs are reused from `--work-dir` unless
-    /// `--from-scratch` is used.
+    /// pipeline. Intermediate files are written to a `.work` directory inside the output
+    /// directory, and existing stage outputs there are reused unless `--from-scratch` is used.
     Funders(RorLookupArgs),
 }
 
@@ -137,11 +137,12 @@ fn run_method<M: EnrichmentMethod>(
 /// Log the summary counters for a completed run.
 fn report(method: &str, stats: &RunStats) {
     log::info!(
-        "{method}: {} files processed ({} failed), {} records scanned, {} emitted, {} malformed",
+        "{method}: {} files processed ({} failed), {} records scanned, {} emitted, {} failed validation, {} malformed",
         stats.files_processed,
         stats.files_failed,
         stats.records_scanned,
         stats.emitted,
+        stats.schema_failures,
         stats.lines_malformed,
     );
 }

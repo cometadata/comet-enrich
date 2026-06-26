@@ -38,8 +38,6 @@ pub struct LookupConfig {
     pub ror_service_url: String,
     /// ROR registry dataset used to reconcile matched IDs.
     pub ror_file: PathBuf,
-    /// Directory for stage outputs and completion markers.
-    pub work_dir: Option<PathBuf>,
     /// Inputs per match-service request.
     pub ror_batch_size: usize,
     /// Concurrent match-service requests.

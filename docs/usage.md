@@ -24,7 +24,7 @@ Reclassify resource types for the DataCite Public Data File:
 ```bash
 comet-enrich resource-type-general \
   --input      /data/datacite \
-  --output     resource_type_general.jsonl \
+  --output     ./out \
   --rules      configs/reclassification_rules.yaml \
   --provenance configs/provenance/resource_type_general.yaml
 ```
@@ -37,8 +37,10 @@ recursively.
 
 ## Output and validation
 
-Each method writes newline-delimited JSON to `--output`, with one enrichment record per line.
-Records are validated against the built-in enrichment input schema as they are written.
+Each method writes enrichment records as newline-delimited JSON to `enrichments.jsonl` inside the
+`--output` directory, one record per line. Records are validated against the built-in enrichment
+input schema as they are written; any that fail are written to `enrichments.failed.jsonl` in the
+same directory (with the validator error attached) and the run continues.
 
 Use these options to change the validation behaviour:
 
@@ -64,7 +66,7 @@ These flags are shared by every method:
 | Option                 | Default    | Description                                                          |
 |------------------------|------------|----------------------------------------------------------------------|
 | `-i, --input <DIR>`    | _required_ | Input directory of DataCite `*.jsonl.gz` files, searched recursively |
-| `-o, --output <FILE>`  | _required_ | Output JSONL file for emitted enrichment records                     |
+| `-o, --output <DIR>`   | _required_ | Output directory; writes `enrichments.jsonl` (and `enrichments.failed.jsonl`) |
 | `--provenance <FILE>`  | _required_ | YAML provenance metadata attached to each record                     |
 | `-t, --threads <N>`    | `0`        | Worker threads; `0` uses all available CPUs                          |
 | `-b, --batch-size <N>` | `5000`     | Enrichment records per writer batch                                  |

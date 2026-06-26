@@ -13,8 +13,8 @@ pub struct IoArgs {
     #[arg(short, long, value_name = "DIR", help_heading = "Input/output")]
     pub input: PathBuf,
 
-    /// Output JSONL file for enrichment records.
-    #[arg(short, long, value_name = "FILE", help_heading = "Input/output")]
+    /// Output directory for enrichment records (writes enrichments.jsonl).
+    #[arg(short, long, value_name = "DIR", help_heading = "Input/output")]
     pub output: PathBuf,
 
     /// YAML provenance metadata for the enrichment records.
@@ -140,10 +140,6 @@ pub struct LookupArgs {
     )]
     pub ror_timeout: u64,
 
-    /// Directory for stage outputs.
-    #[arg(long, value_name = "DIR", help_heading = "Options")]
-    pub work_dir: Option<PathBuf>,
-
     /// Ignore existing stage outputs and rerun from the start.
     #[arg(long, help_heading = "Options")]
     pub from_scratch: bool,
@@ -175,7 +171,6 @@ impl From<&LookupArgs> for LookupConfig {
         LookupConfig {
             ror_service_url: lookup.ror_service_url.clone(),
             ror_file: lookup.ror_file.clone(),
-            work_dir: lookup.work_dir.clone(),
             ror_batch_size: lookup.ror_batch_size,
             ror_concurrency: lookup.ror_concurrency,
             ror_timeout: lookup.ror_timeout,
