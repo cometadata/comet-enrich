@@ -13,7 +13,7 @@ pub struct IoArgs {
     #[arg(short, long, value_name = "DIR", help_heading = "Input/output")]
     pub input: PathBuf,
 
-    /// Output directory for enrichment records (writes enrichments.jsonl).
+    /// Output directory for enrichment records (writes enrichments/part_NNNN.jsonl.gz).
     #[arg(short, long, value_name = "DIR", help_heading = "Input/output")]
     pub output: PathBuf,
 

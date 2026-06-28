@@ -128,8 +128,13 @@ fn run_method<M: EnrichmentMethod>(
     run: &RunArgs,
     template: &EnrichmentTemplate,
 ) -> Result<()> {
-    let stats =
-        comet_enrichment_core::run(method, &io.run_options(run), template, run.validator()?)?;
+    let validator = run.validator()?;
+    let stats = comet_enrichment_core::run(
+        method,
+        &io.run_options(run),
+        template,
+        validator.as_ref(),
+    )?;
     report(name, &stats);
     Ok(())
 }

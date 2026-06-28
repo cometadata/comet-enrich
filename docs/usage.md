@@ -37,10 +37,12 @@ recursively.
 
 ## Output and validation
 
-Each method writes enrichment records as newline-delimited JSON to `enrichments.jsonl` inside the
-`--output` directory, one record per line. Records are validated against the built-in enrichment
-input schema as they are written; any that fail are written to `enrichments.failed.jsonl` in the
-same directory (with the validator error attached) and the run continues.
+Each method writes enrichment records as gzip-compressed, newline-delimited JSON into an
+`enrichments/` directory inside the `--output` directory, one part per input file
+(`enrichments/part_NNNN.jsonl.gz`) written in parallel, one record per line. Records are validated
+against the built-in enrichment input schema as they are written; any that fail are written to
+`enrichments.failed.jsonl` in the output directory (with the validator error attached) and the run
+continues.
 
 Use these options to change the validation behaviour:
 
@@ -66,7 +68,7 @@ These flags are shared by every method:
 | Option                 | Default    | Description                                                          |
 |------------------------|------------|----------------------------------------------------------------------|
 | `-i, --input <DIR>`    | _required_ | Input directory of DataCite `*.jsonl.gz` files, searched recursively |
-| `-o, --output <DIR>`   | _required_ | Output directory; writes `enrichments.jsonl` (and `enrichments.failed.jsonl`) |
+| `-o, --output <DIR>`   | _required_ | Output directory; writes `enrichments/part_NNNN.jsonl.gz` (and `enrichments.failed.jsonl`) |
 | `--provenance <FILE>`  | _required_ | YAML provenance metadata attached to each record                     |
 | `-t, --threads <N>`    | `0`        | Worker threads; `0` uses all available CPUs                          |
 | `-b, --batch-size <N>` | `5000`     | Enrichment records per writer batch                                  |

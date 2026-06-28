@@ -4,11 +4,31 @@ use comet_enrichment_core::{
     EnrichmentAction, EnrichmentMethod, EnrichmentParts, Extracted, Lookups, RunOptions, run,
 };
 use flate2::Compression;
+use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use serde_json::{Value, json};
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::Path;
+
+/// Read every gzip part under `<output>/enrichments/` into enrichment records.
+///
+/// Record order across parts is not stable, so callers compare sets, not order.
+fn read_enrichment_parts(output: &Path) -> Vec<Value> {
+    let mut recs = Vec::new();
+    for entry in fs::read_dir(output.join(comet_enrichment_core::ENRICHMENTS_DIR)).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().and_then(|e| e.to_str()) != Some("gz") {
+            continue;
+        }
+        let mut body = String::new();
+        GzDecoder::new(fs::File::open(&path).unwrap())
+            .read_to_string(&mut body)
+            .unwrap();
+        recs.extend(body.lines().map(|l| serde_json::from_str(l).unwrap()));
+    }
+    recs
+}
 
 /// Schema file used to validate records written by the test.
 const SCHEMA_PATH: &str = concat!(
@@ -112,7 +132,7 @@ fn run_drives_transform_end_to_end() {
 
     // Validate records using the same schema check as a normal run.
     let validator = comet_enrichment_core::schema::compile(Path::new(SCHEMA_PATH)).unwrap();
-    let stats = run(&DatasetTagger, &opts, &template, Some(validator)).unwrap();
+    let stats = run(&DatasetTagger, &opts, &template, Some(&validator)).unwrap();
 
     assert_eq!(stats.files_processed, 1);
     assert_eq!(stats.files_failed, 0);
@@ -122,11 +142,7 @@ fn run_drives_transform_end_to_end() {
     assert_eq!(stats.schema_failures, 0);
     assert_eq!(stats.skipped.get("no_resource_type"), Some(&1));
 
-    let body = fs::read_to_string(output.join(comet_enrichment_core::ENRICHMENTS_FILE)).unwrap();
-    let recs: Vec<Value> = body
-        .lines()
-        .map(|l| serde_json::from_str(l).unwrap())
-        .collect();
+    let recs = read_enrichment_parts(&output);
     assert_eq!(recs.len(), 2);
     for rec in &recs {
         assert_eq!(rec["field"], json!("types"));
@@ -175,6 +191,6 @@ fn write_failure_fails_the_run() {
         r#"{"type":"object","required":["__never_present__"]}"#,
     )
     .unwrap();
-    let result = run(&DatasetTagger, &opts, &template, Some(validator));
+    let result = run(&DatasetTagger, &opts, &template, Some(&validator));
     assert!(result.is_err(), "write failure should fail the run");
 }

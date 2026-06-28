@@ -18,7 +18,6 @@ pub mod writer;
 
 pub use method::{EnrichmentAction, EnrichmentMethod, EnrichmentParts, Extracted, Lookups};
 pub use provenance::{EnrichmentTemplate, build_enrichment_record, load_template};
-pub use reader::{ENRICHMENTS_FAILED_FILE, ENRICHMENTS_FILE, RunOptions, RunStats, run};
+pub use reader::{ENRICHMENTS_DIR, ENRICHMENTS_FAILED_FILE, RunOptions, RunStats, run};
 pub use schema::SCHEMA;
 pub use staged::{LookupConfig, Stage, WorkDir, stages_to_run};
-pub use writer::JsonlWriter;

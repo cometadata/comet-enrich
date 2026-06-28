@@ -1,15 +1,15 @@
 //! Reads DataCite JSONL input files and runs enrichment methods over them.
 //!
-//! [`run`] finds `*.jsonl.gz` files under the input directory, processes them in
-//! parallel, and sends emitted enrichment records to a single writer. Records are
-//! validated at the write boundary when a schema validator is provided.
+//! [`run`] finds `*.jsonl.gz` files under the input directory and processes them
+//! in parallel. Each worker writes the records it emits to its own gzip output
+//! part, so there is no shared output writer. Records are validated at the write
+//! boundary when a schema validator is provided.
 
 use crate::method::{EnrichmentMethod, Extracted, Lookups};
 use crate::provenance::{EnrichmentTemplate, build_enrichment_record};
-use crate::writer::JsonlWriter;
+use crate::writer::{FailureSink, PartWriter};
 
 use anyhow::{Context, Result};
-use crossbeam_channel::bounded;
 use flate2::read::GzDecoder;
 use glob::glob;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -19,11 +19,12 @@ use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
 
-/// File name for the main enrichment output, written inside the output directory.
-pub const ENRICHMENTS_FILE: &str = "enrichments.jsonl";
+/// Directory holding the gzip enrichment output parts, written inside the output
+/// directory as `enrichments/part_NNNN.jsonl.gz` (one part per input file).
+pub const ENRICHMENTS_DIR: &str = "enrichments";
 /// File name for records diverted after failing schema validation.
 pub const ENRICHMENTS_FAILED_FILE: &str = "enrichments.failed.jsonl";
 
@@ -31,7 +32,7 @@ pub const ENRICHMENTS_FAILED_FILE: &str = "enrichments.failed.jsonl";
 pub struct RunOptions {
     /// Directory searched recursively for `*.jsonl.gz` files.
     pub input: PathBuf,
-    /// Output directory. The run writes `enrichments.jsonl` here, plus
+    /// Output directory. The run writes gzip parts under `enrichments/`, plus
     /// `enrichments.failed.jsonl` when records fail validation.
     pub output: PathBuf,
     /// Worker threads. Use `0` for all available CPUs.
@@ -57,6 +58,17 @@ struct Counters {
     records_scanned: AtomicU64,
     lines_malformed: AtomicU64,
     files_failed: AtomicU64,
+    emitted: AtomicU64,
+}
+
+/// Classifies a per-file failure so the runner can react appropriately.
+enum FileError {
+    /// The input file could not be read. Counted in [`RunStats::files_failed`];
+    /// the run continues with the other files.
+    Read(anyhow::Error),
+    /// A record could not be written, diverted, or flushed. The output would be
+    /// incomplete, so this aborts the whole run.
+    Fatal(anyhow::Error),
 }
 
 /// Run an enrichment method over all input files.
@@ -76,7 +88,7 @@ pub fn run<M: EnrichmentMethod>(
     method: &M,
     opts: &RunOptions,
     template: &EnrichmentTemplate,
-    validator: Option<jsonschema::JSONSchema>,
+    validator: Option<&jsonschema::JSONSchema>,
 ) -> Result<RunStats> {
     let n_threads = if opts.threads == 0 {
         num_cpus::get()
@@ -89,18 +101,19 @@ pub fn run<M: EnrichmentMethod>(
         "{}/**/*.jsonl.gz",
         opts.input.to_string_lossy().trim_end_matches('/')
     );
-    let files: Vec<PathBuf> = glob(&pattern)?.filter_map(Result::ok).collect();
+    let mut files: Vec<PathBuf> = glob(&pattern)?.filter_map(Result::ok).collect();
+    // Sort so each input file's index, and therefore its output part name, is
+    // stable across runs for a fixed input set.
+    files.sort();
     log::info!("found {} input files", files.len());
 
-    std::fs::create_dir_all(&opts.output)
-        .with_context(|| format!("creating output dir {}", opts.output.display()))?;
-    let out_path = opts.output.join(ENRICHMENTS_FILE);
+    let enrich_dir = opts.output.join(ENRICHMENTS_DIR);
+    std::fs::create_dir_all(&enrich_dir)
+        .with_context(|| format!("creating output dir {}", enrich_dir.display()))?;
     let failed_path = opts.output.join(ENRICHMENTS_FAILED_FILE);
-    let writer = Arc::new(Mutex::new(JsonlWriter::create(
-        &out_path,
-        &failed_path,
-        validator,
-    )?));
+    // One shared failures sink: validation failures are rare, so the mutex is
+    // uncontended in practice. Creating it clears any stale failures file.
+    let failures = Mutex::new(FailureSink::create(&failed_path)?);
 
     if files.is_empty() {
         return Ok(RunStats::default());
@@ -113,85 +126,84 @@ pub fn run<M: EnrichmentMethod>(
             .progress_chars("#>-"),
     );
 
-    let (tx, rx) = bounded::<Vec<Value>>(n_threads * 4);
-    let writer_t = {
-        let writer = Arc::clone(&writer);
-        // A write or flush failure means the output is incomplete, so bail out: returning
-        // drops `rx`, which disconnects the channel and stops the workers sending.
-        std::thread::spawn(move || -> Result<()> {
-            let mut batches = 0u32;
-            while let Ok(batch) = rx.recv() {
-                let mut w = writer.lock().unwrap();
-                w.write_batch(&batch)?;
-                batches += 1;
-                if batches % 100 == 0 {
-                    w.flush()?;
-                }
-            }
-            writer.lock().unwrap().flush()
-        })
-    };
-
     let counters = Counters::default();
     let skipped: Mutex<BTreeMap<&'static str, u64>> = Mutex::new(BTreeMap::new());
 
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(n_threads)
         .build()?;
+    // Each worker writes its own gzip part, so there is no shared writer. A read
+    // failure is counted and the run continues; a write/flush failure is fatal, so
+    // `try_for_each` short-circuits and the error propagates out of the run.
     pool.install(|| {
-        files.par_iter().for_each_with(tx.clone(), |tx_w, path| {
-            pb.set_message(format!(
-                "processing {}",
-                path.file_name().unwrap().to_string_lossy()
-            ));
-            if let Err(e) = process_file(
-                path,
-                tx_w,
-                opts.batch_size,
-                method,
-                template,
-                &counters,
-                &skipped,
-            ) {
-                log::error!("file error {}: {e}", path.display());
-                counters.files_failed.fetch_add(1, Ordering::Relaxed);
-            }
-            pb.inc(1);
-        });
-    });
+        files
+            .par_iter()
+            .enumerate()
+            .try_for_each(|(idx, path)| -> Result<()> {
+                pb.set_message(format!(
+                    "processing {}",
+                    path.file_name().unwrap().to_string_lossy()
+                ));
+                match process_file(
+                    idx,
+                    path,
+                    &enrich_dir,
+                    validator,
+                    &failures,
+                    opts.batch_size,
+                    method,
+                    template,
+                    &counters,
+                    &skipped,
+                ) {
+                    Ok(()) => {}
+                    Err(FileError::Read(e)) => {
+                        log::error!("file error {}: {e}", path.display());
+                        counters.files_failed.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Err(FileError::Fatal(e)) => return Err(e),
+                }
+                pb.inc(1);
+                Ok(())
+            })
+    })?;
 
-    drop(tx);
-    let writer_result = writer_t.join().expect("writer thread panicked");
-    writer_result?;
+    // A failures-file flush error means the output is incomplete, so it aborts the run.
+    failures.lock().unwrap().flush()?;
     pb.finish_with_message("done");
 
     let files_failed = counters.files_failed.load(Ordering::Relaxed);
-    let (emitted, schema_failures) = {
-        let w = writer.lock().unwrap();
-        (w.records_written, w.records_failed)
-    };
     Ok(RunStats {
         files_processed: files.len() as u64 - files_failed,
         files_failed,
         records_scanned: counters.records_scanned.load(Ordering::Relaxed),
         lines_malformed: counters.lines_malformed.load(Ordering::Relaxed),
-        emitted,
-        schema_failures,
+        emitted: counters.emitted.load(Ordering::Relaxed),
+        schema_failures: failures.lock().unwrap().records_failed,
         skipped: skipped.into_inner().unwrap(),
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn process_file<M: EnrichmentMethod>(
+    file_index: usize,
     path: &Path,
-    tx: &crossbeam_channel::Sender<Vec<Value>>,
+    enrich_dir: &Path,
+    validator: Option<&jsonschema::JSONSchema>,
+    failures: &Mutex<FailureSink>,
     batch_size: usize,
     method: &M,
     template: &EnrichmentTemplate,
     counters: &Counters,
     skipped: &Mutex<BTreeMap<&'static str, u64>>,
-) -> Result<()> {
-    let f = File::open(path)?;
+) -> Result<(), FileError> {
+    let f = File::open(path).map_err(|e| FileError::Read(e.into()))?;
     let reader = BufReader::new(GzDecoder::new(f));
+
+    // One output part per input file, named by the input's index in the sorted glob.
+    let part_path = enrich_dir.join(format!("part_{file_index:04}.jsonl.gz"));
+    let mut part = PartWriter::create(&part_path, validator, failures).map_err(FileError::Fatal)?;
+
     let mut batch: Vec<Value> = Vec::with_capacity(batch_size);
     let mut local_skips: BTreeMap<&'static str, u64> = BTreeMap::new();
 
@@ -228,10 +240,9 @@ fn process_file<M: EnrichmentMethod>(
                             parts.original,
                             parts.enriched,
                         ));
-                        if batch.len() >= batch_size && tx.send(std::mem::take(&mut batch)).is_err()
-                        {
-                            merge_skips(skipped, local_skips);
-                            return Ok(());
+                        if batch.len() >= batch_size {
+                            part.write_batch(&batch).map_err(FileError::Fatal)?;
+                            batch.clear();
                         }
                     }
                 }
@@ -240,8 +251,10 @@ fn process_file<M: EnrichmentMethod>(
     }
 
     if !batch.is_empty() {
-        let _ = tx.send(batch);
+        part.write_batch(&batch).map_err(FileError::Fatal)?;
     }
+    let written = part.finish().map_err(FileError::Fatal)?;
+    counters.emitted.fetch_add(written, Ordering::Relaxed);
     merge_skips(skipped, local_skips);
     Ok(())
 }

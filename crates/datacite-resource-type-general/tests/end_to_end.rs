@@ -11,12 +11,32 @@
 use comet_enrich_datacite_resource_type_general::{Config, ResourceTypeGeneral};
 use comet_enrichment_core::{RunOptions, run};
 use flate2::Compression;
+use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+
+/// Read every gzip part under `<output>/enrichments/` into enrichment records.
+///
+/// Record order across parts is not stable, so callers compare sets, not order.
+fn read_enrichment_parts(output: &Path) -> Vec<Value> {
+    let mut recs = Vec::new();
+    for entry in fs::read_dir(output.join(comet_enrichment_core::ENRICHMENTS_DIR)).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().and_then(|e| e.to_str()) != Some("gz") {
+            continue;
+        }
+        let mut body = String::new();
+        GzDecoder::new(fs::File::open(&path).unwrap())
+            .read_to_string(&mut body)
+            .unwrap();
+        recs.extend(body.lines().map(|l| serde_json::from_str(l).unwrap()));
+    }
+    recs
+}
 
 /// Method rules, provenance template, and schema used by the real pipeline.
 const RULES_PATH: &str = concat!(
@@ -94,7 +114,7 @@ fn reclassifier_matches_golden_outcomes() {
     })
     .unwrap();
     let validator = comet_enrichment_core::schema::compile(Path::new(SCHEMA_PATH)).unwrap();
-    let stats = run(&method, &opts, &template, Some(validator)).unwrap();
+    let stats = run(&method, &opts, &template, Some(&validator)).unwrap();
 
     assert_eq!(stats.files_processed, 1);
     assert_eq!(stats.files_failed, 0);
@@ -106,11 +126,7 @@ fn reclassifier_matches_golden_outcomes() {
     assert_eq!(stats.skipped.get("redundant"), Some(&1));
     assert_eq!(stats.skipped.get("no_match"), Some(&1));
 
-    let body = fs::read_to_string(output.join(comet_enrichment_core::ENRICHMENTS_FILE)).unwrap();
-    let recs: Vec<Value> = body
-        .lines()
-        .map(|l| serde_json::from_str(l).unwrap())
-        .collect();
+    let recs = read_enrichment_parts(&output);
     assert_eq!(recs.len(), 9);
 
     let mut emitted: HashMap<String, String> = HashMap::new();
