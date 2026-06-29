@@ -42,7 +42,7 @@ pub struct RunOptions {
 }
 
 /// Counters returned after an enrichment run.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, serde::Serialize)]
 pub struct RunStats {
     pub files_processed: u64,
     pub files_failed: u64,

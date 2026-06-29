@@ -9,6 +9,7 @@
 #![allow(clippy::doc_markdown)]
 
 pub mod datacite_enums;
+pub mod manifest;
 pub mod method;
 pub mod provenance;
 pub mod reader;
@@ -16,6 +17,7 @@ pub mod schema;
 pub mod staged;
 pub mod writer;
 
+pub use manifest::{Manifest, Report, RunMeta, SourceRelease, StageTimings};
 pub use method::{EnrichmentAction, EnrichmentMethod, EnrichmentParts, Extracted, Lookups};
 pub use provenance::{EnrichmentTemplate, build_enrichment_record, load_template};
 pub use reader::{ENRICHMENTS_DIR, ENRICHMENTS_FAILED_FILE, RunOptions, RunStats, run};

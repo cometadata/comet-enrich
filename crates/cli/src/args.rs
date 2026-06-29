@@ -1,9 +1,10 @@
 //! Shared CLI arguments for `comet-enrich`.
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use clap::{Args, Subcommand};
-use comet_enrichment_core::{LookupConfig, RunOptions, SCHEMA, Stage, schema};
+use comet_enrichment_core::{LookupConfig, RunOptions, SCHEMA, SourceRelease, Stage, schema};
 use log::LevelFilter;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 /// Input and output paths used by every method.
@@ -20,6 +21,15 @@ pub struct IoArgs {
     /// YAML provenance metadata for the enrichment records.
     #[arg(long, value_name = "FILE", help_heading = "Input/output")]
     pub provenance: PathBuf,
+
+    /// Release date of a data source, as name=YYYY-MM-DD (repeatable), e.g. datacite=2024-01-01.
+    #[arg(
+        long = "source-release-date",
+        value_name = "NAME=YYYY-MM-DD",
+        value_parser = parse_source_release,
+        help_heading = "Input/output"
+    )]
+    pub source_release_date: Vec<(String, String)>,
 }
 
 impl IoArgs {
@@ -33,6 +43,53 @@ impl IoArgs {
             batch_size: run.batch_size,
         }
     }
+
+    /// Build the `sources` map recorded in the run manifest.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the same source name is given more than once.
+    pub fn sources(&self) -> Result<BTreeMap<String, SourceRelease>> {
+        let mut sources = BTreeMap::new();
+        for (name, release_date) in &self.source_release_date {
+            if sources
+                .insert(
+                    name.clone(),
+                    SourceRelease {
+                        release_date: release_date.clone(),
+                    },
+                )
+                .is_some()
+            {
+                bail!("duplicate --source-release-date for source `{name}`");
+            }
+        }
+        Ok(sources)
+    }
+}
+
+/// Parse a `name=YYYY-MM-DD` source-release-date argument.
+fn parse_source_release(s: &str) -> Result<(String, String), String> {
+    let (name, date) = s
+        .split_once('=')
+        .ok_or_else(|| format!("expected name=YYYY-MM-DD, got `{s}`"))?;
+    if name.is_empty() {
+        return Err(format!("source name is empty in `{s}`"));
+    }
+    if !is_iso_date(date) {
+        return Err(format!("expected YYYY-MM-DD date, got `{date}`"));
+    }
+    Ok((name.to_owned(), date.to_owned()))
+}
+
+/// Cheap `YYYY-MM-DD` shape check (digits and dashes in the right positions).
+fn is_iso_date(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() == 10
+        && b.iter().enumerate().all(|(i, c)| match i {
+            4 | 7 => *c == b'-',
+            _ => c.is_ascii_digit(),
+        })
 }
 
 /// Run and validation options used by every method.

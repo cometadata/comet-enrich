@@ -9,15 +9,18 @@
 #![allow(clippy::doc_markdown)]
 
 use comet_enrich_datacite_resource_type_general::{Config, ResourceTypeGeneral};
-use comet_enrichment_core::{RunOptions, run};
+use comet_enrichment_core::{Manifest, RunMeta, RunOptions, RunStats, SourceRelease, StageTimings, run};
 use flate2::Compression;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+
+/// Skip reasons the reclassifier uses for records its extractor did not select.
+const OUT_OF_SCOPE: &[&str] = &["not_in_scope", "malformed_types"];
 
 /// Read every gzip part under `<output>/enrichments/` into enrichment records.
 ///
@@ -85,11 +88,11 @@ const EXPECTED_EMITTED: &[(&str, &str)] = &[
     ("10.x/12", "ConferencePaper"),
 ];
 
-#[test]
-fn reclassifier_matches_golden_outcomes() {
-    // Checks the full run path: read gzipped input, apply the real method,
-    // validate writer output against the schema, and verify emitted updates and
-    // skip counts.
+/// Run the real reclassifier over the inlined fixture.
+///
+/// Returns the temp dir (kept alive by the caller), the output directory, and the
+/// run counters.
+fn run_reclassifier() -> (tempfile::TempDir, PathBuf, RunStats) {
     let dir = tempfile::tempdir().unwrap();
 
     let input_dir = dir.path().join("input/updated_2024-01");
@@ -115,6 +118,15 @@ fn reclassifier_matches_golden_outcomes() {
     .unwrap();
     let validator = comet_enrichment_core::schema::compile(Path::new(SCHEMA_PATH)).unwrap();
     let stats = run(&method, &opts, &template, Some(&validator)).unwrap();
+    (dir, output, stats)
+}
+
+#[test]
+fn reclassifier_matches_golden_outcomes() {
+    // Checks the full run path: read gzipped input, apply the real method,
+    // validate writer output against the schema, and verify emitted updates and
+    // skip counts.
+    let (_dir, output, stats) = run_reclassifier();
 
     assert_eq!(stats.files_processed, 1);
     assert_eq!(stats.files_failed, 0);
@@ -149,4 +161,65 @@ fn reclassifier_matches_golden_outcomes() {
             "doi {doi}"
         );
     }
+}
+
+#[test]
+fn reclassifier_writes_run_manifest() {
+    // The transform path produces a manifest.json with the stats nested under
+    // `report`, no `match` block, and no content hash / provenance fingerprint.
+    let (_dir, output, stats) = run_reclassifier();
+
+    let mut sources = BTreeMap::new();
+    sources.insert(
+        "datacite".to_owned(),
+        SourceRelease {
+            release_date: "2024-01-01".to_owned(),
+        },
+    );
+    let meta = RunMeta {
+        method_name: "resource-type-general".to_owned(),
+        method_version: env!("CARGO_PKG_VERSION"),
+        sources,
+    };
+    let timings = StageTimings {
+        total: Some(1),
+        ..StageTimings::default()
+    };
+    Manifest::build(&stats, &meta, OUT_OF_SCOPE, &timings, "success")
+        .write(&output)
+        .unwrap();
+
+    let raw = fs::read_to_string(output.join("manifest.json")).unwrap();
+    let m: Value = serde_json::from_str(&raw).unwrap();
+
+    // Envelope.
+    assert_eq!(m["schema_version"], json!(1));
+    assert_eq!(m["method"]["name"], json!("resource-type-general"));
+    assert_eq!(m["method"]["version"], json!(env!("CARGO_PKG_VERSION")));
+    assert_eq!(m["sources"]["datacite"]["release_date"], json!("2024-01-01"));
+    assert_eq!(m["exit_status"], json!("success"));
+    assert_eq!(m["artifact_paths"]["enrichments"], json!("enrichments/"));
+    assert_eq!(
+        m["artifact_paths"]["enrichments_failed"],
+        json!("enrichments.failed.jsonl")
+    );
+
+    // Stats block.
+    let report = &m["report"];
+    assert_eq!(report["counters"]["records_scanned"], json!(12));
+    assert_eq!(report["counters"]["emitted"], json!(9));
+    assert_eq!(report["counters"]["skipped"]["not_in_scope"], json!(1));
+    // records_in_scope = 12 scanned - 1 not_in_scope - 0 malformed_types.
+    assert_eq!(report["coverage"]["records_in_scope"], json!(11));
+    assert_eq!(report["coverage"]["records_enriched"], json!(9));
+    let rate = report["coverage"]["coverage_rate"].as_f64().unwrap();
+    assert!((rate - 9.0 / 11.0).abs() < 1e-9, "coverage_rate was {rate}");
+    assert_eq!(report["validation"]["emitted"], json!(9));
+    assert_eq!(report["validation"]["schema_failures"], json!(0));
+    assert!(report["stage_timings_ms"]["total"].is_u64());
+
+    // No match block on the transform path; no hash fields yet.
+    assert!(report.get("match").is_none());
+    assert!(!raw.contains("content_hash"));
+    assert!(!raw.contains("provenance_fingerprint"));
 }
