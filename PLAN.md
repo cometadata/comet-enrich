@@ -133,13 +133,26 @@ Notes:
 New module `crates/core/src/hash.rs` (or `dedup.rs`), re-exported from `lib.rs`. Add `xxhash-rust`
 with the `xxh3` feature to the workspace dependencies and to core.
 
-- `pub fn hash_input(s: &str) -> String { format!("{:016x}", xxh3_64(s.as_bytes())) }`. This is the
-  same 16-hex xxh3-64 the prototypes use (`hash_funder_name` / `hash_affiliation`), so persisted
-  hashes match. Note: `DIFF.md` calls for xxh3-128 for the future diff content-hash; that is a
-  separate concern and does not change this dedup hash.
-- The dedup itself is a `BTreeSet<String>` (ordered for deterministic `inputs.jsonl`) accumulated
-  during the extract stage. Provide a small helper that takes extracted inputs, dedups, and writes
-  `inputs.jsonl` rows of `{ "hash": <hash>, "value": <input> }`.
+- `hash_input(s: &str, bits: HashBits) -> String`, where `HashBits` is `Xxh3_64` (default, 16-hex,
+  `format!("{:016x}", xxh3_64(..))`) or `Xxh3_128` (32-hex, `xxh3_128`). The 64-bit default is the
+  same hash the prototypes use (`hash_funder_name` / `hash_affiliation`), so persisted hashes match
+  and a golden parity test pins it. Hashing produces a raw `u128` (the 64-bit case zero-extended)
+  that doubles as the dedup/collision key and is formatted to hex through one code path. Note:
+  `DIFF.md` calls for xxh3-128 for the future *diff content-hash*; that is a separate concern from
+  this configurable dedup hash.
+- The dedup itself is a `BTreeSet<String>` of input *values* (ordered for deterministic
+  `inputs.jsonl`), accumulated during extract. Dedup is always by value, never by hash. The helper
+  writes `inputs.jsonl` rows of `{ "hash": <hash>, "value": <input> }` and, in the same pass,
+  detects collisions loudly: if two distinct values produce the same hash it errors instead of
+  emitting duplicate hash keys (which `Lookups`, keyed by hash, would otherwise silently overwrite —
+  applying one match to the wrong input). The collision `seen` set is O(unique inputs) and
+  effectively unused at 128-bit; this is noted in code as a possible memory concern for very large
+  unique sets.
+- Hash width is fixed for a whole run. The `--hash-bits {64,128}` CLI flag, recording
+  `hash { algorithm, bits }` in `manifest.json` (lookup methods only, like the `match` block), and
+  pinning the width in the run dir + refusing a mismatched resume, are wired in **Stage 6**, where
+  the dedup store is actually consumed. Stage 4 builds the core capability (the `HashBits` enum,
+  configurable `hash_input`, collision detection) standalone and unit-tested.
 
 Used by the extract stage (4a.3) and by each method via `inputs` (4a.7, 4a.8).
 
@@ -401,6 +414,13 @@ at run end (4a.6), since orchestration lives in Airflow. This also gives DIFF.md
 - Per-method crate versions. Crates inherit the workspace version for now, so the manifest reports
   one framework version until we split them.
 - Stable output ordering or sharding by `hash(doi)`.
+- Atomic file writes. The writers (`writer.rs` enrichment parts and `enrichments.failed.jsonl`, and
+  `dedup.rs` `inputs.jsonl`) use `File::create` (truncate-then-stream), so a mid-write failure leaves
+  a truncated file. Tolerated today: artifacts are regenerable and reruns overwrite, `.work` scratch
+  is read back only behind `.done` stage markers, and the final outputs are not re-read within a run.
+  If we want write atomicity it should be one cross-cutting pass (temp file + rename across *all*
+  writers), not a one-off on a single file. (Surfaced by the Stage 4 adversarial review of
+  `inputs.jsonl`, but it is a pre-existing property of the Stage 1–2 writer.)
 
 ## 6. Implementation order
 
@@ -431,7 +451,10 @@ should not require reworking earlier stages.
 6. **Core: staged runner and on-disk contract.** Wire `EnrichmentMethod::lookup` into the query
    stage; serialize the contract files; fill the report match block and stage timings. This is the
    largest stage and the one that proves the trait drives a real lookup pipeline. Features: 4a.3,
-   4a.4, and the match block of 4a.5. Decisions: 8.1, 8.2.
+   4a.4, and the match block of 4a.5. Decisions: 8.1, 8.2. Also wires the dedup-hash width: a
+   `--hash-bits {64,128}` flag (default 64), pinned in the run dir and validated on resume (a
+   mismatched width silently breaks the hash join), and recorded as `hash { algorithm, bits }` in
+   `manifest.json` for lookup methods (see 4a.1).
 
 7. **Port affiliations.** First lookup method; if the port forces non-trivial framework changes,
    fix the framework before Stage 8. Features: 4a.7. Decisions: 8.2, 8.3.

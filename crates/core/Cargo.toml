@@ -18,6 +18,7 @@ rayon = "1"
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
+xxhash-rust = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
