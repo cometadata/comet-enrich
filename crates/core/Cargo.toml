@@ -19,9 +19,16 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 xxhash-rust = { workspace = true }
+tokio = { workspace = true }
+reqwest = { workspace = true }
+async-trait = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+wiremock = "0.6"
+
+[features]
+test-support = []
 
 [lints]
 workspace = true

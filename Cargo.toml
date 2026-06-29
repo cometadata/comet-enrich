@@ -39,6 +39,9 @@ serde_json = { version = "1", features = ["preserve_order"] }
 serde_yaml = "0.9"
 tempfile = "3"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+async-trait = "0.1"
 
 [profile.release]
 strip = true

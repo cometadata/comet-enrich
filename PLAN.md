@@ -182,7 +182,25 @@ dependency. Lift the client almost verbatim from
   `HashMap<String, (String, f64)>` and returns matches per input. Used to unit-test the staged
   runner without HTTP. The real client's HTTP resilience is tested with wiremock.
 - `Checkpoint` (in `checkpoint.rs`, lifted from the prototype): a set of processed hashes with
-  `load`, `save`, `is_processed`, `mark_processed`, persisted to `lookups.checkpoint`.
+  `save`, `is_processed`, `mark_processed`, persisted to `lookups.checkpoint`. Constructed via
+  `Checkpoint::open(path, from_scratch)` (one constructor; resume on `!from_scratch`, empty +
+  overwrite on `from_scratch`) — Stage 6 passes `cfg.from_scratch`. Lines are trimmed on load.
+  `save` is atomic (writes a sibling `.tmp`, then renames over the file), so a crash mid-write keeps
+  the prior checkpoint. `fsync` and the save *cadence* (per-batch vs once-at-end — a full O(N)
+  rewrite each call) remain Stage-6 decisions (see also §5b).
+
+Stage-5 implementation notes (as built):
+- The trait/client deliberately differ from the spec above: the trait is `Send + Sync` (the runner
+  shares it across `tokio::spawn`), and `MatchService`/`MarpleClient` live in flat modules
+  `match_service.rs` + `checkpoint.rs` (no `match_service/` dir). The URL is built with
+  `reqwest::Url` (`path_segments_mut().pop_if_empty()` + `.query(...)`), so `urlencoding` is not a
+  dependency. The client retries `429`, `408`, and `5xx` with capped exponential backoff
+  (`MAX_RETRIES = 4`), honouring `Retry-After`; every wait is clamped to a 2-minute
+  `MAX_RETRY_WAIT`. `413` and other `4xx` fail fast.
+- **TODO (verify against the live Marple service):** `match_bulk` assumes `/match/bulk` returns
+  results in **input order** and validates only the result count, not an echo of each input. Confirm
+  the bulk endpoint's ordering guarantee before relying on it in production; if it does not hold, add
+  an input echo/correlation.
 
 #### 4a.3 Staged runner and trait integration
 
@@ -420,7 +438,9 @@ at run end (4a.6), since orchestration lives in Airflow. This also gives DIFF.md
   is read back only behind `.done` stage markers, and the final outputs are not re-read within a run.
   If we want write atomicity it should be one cross-cutting pass (temp file + rename across *all*
   writers), not a one-off on a single file. (Surfaced by the Stage 4 adversarial review of
-  `inputs.jsonl`, but it is a pre-existing property of the Stage 1–2 writer.)
+  `inputs.jsonl`, but it is a pre-existing property of the Stage 1–2 writer.) Exception:
+  `checkpoint.rs` already writes atomically (temp + rename), since it is the run's resume ledger; the
+  remaining writers and `fsync` are still deferred here.
 
 ## 6. Implementation order
 
