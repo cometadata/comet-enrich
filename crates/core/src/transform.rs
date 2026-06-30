@@ -1,57 +1,28 @@
-//! Reads DataCite JSONL input files and runs enrichment methods over them.
+//! The single-pass transform run path.
 //!
-//! [`run`] finds `*.jsonl.gz` files under the input directory and processes them
-//! in parallel. Each worker writes the records it emits to its own gzip output
-//! part, so there is no shared output writer. Records are validated at the write
-//! boundary when a schema validator is provided.
+//! [`run`] finds `*.jsonl.gz` files under the input directory and processes them in
+//! parallel: each record is extracted and mapped straight to enrichment records,
+//! with no lookup step (contrast [`crate::staged_run::run_staged`]). Each worker
+//! writes the records it emits to its own gzip output part, so there is no shared
+//! output writer. Records are validated at the write boundary when a schema
+//! validator is provided.
 
-use crate::fanout::{FileError, input_files, make_pool};
+use crate::fanout::{FileError, input_files, make_pool, own_skips, scan_jsonl_records};
 use crate::method::{EnrichmentMethod, Extracted, Lookups};
 use crate::provenance::{EnrichmentTemplate, build_enrichment_record};
-use crate::writer::{FailureSink, PartWriter};
+use crate::run::{RunOptions, RunStats};
+use crate::writer::{ENRICHMENTS_DIR, ENRICHMENTS_FAILED_FILE, FailureSink, PartWriter};
 
 use anyhow::{Context, Result};
 use flate2::read::GzDecoder;
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
-use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
-use std::io::{BufRead, BufReader};
-use std::path::{Path, PathBuf};
+use std::io::BufReader;
+use std::path::Path;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
-
-/// Directory holding the gzip enrichment output parts, written inside the output
-/// directory as `enrichments/part_NNNN.jsonl.gz` (one part per input file).
-pub const ENRICHMENTS_DIR: &str = "enrichments";
-/// File name for records diverted after failing schema validation.
-pub const ENRICHMENTS_FAILED_FILE: &str = "enrichments.failed.jsonl";
-
-/// Options for one enrichment run.
-pub struct RunOptions {
-    /// Directory searched recursively for `*.jsonl.gz` files.
-    pub input: PathBuf,
-    /// Output directory. The run writes gzip parts under `enrichments/`, plus
-    /// `enrichments.failed.jsonl` when records fail validation.
-    pub output: PathBuf,
-    /// Worker threads. Use `0` for all available CPUs.
-    pub threads: usize,
-    /// Emitted records per writer batch.
-    pub batch_size: usize,
-}
-
-/// Counters returned after an enrichment run.
-#[derive(Debug, Default, Clone, serde::Serialize)]
-pub struct RunStats {
-    pub files_processed: u64,
-    pub files_failed: u64,
-    pub records_scanned: u64,
-    pub lines_malformed: u64,
-    pub emitted: u64,
-    pub schema_failures: u64,
-    pub skipped: BTreeMap<String, u64>,
-}
 
 #[derive(Default)]
 struct Counters {
@@ -154,15 +125,7 @@ pub fn run<M: EnrichmentMethod>(
         lines_malformed: counters.lines_malformed.load(Ordering::Relaxed),
         emitted: counters.emitted.load(Ordering::Relaxed),
         schema_failures: failures.lock().unwrap().records_failed,
-        // Skip reasons are `&'static str` while counting; own them for the report so
-        // both run paths share one `RunStats` shape (the staged path round-trips them
-        // through a JSON sidecar, which needs owned keys).
-        skipped: skipped
-            .into_inner()
-            .unwrap()
-            .into_iter()
-            .map(|(reason, n)| (reason.to_owned(), n))
-            .collect(),
+        skipped: own_skips(skipped.into_inner().unwrap()),
     })
 }
 
@@ -184,58 +147,38 @@ fn process_file<M: EnrichmentMethod>(
 
     // One output part per input file, named by the input's index in the sorted glob.
     let part_path = enrich_dir.join(format!("part_{file_index:04}.jsonl.gz"));
-    let mut part = PartWriter::create(&part_path, validator, failures).map_err(FileError::Fatal)?;
+    let mut part = PartWriter::create(&part_path, validator, failures, batch_size)
+        .map_err(FileError::Fatal)?;
 
-    let mut batch: Vec<Value> = Vec::with_capacity(batch_size);
     let mut local_skips: BTreeMap<&'static str, u64> = BTreeMap::new();
 
     // This runner handles the transform path, so there are no external lookups.
     let lookups: Lookups<M::Lookup> = HashMap::new();
 
-    for line in reader.lines() {
-        let line = match line {
-            Ok(l) if !l.trim().is_empty() => l,
-            Ok(_) => continue,
-            Err(_) => {
-                counters.lines_malformed.fetch_add(1, Ordering::Relaxed);
-                continue;
-            }
-        };
-        let Ok(rec) = serde_json::from_str::<Value>(&line) else {
-            counters.lines_malformed.fetch_add(1, Ordering::Relaxed);
-            continue;
-        };
-        counters.records_scanned.fetch_add(1, Ordering::Relaxed);
-
-        match method.extract(&rec) {
+    let tally = scan_jsonl_records(reader, |rec| {
+        match method.extract(rec) {
             Extracted::Skip(reason) => {
                 *local_skips.entry(reason).or_default() += 1;
             }
             Extracted::Items(items) => {
                 for item in items {
                     for parts in method.map_back(item, &lookups) {
-                        batch.push(build_enrichment_record(
-                            template,
-                            &parts.doi,
-                            parts.action.as_str(),
-                            parts.field,
-                            parts.original,
-                            parts.enriched,
-                        ));
-                        if batch.len() >= batch_size {
-                            part.write_batch(&batch).map_err(FileError::Fatal)?;
-                            batch.clear();
-                        }
+                        part.push(build_enrichment_record(template, parts))
+                            .map_err(FileError::Fatal)?;
                     }
                 }
             }
         }
-    }
+        Ok(())
+    })?;
 
-    if !batch.is_empty() {
-        part.write_batch(&batch).map_err(FileError::Fatal)?;
-    }
     let written = part.finish().map_err(FileError::Fatal)?;
+    counters
+        .records_scanned
+        .fetch_add(tally.scanned, Ordering::Relaxed);
+    counters
+        .lines_malformed
+        .fetch_add(tally.malformed, Ordering::Relaxed);
     counters.emitted.fetch_add(written, Ordering::Relaxed);
     merge_skips(skipped, local_skips);
     Ok(())

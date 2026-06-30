@@ -9,7 +9,9 @@
 #![allow(clippy::doc_markdown)]
 
 use comet_enrich_datacite_resource_type_general::{Config, ResourceTypeGeneral};
-use comet_enrichment_core::{Manifest, RunMeta, RunOptions, RunStats, SourceRelease, StageTimings, run};
+use comet_enrichment_core::{
+    Manifest, RunMeta, RunOptions, RunStats, SourceRelease, StageTimings, run,
+};
 use flate2::Compression;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
@@ -196,7 +198,10 @@ fn reclassifier_writes_run_manifest() {
     assert_eq!(m["schema_version"], json!(1));
     assert_eq!(m["method"]["name"], json!("resource-type-general"));
     assert_eq!(m["method"]["version"], json!(env!("CARGO_PKG_VERSION")));
-    assert_eq!(m["sources"]["datacite"]["release_date"], json!("2024-01-01"));
+    assert_eq!(
+        m["sources"]["datacite"]["release_date"],
+        json!("2024-01-01")
+    );
     assert_eq!(m["exit_status"], json!("success"));
     assert_eq!(m["artifact_paths"]["enrichments"], json!("enrichments/"));
     assert_eq!(

@@ -34,7 +34,10 @@ async fn match_bulk_success() {
         .match_bulk(&["University of Oxford".to_owned()], "affiliation")
         .await
         .unwrap();
-    assert_eq!(out, vec![Some(("https://ror.org/052gg0110".to_owned(), 0.92))]);
+    assert_eq!(
+        out,
+        vec![Some(("https://ror.org/052gg0110".to_owned(), 0.92))]
+    );
 }
 
 #[tokio::test]
@@ -90,7 +93,10 @@ async fn match_bulk_preserves_order() {
         .await;
 
     let out = client(server.uri())
-        .match_bulk(&["Matched Org".to_owned(), "Unknown".to_owned()], "affiliation")
+        .match_bulk(
+            &["Matched Org".to_owned(), "Unknown".to_owned()],
+            "affiliation",
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -110,7 +116,9 @@ async fn match_bulk_413_does_not_retry() {
         .await;
 
     let inputs: Vec<String> = (0..200).map(|_| "x".to_owned()).collect();
-    let result = client(server.uri()).match_bulk(&inputs, "affiliation").await;
+    let result = client(server.uri())
+        .match_bulk(&inputs, "affiliation")
+        .await;
     assert!(result.is_err());
 }
 
@@ -158,7 +166,10 @@ async fn match_bulk_retries_after_429() {
         .match_bulk(&["University of Oxford".to_owned()], "affiliation")
         .await
         .unwrap();
-    assert_eq!(out, vec![Some(("https://ror.org/052gg0110".to_owned(), 0.88))]);
+    assert_eq!(
+        out,
+        vec![Some(("https://ror.org/052gg0110".to_owned(), 0.88))]
+    );
 }
 
 #[tokio::test]

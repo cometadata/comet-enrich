@@ -5,7 +5,7 @@
 //! the quantitative stats nested under a [`Report`] block (raw counters, coverage,
 //! match quality, validation, and stage timings).
 //!
-//! The transform path (`reader::run`) produces a manifest with no `match` block;
+//! The transform path (`transform::run`) produces a manifest with no `match` block;
 //! the staged runner fills it in a later stage. A data-source `content_hash` and a
 //! provenance fingerprint are intentionally not produced yet — they are deferred to
 //! the hashing module.
@@ -14,7 +14,8 @@
 #![allow(clippy::module_name_repetitions)]
 
 use crate::dedup::HashBits;
-use crate::reader::{ENRICHMENTS_DIR, ENRICHMENTS_FAILED_FILE, RunStats};
+use crate::run::RunStats;
+use crate::writer::{ENRICHMENTS_DIR, ENRICHMENTS_FAILED_FILE};
 
 use anyhow::{Context, Result};
 use serde::Serialize;
@@ -256,22 +257,12 @@ impl Manifest {
     ///
     /// `hash` records the dedup-hash width the run was pinned to.
     #[must_use]
-    pub fn from_report(
-        meta: &RunMeta,
-        exit_status: &str,
-        report: Report,
-        hash: HashInfo,
-    ) -> Self {
+    pub fn from_report(meta: &RunMeta, exit_status: &str, report: Report, hash: HashInfo) -> Self {
         Self::envelope(meta, Some(hash), exit_status, report)
     }
 
     /// Wrap a finished [`Report`] in the audit envelope shared by both build paths.
-    fn envelope(
-        meta: &RunMeta,
-        hash: Option<HashInfo>,
-        exit_status: &str,
-        report: Report,
-    ) -> Self {
+    fn envelope(meta: &RunMeta, hash: Option<HashInfo>, exit_status: &str, report: Report) -> Self {
         Manifest {
             schema_version: MANIFEST_SCHEMA_VERSION,
             method: MethodInfo {

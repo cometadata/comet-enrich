@@ -15,20 +15,23 @@ pub mod manifest;
 pub mod match_service;
 pub mod method;
 pub mod provenance;
-pub mod reader;
+pub mod run;
 pub mod schema;
 pub mod staged;
 pub mod staged_run;
+pub mod transform;
 pub mod writer;
 
 pub use dedup::{DedupStore, HashBits, hash_input};
 pub use manifest::{HashInfo, Manifest, Report, RunMeta, SourceRelease, StageTimings, exit_status};
-pub use match_service::{MarpleClient, MatchHit, MatchService, RorLookup};
 #[cfg(any(test, feature = "test-support"))]
 pub use match_service::FakeMatchService;
+pub use match_service::{MarpleClient, MatchHit, MatchService, RorLookup};
 pub use method::{EnrichmentAction, EnrichmentMethod, EnrichmentParts, Extracted, Lookups};
 pub use provenance::{EnrichmentTemplate, build_enrichment_record, load_template};
-pub use reader::{ENRICHMENTS_DIR, ENRICHMENTS_FAILED_FILE, RunOptions, RunStats, run};
+pub use run::{RunOptions, RunStats};
 pub use schema::SCHEMA;
 pub use staged::{LookupConfig, Stage, WorkDir, stages_to_run};
 pub use staged_run::{pipeline_complete, run_staged};
+pub use transform::run;
+pub use writer::{ENRICHMENTS_DIR, ENRICHMENTS_FAILED_FILE};

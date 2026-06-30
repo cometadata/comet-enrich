@@ -13,7 +13,8 @@ use args::{IoArgs, LookupArgs, RunArgs, StageArg, init_logging};
 use clap::{Parser, Subcommand};
 use comet_enrichment_core::{
     EnrichmentMethod, EnrichmentTemplate, HashInfo, LookupConfig, Manifest, MarpleClient, MatchHit,
-    MatchService, RunMeta, RunStats, Stage, StageTimings, exit_status, pipeline_complete, run_staged,
+    MatchService, RunMeta, RunStats, Stage, StageTimings, exit_status, pipeline_complete,
+    run_staged,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -137,14 +138,7 @@ pub fn run(cli: Cli) -> Result<()> {
         Method::Funders(a) => {
             let method = funders::Funders::try_new((&a.lookup).into())?;
             run_lookup_method(
-                "funders",
-                &method,
-                &a.io,
-                &a.lookup,
-                &a.run,
-                &template,
-                "funder",
-                a.stage,
+                "funders", &method, &a.io, &a.lookup, &a.run, &template, "funder", a.stage,
             )
         }
     }
@@ -172,12 +166,8 @@ fn run_method<M: EnrichmentMethod>(
     let sources = io.sources()?;
 
     let started = Instant::now();
-    let stats = comet_enrichment_core::run(
-        method,
-        &io.run_options(run),
-        template,
-        validator.as_ref(),
-    )?;
+    let stats =
+        comet_enrichment_core::run(method, &io.run_options(run), template, validator.as_ref())?;
     let total_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
 
     let meta = RunMeta {
@@ -249,7 +239,10 @@ where
     };
     // `partial` if any data-losing condition occurred (read/schema/match failures) or
     // the pipeline did not complete every stage (e.g. a single-stage debug run).
-    let match_errors = report.match_.as_ref().map_or(0, |m| m.failure_taxonomy.error);
+    let match_errors = report
+        .match_
+        .as_ref()
+        .map_or(0, |m| m.failure_taxonomy.error);
     let manifest_status = exit_status(
         report.counters.files_failed,
         report.counters.schema_failures,
@@ -257,8 +250,13 @@ where
         pipeline_complete(&io.output),
     );
     let stats = report.counters.clone();
-    Manifest::from_report(&meta, manifest_status, report, HashInfo::from(cfg.hash_bits))
-        .write(&io.output)?;
+    Manifest::from_report(
+        &meta,
+        manifest_status,
+        report,
+        HashInfo::from(cfg.hash_bits),
+    )
+    .write(&io.output)?;
 
     report_stats(name, &stats);
     Ok(())
@@ -334,11 +332,23 @@ mod tests {
         assert_eq!(a.lookup.hash_bits, args::HashBitsArg::Bits128);
 
         // Only 64 and 128 are valid widths.
-        assert!(parse(&[
-            "comet-enrich", "funders", "-i", "in", "-o", "out", "--provenance", "e.yaml",
-            "--ror-file", "ror.json", "--hash-bits", "256",
-        ])
-        .is_err());
+        assert!(
+            parse(&[
+                "comet-enrich",
+                "funders",
+                "-i",
+                "in",
+                "-o",
+                "out",
+                "--provenance",
+                "e.yaml",
+                "--ror-file",
+                "ror.json",
+                "--hash-bits",
+                "256",
+            ])
+            .is_err()
+        );
     }
 
     #[test]

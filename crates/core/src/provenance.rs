@@ -5,6 +5,7 @@
 //! reused while records are written.
 
 use crate::datacite_enums;
+use crate::method::EnrichmentParts;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -128,25 +129,19 @@ impl EnrichmentTemplate {
 
 /// Build one enrichment record from method output and the shared provenance template.
 ///
-/// `field` is the top-level DataCite field being enriched, such as `"types"`.
-/// Key order is fixed and covered by tests.
+/// The [`EnrichmentParts`] carry the per-record values (doi, action, the enriched
+/// `field`, and the original/enriched JSON); the template supplies the shared
+/// provenance. Key order is fixed and covered by tests.
 #[must_use]
-pub fn build_enrichment_record(
-    template: &EnrichmentTemplate,
-    doi: &str,
-    action: &str,
-    field: &str,
-    original_value: Value,
-    enriched_value: Value,
-) -> Value {
+pub fn build_enrichment_record(template: &EnrichmentTemplate, parts: EnrichmentParts) -> Value {
     let mut m = serde_json::Map::new();
-    m.insert("doi".into(), json!(doi));
+    m.insert("doi".into(), json!(parts.doi));
     m.insert("contributors".into(), template.contributors.clone());
     m.insert("resources".into(), template.resources.clone());
-    m.insert("action".into(), json!(action));
-    m.insert("field".into(), json!(field));
-    m.insert("originalValue".into(), original_value);
-    m.insert("enrichedValue".into(), enriched_value);
+    m.insert("action".into(), json!(parts.action.as_str()));
+    m.insert("field".into(), json!(parts.field));
+    m.insert("originalValue".into(), parts.original);
+    m.insert("enrichedValue".into(), parts.enriched);
     Value::Object(m)
 }
 
@@ -311,6 +306,7 @@ pub fn validate_enrichment(cfg: &EnrichmentConfig) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::method::EnrichmentAction;
 
     fn simple_template() -> EnrichmentTemplate {
         let yaml = r#"
@@ -331,11 +327,13 @@ resources:
         let t = simple_template();
         let rec = build_enrichment_record(
             &t,
-            "10.5281/x",
-            "update",
-            "types",
-            json!({"a":1}),
-            json!({"a":2}),
+            EnrichmentParts {
+                doi: "10.5281/x".to_owned(),
+                action: EnrichmentAction::Update,
+                field: "types",
+                original: json!({"a":1}),
+                enriched: json!({"a":2}),
+            },
         );
         let s = serde_json::to_string(&rec).unwrap();
         let order = [
@@ -371,11 +369,13 @@ resources:
         enriched["resourceTypeGeneral"] = json!("JournalArticle");
         let rec = build_enrichment_record(
             &t,
-            "10.x/y",
-            "update",
-            "types",
-            original.clone(),
-            enriched.clone(),
+            EnrichmentParts {
+                doi: "10.x/y".to_owned(),
+                action: EnrichmentAction::Update,
+                field: "types",
+                original: original.clone(),
+                enriched: enriched.clone(),
+            },
         );
         for k in ["resourceType", "bibtex", "citeproc", "schemaOrg", "ris"] {
             assert_eq!(rec["originalValue"][k], original[k]);

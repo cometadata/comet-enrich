@@ -171,8 +171,7 @@ impl DedupStore {
         // collision bail or I/O error) leaves a partial file. Tolerated here — see
         // PLAN.md §5b (atomic writes are a deferred cross-cutting concern). inputs.jsonl
         // is regenerable `.work` scratch, read back only behind the extract `.done` marker.
-        let file =
-            File::create(path).with_context(|| format!("creating {}", path.display()))?;
+        let file = File::create(path).with_context(|| format!("creating {}", path.display()))?;
         let mut w = BufWriter::new(file);
         // Collision guard: the map is O(unique inputs). At 128-bit a collision is
         // infeasible, so this is effectively unused memory there — acceptable given
@@ -188,7 +187,8 @@ impl DedupStore {
             w.write_all(b"\n")
                 .with_context(|| format!("writing inputs row for {value:?}"))?;
         }
-        w.flush().with_context(|| format!("flushing {}", path.display()))?;
+        w.flush()
+            .with_context(|| format!("flushing {}", path.display()))?;
         Ok(())
     }
 }
@@ -243,7 +243,10 @@ mod tests {
         assert_eq!(h64.len(), 16);
         assert_eq!(h128.len(), 32);
         for h in [&h64, &h128] {
-            assert!(h.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+            assert!(
+                h.chars()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+            );
         }
     }
 
@@ -349,6 +352,9 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("collision"), "unexpected error: {err}");
-        assert!(err.contains("\"a\"") && err.contains("\"c\""), "error names both values: {err}");
+        assert!(
+            err.contains("\"a\"") && err.contains("\"c\""),
+            "error names both values: {err}"
+        );
     }
 }

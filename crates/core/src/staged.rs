@@ -53,6 +53,10 @@ pub struct LookupConfig {
     pub from_scratch: bool,
 }
 
+/// Scratch subdirectory inside a run's output directory, holding the staged
+/// pipeline's intermediate files. Excluded from the S3 upload by the orchestrator.
+pub const WORK_DIR: &str = ".work";
+
 /// Work directory for a staged lookup run.
 pub struct WorkDir {
     pub path: PathBuf,
@@ -62,6 +66,13 @@ impl WorkDir {
     #[must_use]
     pub fn new(path: impl Into<PathBuf>) -> Self {
         Self { path: path.into() }
+    }
+
+    /// The work directory for a run whose output directory is `output_dir`
+    /// (always `<output_dir>/.work`).
+    #[must_use]
+    pub fn for_output(output_dir: &Path) -> Self {
+        Self::new(output_dir.join(WORK_DIR))
     }
 
     #[must_use]

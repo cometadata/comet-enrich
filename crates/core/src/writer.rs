@@ -13,6 +13,12 @@ use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+/// Directory holding the gzip enrichment output parts, written inside the output
+/// directory as `enrichments/part_NNNN.jsonl.gz` (one part per input file).
+pub const ENRICHMENTS_DIR: &str = "enrichments";
+/// File name for records diverted after failing schema validation.
+pub const ENRICHMENTS_FAILED_FILE: &str = "enrichments.failed.jsonl";
+
 /// Shared sink for records that fail schema validation.
 ///
 /// One failures file serves the whole run, so all workers share a single
@@ -91,19 +97,25 @@ impl FailureSink {
 
 /// Writes schema-valid enrichment records to one gzip output part.
 ///
-/// Each worker owns one `PartWriter` for the input file it processes, so parts
-/// are written in parallel with no shared output writer. Records are validated
-/// before writing when a validator is provided; failures are diverted to the
-/// shared [`FailureSink`].
+/// Each worker owns one `PartWriter` for the input file it processes, so parts are
+/// written in parallel with no shared output writer. Records are buffered with
+/// [`PartWriter::push`] and flushed to the part in `batch_size` chunks; each record
+/// is validated before writing when a validator is provided, and failures are
+/// diverted to the shared [`FailureSink`].
 pub struct PartWriter<'a> {
     inner: GzEncoder<BufWriter<File>>,
     validator: Option<&'a jsonschema::JSONSchema>,
     failures: &'a Mutex<FailureSink>,
+    /// Records buffered since the last flush; drained in `batch_size` chunks.
+    batch: Vec<Value>,
+    /// Flush threshold: the batch is written once it reaches this many records.
+    batch_size: usize,
     pub records_written: u64,
 }
 
 impl<'a> PartWriter<'a> {
-    /// Create a gzip output part at `path`.
+    /// Create a gzip output part at `path`, flushing buffered records to it in
+    /// chunks of `batch_size`.
     ///
     /// # Errors
     ///
@@ -112,25 +124,50 @@ impl<'a> PartWriter<'a> {
         path: &Path,
         validator: Option<&'a jsonschema::JSONSchema>,
         failures: &'a Mutex<FailureSink>,
+        batch_size: usize,
     ) -> Result<Self> {
         Ok(Self {
             inner: GzEncoder::new(open_buffered(path, 256 * 1024)?, Compression::default()),
             validator,
             failures,
+            batch: Vec::with_capacity(batch_size),
+            batch_size: batch_size.max(1),
             records_written: 0,
         })
+    }
+
+    /// Buffer one record, flushing the batch to the part once it reaches
+    /// `batch_size` records.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if flushing the batch fails (a record cannot be written or
+    /// the failures file cannot be created).
+    pub fn push(&mut self, record: Value) -> Result<()> {
+        self.batch.push(record);
+        if self.batch.len() >= self.batch_size {
+            self.flush_batch()?;
+        }
+        Ok(())
+    }
+
+    /// Write the buffered batch to the part, keeping its allocation for reuse.
+    fn flush_batch(&mut self) -> Result<()> {
+        if self.batch.is_empty() {
+            return Ok(());
+        }
+        let mut batch = std::mem::take(&mut self.batch);
+        let result = self.write_batch(&batch);
+        batch.clear();
+        self.batch = batch;
+        result
     }
 
     /// Write records as JSONL, validating each one first when a validator is set.
     ///
     /// Valid records are written to this part. Records that fail validation are
     /// diverted to the shared failures sink rather than aborting.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if a record cannot be written or the failures file cannot
-    /// be created.
-    pub fn write_batch(&mut self, batch: &[Value]) -> Result<()> {
+    fn write_batch(&mut self, batch: &[Value]) -> Result<()> {
         for rec in batch {
             // Resolve validation into an owned result so the borrow of `validator`
             // ends before we touch `inner` / `failures`.
@@ -150,14 +187,16 @@ impl<'a> PartWriter<'a> {
         Ok(())
     }
 
-    /// Finish the gzip stream and flush the part to disk, returning the number of
-    /// records written.
+    /// Flush any buffered records, finish the gzip stream, and flush the part to
+    /// disk, returning the number of records written.
     ///
     /// # Errors
     ///
-    /// Returns an error if the gzip trailer cannot be written or the underlying
-    /// file cannot be flushed.
-    pub fn finish(self) -> Result<u64> {
+    /// Returns an error if a buffered record cannot be written, the gzip trailer
+    /// cannot be written, or the underlying file cannot be flushed.
+    pub fn finish(mut self) -> Result<u64> {
+        // Flush records still buffered below the batch threshold.
+        self.flush_batch()?;
         // `finish` writes the gzip trailer into the BufWriter, which may still hold
         // those bytes, so flush it explicitly rather than relying on Drop (which
         // would swallow the error).
@@ -195,7 +234,7 @@ mod tests {
         let failed = dir.path().join("out.failed.jsonl");
         let failures = Mutex::new(FailureSink::create(&failed).unwrap());
         {
-            let mut w = PartWriter::create(&part, None, &failures).unwrap();
+            let mut w = PartWriter::create(&part, None, &failures, 5000).unwrap();
             w.write_batch(&[json!({"a":1}), json!({"b":2})]).unwrap();
             assert_eq!(w.finish().unwrap(), 2);
         }
@@ -209,6 +248,27 @@ mod tests {
     }
 
     #[test]
+    fn push_buffers_and_flushes_every_record() {
+        // batch_size 2: pushing three records flushes the first two at the
+        // threshold and the third on finish, so none are lost at the boundary.
+        let dir = tempfile::tempdir().unwrap();
+        let part = dir.path().join("part_0000.jsonl.gz");
+        let failed = dir.path().join("out.failed.jsonl");
+        let failures = Mutex::new(FailureSink::create(&failed).unwrap());
+        let written = {
+            let mut w = PartWriter::create(&part, None, &failures, 2).unwrap();
+            w.push(json!({"n":1})).unwrap();
+            w.push(json!({"n":2})).unwrap();
+            w.push(json!({"n":3})).unwrap();
+            w.finish().unwrap()
+        };
+        assert_eq!(written, 3);
+        let lines: Vec<String> = read_gz(&part).lines().map(str::to_owned).collect();
+        assert_eq!(lines, vec![r#"{"n":1}"#, r#"{"n":2}"#, r#"{"n":3}"#]);
+        assert!(!failed.exists());
+    }
+
+    #[test]
     fn invalid_records_are_diverted() {
         let dir = tempfile::tempdir().unwrap();
         let part = dir.path().join("part_0000.jsonl.gz");
@@ -218,7 +278,7 @@ mod tests {
         let failures = Mutex::new(FailureSink::create(&failed).unwrap());
 
         let records_written = {
-            let mut w = PartWriter::create(&part, Some(&schema), &failures).unwrap();
+            let mut w = PartWriter::create(&part, Some(&schema), &failures, 5000).unwrap();
             w.write_batch(&[json!({"a":1}), json!({"b":2})]).unwrap();
             w.finish().unwrap()
         };
@@ -249,7 +309,7 @@ mod tests {
             let schema = crate::schema::compile_str(schema_text).unwrap();
             let failures = Mutex::new(FailureSink::create(&failed).unwrap());
             {
-                let mut w = PartWriter::create(&part, Some(&schema), &failures).unwrap();
+                let mut w = PartWriter::create(&part, Some(&schema), &failures, 5000).unwrap();
                 w.write_batch(&[json!({"b":2})]).unwrap();
                 w.finish().unwrap();
             }
@@ -262,7 +322,7 @@ mod tests {
             let schema = crate::schema::compile_str(schema_text).unwrap();
             let failures = Mutex::new(FailureSink::create(&failed).unwrap());
             {
-                let mut w = PartWriter::create(&part, Some(&schema), &failures).unwrap();
+                let mut w = PartWriter::create(&part, Some(&schema), &failures, 5000).unwrap();
                 w.write_batch(&[json!({"a":1})]).unwrap();
                 w.finish().unwrap();
             }

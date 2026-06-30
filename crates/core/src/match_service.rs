@@ -46,6 +46,12 @@ fn retry_after_secs(response: &reqwest::Response) -> Option<u64> {
         .ok()
 }
 
+/// Capped exponential backoff for a 0-based retry `attempt`: `2^attempt` seconds,
+/// clamped to [`MAX_RETRY_WAIT`].
+fn backoff(attempt: u32) -> Duration {
+    Duration::from_secs(2u64.pow(attempt)).min(MAX_RETRY_WAIT)
+}
+
 /// Borrow at most `max` chars of `s`, for including a body snippet in an error.
 fn truncate(s: &str, max: usize) -> &str {
     match s.char_indices().nth(max) {
@@ -183,12 +189,13 @@ impl MatchService for MarpleClient {
                     let status = response.status();
                     if status.is_success() {
                         let text = response.text().await?;
-                        let parsed: BulkResponse = serde_json::from_str(&text).with_context(|| {
-                            format!(
-                                "parsing match response (status {status}, body: {})",
-                                truncate(&text, 200)
-                            )
-                        })?;
+                        let parsed: BulkResponse =
+                            serde_json::from_str(&text).with_context(|| {
+                                format!(
+                                    "parsing match response (status {status}, body: {})",
+                                    truncate(&text, 200)
+                                )
+                            })?;
                         if parsed.message.items.len() != inputs.len() {
                             return Err(anyhow!(
                                 "bulk response length mismatch: got {} results for {} inputs",
@@ -200,7 +207,9 @@ impl MatchService for MarpleClient {
                             .message
                             .items
                             .into_iter()
-                            .map(|outer| outer.items.into_iter().next().map(|i| (i.id, i.confidence)))
+                            .map(|outer| {
+                                outer.items.into_iter().next().map(|i| (i.id, i.confidence))
+                            })
                             .collect());
                     } else if status == StatusCode::PAYLOAD_TOO_LARGE {
                         // Domain-phrased; the CLI layer owns the batch-size flag name.
@@ -210,9 +219,12 @@ impl MatchService for MarpleClient {
                         ));
                     } else if is_retryable(status) {
                         if attempt < MAX_RETRIES - 1 {
-                            let secs =
-                                retry_after_secs(&response).unwrap_or(2u64.pow(attempt));
-                            let wait = Duration::from_secs(secs).min(MAX_RETRY_WAIT);
+                            // Honour a numeric `Retry-After` (still capped); otherwise
+                            // fall back to exponential backoff.
+                            let wait = match retry_after_secs(&response) {
+                                Some(secs) => Duration::from_secs(secs).min(MAX_RETRY_WAIT),
+                                None => backoff(attempt),
+                            };
                             log::warn!("HTTP {status}, retrying in {}s", wait.as_secs());
                             sleep(wait).await;
                             continue;
@@ -227,7 +239,7 @@ impl MatchService for MarpleClient {
                 }
                 Err(e) => {
                     if attempt < MAX_RETRIES - 1 {
-                        let wait = Duration::from_secs(2u64.pow(attempt)).min(MAX_RETRY_WAIT);
+                        let wait = backoff(attempt);
                         log::warn!("request error, retrying in {}s: {e}", wait.as_secs());
                         sleep(wait).await;
                         continue;
@@ -264,7 +276,10 @@ impl MatchService for FakeMatchService {
         inputs: &[String],
         _task: &str,
     ) -> Result<Vec<Option<(String, f64)>>> {
-        Ok(inputs.iter().map(|i| self.matches.get(i).cloned()).collect())
+        Ok(inputs
+            .iter()
+            .map(|i| self.matches.get(i).cloned())
+            .collect())
     }
 }
 
@@ -276,8 +291,14 @@ mod tests {
     #[tokio::test]
     async fn fake_returns_one_slot_per_input_in_order() {
         let mut map = HashMap::new();
-        map.insert("MIT".to_owned(), ("https://ror.org/042nb2s44".to_owned(), 0.99));
-        map.insert("NSF".to_owned(), ("https://ror.org/021nxhr62".to_owned(), 0.97));
+        map.insert(
+            "MIT".to_owned(),
+            ("https://ror.org/042nb2s44".to_owned(), 0.99),
+        );
+        map.insert(
+            "NSF".to_owned(),
+            ("https://ror.org/021nxhr62".to_owned(), 0.97),
+        );
         let svc = FakeMatchService::new(map);
 
         let inputs = vec!["NSF".to_owned(), "unknown".to_owned(), "MIT".to_owned()];

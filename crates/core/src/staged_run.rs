@@ -1,7 +1,7 @@
 //! The staged runner that drives a lookup method through extract → query →
 //! reconcile, serializing the on-disk stage contract under `<output>/.work`.
 //!
-//! Where [`crate::reader::run`] is the single-pass transform path, [`run_staged`]
+//! Where [`crate::transform::run`] is the single-pass transform path, [`run_staged`]
 //! is the lookup path: it scans the corpus once (extract), resolves the unique
 //! inputs against a [`MatchService`] (query), then joins the matches back onto each
 //! extraction and emits enrichment records (reconcile). Each stage writes a `.done`
@@ -13,24 +13,24 @@
 //! never names a method's fields.
 
 use crate::dedup::{DedupStore, HashBits};
+use crate::fanout::{
+    FileError, input_files, make_pool, own_skips, scan_jsonl_records, sorted_glob,
+};
 use crate::manifest::{
-    Coverage, HistogramBucket, MatchFailureTaxonomy, MatchSummary, Report, StageTimings,
-    Validation,
+    Coverage, HistogramBucket, MatchFailureTaxonomy, MatchSummary, Report, StageTimings, Validation,
 };
 use crate::match_service::{MatchHit, MatchService};
 use crate::method::EnrichmentMethod;
 use crate::provenance::{EnrichmentTemplate, build_enrichment_record};
-use crate::reader::{ENRICHMENTS_DIR, ENRICHMENTS_FAILED_FILE, RunOptions, RunStats};
+use crate::run::{RunOptions, RunStats};
 use crate::staged::{Stage, WorkDir, stages_to_run};
-use crate::writer::{FailureSink, PartWriter};
+use crate::writer::{ENRICHMENTS_DIR, ENRICHMENTS_FAILED_FILE, FailureSink, PartWriter};
 
 use anyhow::{Context, Result, bail};
 use flate2::read::GzDecoder;
-use crate::fanout::{FileError, input_files, make_pool, sorted_glob};
 use rayon::prelude::*;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, BufWriter, Write};
@@ -41,8 +41,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 use tokio::sync::{Mutex as AsyncMutex, Semaphore};
 
-/// Scratch directory inside the output dir; excluded from the S3 upload.
-pub const WORK_DIR: &str = ".work";
 const EXTRACTIONS_DIR: &str = "extractions";
 const INPUTS_FILE: &str = "inputs.jsonl";
 const LOOKUPS_FILE: &str = "lookups.jsonl";
@@ -158,21 +156,21 @@ where
     M::Extraction: Serialize + DeserializeOwned,
     M::Lookup: Serialize + DeserializeOwned + From<MatchHit> + Send + Sync + 'static,
 {
-    let work_path = io.output.join(WORK_DIR);
-    fs::create_dir_all(&work_path)
+    let wd = WorkDir::for_output(&io.output);
+    let work_path = wd.path.as_path();
+    fs::create_dir_all(work_path)
         .with_context(|| format!("creating work dir {}", work_path.display()))?;
-    let wd = WorkDir::new(&work_path);
 
     // Pin the hash width on the first run, or refuse a resume that asks for a
     // different one (a width mismatch silently breaks the hash join).
-    pin_or_validate_hash_bits(&work_path, cfg.hash_bits, cfg.from_scratch)?;
+    pin_or_validate_hash_bits(work_path, cfg.hash_bits, cfg.from_scratch)?;
 
     let stages = match only_stage {
         Some(stage) => {
             ensure_predecessors_done(&wd, stage)?;
             vec![stage]
         }
-        None => stages_to_run(&work_path, cfg.from_scratch),
+        None => stages_to_run(work_path, cfg.from_scratch),
     };
 
     let mut timings = StageTimings::default();
@@ -182,15 +180,15 @@ where
         let started = Instant::now();
         match stage {
             Stage::Extract => {
-                run_extract(method, io, &work_path, cfg.hash_bits)?;
+                run_extract(method, io, work_path, cfg.hash_bits)?;
                 timings.extract = Some(elapsed_ms(started));
             }
             Stage::Query => {
-                run_query::<M::Lookup>(svc.clone(), cfg, &work_path, task)?;
+                run_query::<M::Lookup>(svc.clone(), cfg, work_path, task)?;
                 timings.query = Some(elapsed_ms(started));
             }
             Stage::Reconcile => {
-                run_reconcile(method, io, &work_path, template, validator)?;
+                run_reconcile(method, io, work_path, template, validator)?;
                 timings.reconcile = Some(elapsed_ms(started));
             }
         }
@@ -201,7 +199,7 @@ where
     timings.total = Some(elapsed_ms(run_start));
     // The report is assembled from the persisted per-stage stats (not from what ran
     // this invocation), so a resume/rerun that skips a stage still reports the truth.
-    build_report(&work_path, &wd, timings)
+    build_report(work_path, &wd, timings)
 }
 
 /// Whether a staged run directory has completed all stages.
@@ -210,15 +208,15 @@ where
 /// the manifest even when its counters look clean.
 #[must_use]
 pub fn pipeline_complete(output_dir: &Path) -> bool {
-    WorkDir::new(output_dir.join(WORK_DIR)).all_complete()
+    WorkDir::for_output(output_dir).all_complete()
 }
 
 /// Pin the dedup-hash width in the run dir, or validate it against a resume.
 fn pin_or_validate_hash_bits(work: &Path, hash_bits: HashBits, from_scratch: bool) -> Result<()> {
     let path = work.join(HASH_BITS_FILE);
     if path.exists() && !from_scratch {
-        let pinned = fs::read_to_string(&path)
-            .with_context(|| format!("reading {}", path.display()))?;
+        let pinned =
+            fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
         let pinned = pinned.trim();
         if pinned != hash_bits.as_str() {
             bail!(
@@ -283,15 +281,17 @@ where
         files
             .par_iter()
             .enumerate()
-            .map(|(idx, path)| match extract_one_file(idx, path, &extractions_dir, method) {
-                Ok(agg) => Ok(agg),
-                Err(FileError::Read(e)) => {
-                    log::error!("file error {}: {e}", path.display());
-                    files_failed.fetch_add(1, Ordering::Relaxed);
-                    Ok(ExtractAgg::default())
-                }
-                Err(FileError::Fatal(e)) => Err(e),
-            })
+            .map(
+                |(idx, path)| match extract_one_file(idx, path, &extractions_dir, method) {
+                    Ok(agg) => Ok(agg),
+                    Err(FileError::Read(e)) => {
+                        log::error!("file error {}: {e}", path.display());
+                        files_failed.fetch_add(1, Ordering::Relaxed);
+                        Ok(ExtractAgg::default())
+                    }
+                    Err(FileError::Fatal(e)) => Err(e),
+                },
+            )
             .try_reduce(ExtractAgg::default, |a, b| Ok(a.merge(b)))
     })?;
 
@@ -306,11 +306,7 @@ where
         records_scanned: agg.records_scanned,
         lines_malformed: agg.lines_malformed,
         in_scope_units: agg.in_scope_units,
-        skipped: agg
-            .skipped
-            .into_iter()
-            .map(|(reason, n)| (reason.to_owned(), n))
-            .collect(),
+        skipped: own_skips(agg.skipped),
     };
     let json = serde_json::to_string(&stats).context("serializing extract stats")?;
     fs::write(work.join(EXTRACT_STATS_FILE), json).context("writing extract.stats.json")?;
@@ -342,27 +338,11 @@ where
     let mut part = BufWriter::new(file);
 
     let mut dedup = DedupStore::new();
-    let mut records_scanned: u64 = 0;
-    let mut lines_malformed: u64 = 0;
     let mut in_scope_units: u64 = 0;
     let mut skipped: BTreeMap<&'static str, u64> = BTreeMap::new();
 
-    for line in reader.lines() {
-        let line = match line {
-            Ok(l) if !l.trim().is_empty() => l,
-            Ok(_) => continue,
-            Err(_) => {
-                lines_malformed += 1;
-                continue;
-            }
-        };
-        let Ok(rec) = serde_json::from_str::<Value>(&line) else {
-            lines_malformed += 1;
-            continue;
-        };
-        records_scanned += 1;
-
-        match method.extract(&rec) {
+    let tally = scan_jsonl_records(reader, |rec| {
+        match method.extract(rec) {
             crate::method::Extracted::Skip(reason) => {
                 *skipped.entry(reason).or_default() += 1;
             }
@@ -383,15 +363,16 @@ where
                 }
             }
         }
-    }
+        Ok(())
+    })?;
 
     part.flush()
         .with_context(|| format!("flushing {}", part_path.display()))
         .map_err(FileError::Fatal)?;
     Ok(ExtractAgg {
         dedup,
-        records_scanned,
-        lines_malformed,
+        records_scanned: tally.scanned,
+        lines_malformed: tally.malformed,
         in_scope_units,
         skipped,
     })
@@ -433,7 +414,9 @@ where
     // The query stage always runs whole: a crash re-runs the stage from the start
     // (the `.done` marker, not a checkpoint, is the resume unit), so the result
     // files are truncated and rewritten rather than appended to.
-    let matches_w = Arc::new(AsyncMutex::new(create_line_writer(&work.join(LOOKUPS_FILE))?));
+    let matches_w = Arc::new(AsyncMutex::new(create_line_writer(
+        &work.join(LOOKUPS_FILE),
+    )?));
     let failed_w = Arc::new(AsyncMutex::new(create_line_writer(
         &work.join(LOOKUPS_FAILED_FILE),
     )?));
@@ -522,18 +505,8 @@ where
 }
 
 fn read_inputs(path: &Path) -> Result<Vec<InputRecord>> {
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-    let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
     let mut rows = Vec::new();
-    for line in BufReader::new(file).lines() {
-        let line = line.with_context(|| format!("reading {}", path.display()))?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        rows.push(serde_json::from_str(&line).context("parsing inputs.jsonl row")?);
-    }
+    for_each_jsonl(path, |row: InputRecord| rows.push(row))?;
     Ok(rows)
 }
 
@@ -586,14 +559,23 @@ where
     let enrich_dir = io.output.join(ENRICHMENTS_DIR);
     fs::create_dir_all(&enrich_dir)
         .with_context(|| format!("creating {}", enrich_dir.display()))?;
-    let failures = Mutex::new(FailureSink::create(&io.output.join(ENRICHMENTS_FAILED_FILE))?);
+    let failures = Mutex::new(FailureSink::create(
+        &io.output.join(ENRICHMENTS_FAILED_FILE),
+    )?);
 
     let emitted = AtomicU64::new(0);
     let pool = make_pool(io.threads)?;
     pool.install(|| {
         parts.par_iter().enumerate().try_for_each(|(idx, path)| {
             let written = reconcile_one_part(
-                idx, path, &enrich_dir, &lookups, method, template, validator, &failures,
+                idx,
+                path,
+                &enrich_dir,
+                &lookups,
+                method,
+                template,
+                validator,
+                &failures,
                 io.batch_size,
             )?;
             emitted.fetch_add(written, Ordering::Relaxed);
@@ -619,18 +601,9 @@ where
 
 fn load_lookups<L: DeserializeOwned>(path: &Path) -> Result<crate::method::Lookups<L>> {
     let mut map = crate::method::Lookups::new();
-    if !path.exists() {
-        return Ok(map);
-    }
-    let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
-    for line in BufReader::new(file).lines() {
-        let line = line.with_context(|| format!("reading {}", path.display()))?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        let row: LookupRow<L> = serde_json::from_str(&line).context("parsing lookups.jsonl row")?;
+    for_each_jsonl(path, |row: LookupRow<L>| {
         map.insert(row.hash, row.lookup);
-    }
+    })?;
     Ok(map)
 }
 
@@ -654,8 +627,7 @@ where
     let reader = BufReader::new(file);
 
     let part_path = enrich_dir.join(format!("part_{idx:04}.jsonl.gz"));
-    let mut part = PartWriter::create(&part_path, validator, failures)?;
-    let mut batch: Vec<Value> = Vec::with_capacity(batch_size);
+    let mut part = PartWriter::create(&part_path, validator, failures, batch_size)?;
 
     for line in reader.lines() {
         let line = line.with_context(|| format!("reading {}", path.display()))?;
@@ -665,22 +637,8 @@ where
         let extraction: M::Extraction =
             serde_json::from_str(&line).context("parsing extraction row")?;
         for parts in method.map_back(extraction, lookups) {
-            batch.push(build_enrichment_record(
-                template,
-                &parts.doi,
-                parts.action.as_str(),
-                parts.field,
-                parts.original,
-                parts.enriched,
-            ));
-            if batch.len() >= batch_size {
-                part.write_batch(&batch)?;
-                batch.clear();
-            }
+            part.push(build_enrichment_record(template, parts))?;
         }
-    }
-    if !batch.is_empty() {
-        part.write_batch(&batch)?;
     }
     part.finish()
 }
@@ -856,11 +814,12 @@ mod tests {
     use crate::match_service::{FakeMatchService, RorLookup};
     use crate::method::{EnrichmentAction, EnrichmentParts, Extracted, Lookups};
     use crate::provenance::EnrichmentTemplate;
-    use std::path::PathBuf;
+    use crate::staged::WORK_DIR;
     use flate2::Compression;
     use flate2::write::GzEncoder;
-    use serde_json::json;
+    use serde_json::{Value, json};
     use std::collections::HashMap;
+    use std::path::PathBuf;
 
     /// A funder-shaped test method: one extraction per record carrying the funder
     /// name and its hash; `map_back` enriches matched names.
@@ -941,8 +900,14 @@ mod tests {
 
     fn fake_service() -> Arc<dyn MatchService> {
         let mut map = HashMap::new();
-        map.insert("MIT".to_owned(), ("https://ror.org/042nb2s44".to_owned(), 0.99));
-        map.insert("NSF".to_owned(), ("https://ror.org/021nxhr62".to_owned(), 0.95));
+        map.insert(
+            "MIT".to_owned(),
+            ("https://ror.org/042nb2s44".to_owned(), 0.99),
+        );
+        map.insert(
+            "NSF".to_owned(),
+            ("https://ror.org/021nxhr62".to_owned(), 0.95),
+        );
         Arc::new(FakeMatchService::new(map))
     }
 
@@ -975,7 +940,10 @@ mod tests {
         let output = dir.path().join("output");
         fs::create_dir_all(input.join("updated_2024-01")).unwrap();
         fs::create_dir_all(&output).unwrap();
-        write_gz(&input.join("updated_2024-01/part_0000.jsonl.gz"), &sample_records());
+        write_gz(
+            &input.join("updated_2024-01/part_0000.jsonl.gz"),
+            &sample_records(),
+        );
         (dir, input, output)
     }
 
@@ -991,7 +959,9 @@ mod tests {
     #[test]
     fn full_pipeline_produces_contract_and_match_block() {
         let (_dir, input, output) = fixture();
-        let method = TestMethod { hash_bits: HashBits::Bits64 };
+        let method = TestMethod {
+            hash_bits: HashBits::Bits64,
+        };
         let svc = fake_service();
         let tmpl = template();
 
@@ -1083,7 +1053,9 @@ mod tests {
     #[test]
     fn only_stage_extract_runs_just_extract() {
         let (_dir, input, output) = fixture();
-        let method = TestMethod { hash_bits: HashBits::Bits64 };
+        let method = TestMethod {
+            hash_bits: HashBits::Bits64,
+        };
         let svc = fake_service();
         let tmpl = template();
 
@@ -1110,7 +1082,9 @@ mod tests {
     #[test]
     fn only_stage_query_without_extract_errors() {
         let (_dir, input, output) = fixture();
-        let method = TestMethod { hash_bits: HashBits::Bits64 };
+        let method = TestMethod {
+            hash_bits: HashBits::Bits64,
+        };
         let svc = fake_service();
         let tmpl = template();
 
@@ -1131,13 +1105,24 @@ mod tests {
     #[test]
     fn resume_after_deleting_reconcile_marker_reproduces_output() {
         let (_dir, input, output) = fixture();
-        let method = TestMethod { hash_bits: HashBits::Bits64 };
+        let method = TestMethod {
+            hash_bits: HashBits::Bits64,
+        };
         let svc = fake_service();
         let tmpl = template();
         let opts = run_opts(&input, &output);
 
-        run_staged(&method, &opts, &cfg(HashBits::Bits64, true), &svc, &tmpl, None, "funder", None)
-            .unwrap();
+        run_staged(
+            &method,
+            &opts,
+            &cfg(HashBits::Bits64, true),
+            &svc,
+            &tmpl,
+            None,
+            "funder",
+            None,
+        )
+        .unwrap();
 
         // Drop the reconcile marker and resume: only reconcile should rerun.
         fs::remove_file(output.join(WORK_DIR).join("reconcile.done")).unwrap();
@@ -1163,13 +1148,24 @@ mod tests {
     #[test]
     fn resume_with_mismatched_hash_width_errors() {
         let (_dir, input, output) = fixture();
-        let method = TestMethod { hash_bits: HashBits::Bits64 };
+        let method = TestMethod {
+            hash_bits: HashBits::Bits64,
+        };
         let svc = fake_service();
         let tmpl = template();
         let opts = run_opts(&input, &output);
 
-        run_staged(&method, &opts, &cfg(HashBits::Bits64, true), &svc, &tmpl, None, "funder", None)
-            .unwrap();
+        run_staged(
+            &method,
+            &opts,
+            &cfg(HashBits::Bits64, true),
+            &svc,
+            &tmpl,
+            None,
+            "funder",
+            None,
+        )
+        .unwrap();
 
         let err = run_staged(
             &method,
@@ -1182,7 +1178,10 @@ mod tests {
             None,
         )
         .unwrap_err();
-        assert!(err.to_string().contains("hash-width mismatch"), "got: {err}");
+        assert!(
+            err.to_string().contains("hash-width mismatch"),
+            "got: {err}"
+        );
     }
 
     /// A match service that always errors a whole batch (a sustained outage).
@@ -1204,14 +1203,24 @@ mod tests {
         // The audit-integrity regression: re-running an already-complete run must not
         // rewrite the report with emitted: 0 / coverage 0.0.
         let (_dir, input, output) = fixture();
-        let method = TestMethod { hash_bits: HashBits::Bits64 };
+        let method = TestMethod {
+            hash_bits: HashBits::Bits64,
+        };
         let svc = fake_service();
         let tmpl = template();
         let opts = run_opts(&input, &output);
 
-        let first =
-            run_staged(&method, &opts, &cfg(HashBits::Bits64, true), &svc, &tmpl, None, "funder", None)
-                .unwrap();
+        let first = run_staged(
+            &method,
+            &opts,
+            &cfg(HashBits::Bits64, true),
+            &svc,
+            &tmpl,
+            None,
+            "funder",
+            None,
+        )
+        .unwrap();
 
         // Re-run into the same dir without --from-scratch: every stage is complete, so
         // no stage runs this invocation, but the report is read from the sidecars.
@@ -1229,7 +1238,10 @@ mod tests {
 
         assert_eq!(again.counters.emitted, first.counters.emitted);
         assert_eq!(again.counters.emitted, 2);
-        assert_eq!(again.coverage.records_in_scope, first.coverage.records_in_scope);
+        assert_eq!(
+            again.coverage.records_in_scope,
+            first.coverage.records_in_scope
+        );
         assert_eq!(again.coverage.records_enriched, 2);
         assert_eq!(again.match_.unwrap().matched, 2);
     }
@@ -1237,7 +1249,9 @@ mod tests {
     #[test]
     fn rejecting_validator_surfaces_schema_failures() {
         let (_dir, input, output) = fixture();
-        let method = TestMethod { hash_bits: HashBits::Bits64 };
+        let method = TestMethod {
+            hash_bits: HashBits::Bits64,
+        };
         let svc = fake_service();
         let tmpl = template();
         // A schema no enrichment record satisfies: every emitted record is diverted.
@@ -1262,13 +1276,18 @@ mod tests {
         assert_eq!(report.validation.schema_failures, 2);
         assert!(output.join(ENRICHMENTS_FAILED_FILE).exists());
         // A run that lost records to validation is not a full success.
-        assert_eq!(crate::exit_status(0, report.counters.schema_failures, 0, true), "partial");
+        assert_eq!(
+            crate::exit_status(0, report.counters.schema_failures, 0, true),
+            "partial"
+        );
     }
 
     #[test]
     fn batch_error_is_recorded_not_certified_as_success() {
         let (_dir, input, output) = fixture();
-        let method = TestMethod { hash_bits: HashBits::Bits64 };
+        let method = TestMethod {
+            hash_bits: HashBits::Bits64,
+        };
         let svc: Arc<dyn MatchService> = Arc::new(ErroringService);
         let tmpl = template();
 
@@ -1291,7 +1310,12 @@ mod tests {
         assert_eq!(m.failure_taxonomy.no_match, 0);
         assert_eq!(report.counters.emitted, 0);
         // The pipeline completed, but it lost data — so it must read as partial.
-        let status = crate::exit_status(report.counters.files_failed, 0, m.failure_taxonomy.error, true);
+        let status = crate::exit_status(
+            report.counters.files_failed,
+            0,
+            m.failure_taxonomy.error,
+            true,
+        );
         assert_eq!(status, "partial");
     }
 
