@@ -11,8 +11,14 @@ pub mod args;
 use anyhow::Result;
 use args::{IoArgs, LookupArgs, RunArgs, StageArg, init_logging};
 use clap::{Parser, Subcommand};
-use comet_enrichment_core::{EnrichmentMethod, EnrichmentTemplate, Manifest, RunMeta, RunStats, StageTimings};
+use comet_enrichment_core::{
+    EnrichmentMethod, EnrichmentTemplate, HashInfo, LookupConfig, Manifest, MarpleClient, MatchHit,
+    MatchService, RunMeta, RunStats, Stage, StageTimings, run_staged,
+};
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Instant;
 
 /// Command-line arguments for comet-enrich.
@@ -117,11 +123,29 @@ pub fn run(cli: Cli) -> Result<()> {
         }
         Method::Affiliations(a) => {
             let method = affiliations::Affiliations::try_new((&a.lookup).into())?;
-            run_method("affiliations", &method, &a.io, &a.run, &template, &[])
+            run_lookup_method(
+                "affiliations",
+                &method,
+                &a.io,
+                &a.lookup,
+                &a.run,
+                &template,
+                "affiliation",
+                a.stage,
+            )
         }
         Method::Funders(a) => {
             let method = funders::Funders::try_new((&a.lookup).into())?;
-            run_method("funders", &method, &a.io, &a.run, &template, &[])
+            run_lookup_method(
+                "funders",
+                &method,
+                &a.io,
+                &a.lookup,
+                &a.run,
+                &template,
+                "funder",
+                a.stage,
+            )
         }
     }
 }
@@ -174,12 +198,76 @@ fn run_method<M: EnrichmentMethod>(
     };
     Manifest::build(&stats, &meta, out_of_scope, &timings, exit_status).write(&io.output)?;
 
-    report(name, &stats);
+    report_stats(name, &stats);
+    Ok(())
+}
+
+/// Run a lookup method through the staged pipeline and write the run manifest.
+///
+/// Drives extract → query → reconcile (or the single `stage` when given) against the
+/// Marple match service, then records the result plus the dedup-hash identity in the
+/// manifest.
+///
+/// # Errors
+/// Propagates any error from schema compilation, source validation, building the
+/// match client, the staged run itself, or writing the manifest.
+#[allow(clippy::too_many_arguments)]
+fn run_lookup_method<M>(
+    name: &str,
+    method: &M,
+    io: &IoArgs,
+    lookup: &LookupArgs,
+    run: &RunArgs,
+    template: &EnrichmentTemplate,
+    task: &str,
+    stage: Option<StageArg>,
+) -> Result<()>
+where
+    M: EnrichmentMethod,
+    M::Extraction: Serialize + DeserializeOwned,
+    M::Lookup: Serialize + DeserializeOwned + From<MatchHit> + Send + Sync + 'static,
+{
+    let validator = run.validator()?;
+    // Validate all CLI metadata before any work (a typo must not waste a corpus pass).
+    let sources = io.sources()?;
+
+    let cfg: LookupConfig = lookup.into();
+    let svc: Arc<dyn MatchService> = Arc::new(MarpleClient::from_config(&cfg)?);
+    let only_stage: Option<Stage> = stage.map(Into::into);
+
+    let report = run_staged(
+        method,
+        &io.run_options(run),
+        &cfg,
+        &svc,
+        template,
+        validator.as_ref(),
+        task,
+        only_stage,
+    )?;
+
+    let meta = RunMeta {
+        method_name: name.to_owned(),
+        method_version: env!("CARGO_PKG_VERSION"),
+        sources,
+    };
+    // A run with read failures still produces output, but it is not a complete
+    // corpus pass, so the manifest must not certify it as a full success.
+    let exit_status = if report.counters.files_failed > 0 {
+        "partial"
+    } else {
+        "success"
+    };
+    let stats = report.counters.clone();
+    Manifest::from_report(&meta, exit_status, report, HashInfo::from(cfg.hash_bits))
+        .write(&io.output)?;
+
+    report_stats(name, &stats);
     Ok(())
 }
 
 /// Log the summary counters for a completed run.
-fn report(method: &str, stats: &RunStats) {
+fn report_stats(method: &str, stats: &RunStats) {
     log::info!(
         "{method}: {} files processed ({} failed), {} records scanned, {} emitted, {} failed validation, {} malformed",
         stats.files_processed,
@@ -221,7 +309,38 @@ mod tests {
         assert_eq!(a.lookup.ror_batch_size, 50);
         assert_eq!(a.run.threads, 0);
         assert_eq!(a.run.log_level, log::LevelFilter::Info);
+        assert_eq!(a.lookup.hash_bits, args::HashBitsArg::Bits64);
         assert!(a.stage.is_none());
+    }
+
+    #[test]
+    fn hash_bits_parses_and_rejects_other_widths() {
+        let cli = parse(&[
+            "comet-enrich",
+            "funders",
+            "-i",
+            "in",
+            "-o",
+            "out",
+            "--provenance",
+            "e.yaml",
+            "--ror-file",
+            "ror.json",
+            "--hash-bits",
+            "128",
+        ])
+        .unwrap();
+        let Method::Funders(a) = cli.method else {
+            panic!("expected funders");
+        };
+        assert_eq!(a.lookup.hash_bits, args::HashBitsArg::Bits128);
+
+        // Only 64 and 128 are valid widths.
+        assert!(parse(&[
+            "comet-enrich", "funders", "-i", "in", "-o", "out", "--provenance", "e.yaml",
+            "--ror-file", "ror.json", "--hash-bits", "256",
+        ])
+        .is_err());
     }
 
     #[test]

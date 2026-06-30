@@ -97,10 +97,6 @@ impl EnrichmentMethod for ResourceTypeGeneral {
     type Extraction = EnrichmentParts;
     type Lookup = ();
 
-    fn field(&self) -> &'static str {
-        "types"
-    }
-
     fn extract(&self, record: &Value) -> Extracted<Self::Extraction> {
         let Some(attributes) = record.get("attributes").filter(|v| !v.is_null()) else {
             return Extracted::Skip("malformed_types");
@@ -139,6 +135,7 @@ impl EnrichmentMethod for ResourceTypeGeneral {
         Extracted::Items(vec![EnrichmentParts {
             doi,
             action: EnrichmentAction::Update,
+            field: "types",
             original: types.clone(),
             enriched,
         }])

@@ -8,7 +8,9 @@
 #![allow(clippy::doc_markdown)]
 
 use anyhow::{Result, bail};
-use comet_enrichment_core::{EnrichmentMethod, EnrichmentParts, Extracted, LookupConfig, Lookups};
+use comet_enrichment_core::{
+    EnrichmentMethod, EnrichmentParts, Extracted, LookupConfig, Lookups, RorLookup,
+};
 use serde_json::Value;
 
 /// Matches DataCite creator affiliation strings to ROR organizations.
@@ -32,12 +34,10 @@ impl Affiliations {
 }
 
 impl EnrichmentMethod for Affiliations {
-    type Extraction = EnrichmentParts;
-    type Lookup = ();
-
-    fn field(&self) -> &'static str {
-        unimplemented!()
-    }
+    // Placeholder stub types so the staged-runner wiring compiles; the real
+    // per-person extraction lands when the method is ported (PLAN.md Stage 7).
+    type Extraction = Value;
+    type Lookup = RorLookup;
 
     fn extract(&self, _record: &Value) -> Extracted<Self::Extraction> {
         unimplemented!()

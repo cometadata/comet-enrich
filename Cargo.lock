@@ -282,6 +282,7 @@ dependencies = [
  "jsonschema",
  "log",
  "predicates",
+ "serde",
  "simple_logger",
 ]
 

@@ -5,13 +5,13 @@
 //! part, so there is no shared output writer. Records are validated at the write
 //! boundary when a schema validator is provided.
 
+use crate::fanout::{FileError, input_files, make_pool};
 use crate::method::{EnrichmentMethod, Extracted, Lookups};
 use crate::provenance::{EnrichmentTemplate, build_enrichment_record};
 use crate::writer::{FailureSink, PartWriter};
 
 use anyhow::{Context, Result};
 use flate2::read::GzDecoder;
-use glob::glob;
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 use serde_json::Value;
@@ -61,16 +61,6 @@ struct Counters {
     emitted: AtomicU64,
 }
 
-/// Classifies a per-file failure so the runner can react appropriately.
-enum FileError {
-    /// The input file could not be read. Counted in [`RunStats::files_failed`];
-    /// the run continues with the other files.
-    Read(anyhow::Error),
-    /// A record could not be written, diverted, or flushed. The output would be
-    /// incomplete, so this aborts the whole run.
-    Fatal(anyhow::Error),
-}
-
 /// Run an enrichment method over all input files.
 ///
 /// The provenance template is supplied by the caller and cloned into each emitted
@@ -90,21 +80,7 @@ pub fn run<M: EnrichmentMethod>(
     template: &EnrichmentTemplate,
     validator: Option<&jsonschema::JSONSchema>,
 ) -> Result<RunStats> {
-    let n_threads = if opts.threads == 0 {
-        num_cpus::get()
-    } else {
-        opts.threads
-    };
-    log::info!("using {n_threads} threads");
-
-    let pattern = format!(
-        "{}/**/*.jsonl.gz",
-        opts.input.to_string_lossy().trim_end_matches('/')
-    );
-    let mut files: Vec<PathBuf> = glob(&pattern)?.filter_map(Result::ok).collect();
-    // Sort so each input file's index, and therefore its output part name, is
-    // stable across runs for a fixed input set.
-    files.sort();
+    let files = input_files(&opts.input)?;
     log::info!("found {} input files", files.len());
 
     let enrich_dir = opts.output.join(ENRICHMENTS_DIR);
@@ -129,9 +105,7 @@ pub fn run<M: EnrichmentMethod>(
     let counters = Counters::default();
     let skipped: Mutex<BTreeMap<&'static str, u64>> = Mutex::new(BTreeMap::new());
 
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(n_threads)
-        .build()?;
+    let pool = make_pool(opts.threads)?;
     // Each worker writes its own gzip part, so there is no shared writer. A read
     // failure is counted and the run continues; a write/flush failure is fatal, so
     // `try_for_each` short-circuits and the error propagates out of the run.
@@ -236,7 +210,7 @@ fn process_file<M: EnrichmentMethod>(
                             template,
                             &parts.doi,
                             parts.action.as_str(),
-                            method.field(),
+                            parts.field,
                             parts.original,
                             parts.enriched,
                         ));

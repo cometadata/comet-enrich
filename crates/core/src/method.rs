@@ -40,6 +40,10 @@ pub struct EnrichmentParts {
     pub doi: String,
     /// Action to apply for this record.
     pub action: EnrichmentAction,
+    /// Top-level DataCite field this record enriches, such as `"types"`. Set per
+    /// record so a method can target different fields across records (for example
+    /// affiliations emits both `"creators"` and `"contributors"`).
+    pub field: &'static str,
     pub original: Value,
     pub enriched: Value,
 }
@@ -64,11 +68,17 @@ pub trait EnrichmentMethod: Sync {
     /// Lookup result for one unique input. Use `()` for methods without lookups.
     type Lookup: Send;
 
-    /// Top-level DataCite field enriched by this method, such as `"types"`.
-    fn field(&self) -> &'static str;
-
     /// Extract values from one input record.
     fn extract(&self, record: &Value) -> Extracted<Self::Extraction>;
+
+    /// Unique lookup inputs contributed by one extraction.
+    ///
+    /// The staged runner collects these across the corpus, deduplicates them, and
+    /// resolves them through the match service; `map_back` re-derives the same hash
+    /// to index the results. Transform methods keep the default (no inputs).
+    fn inputs(&self, _extraction: &Self::Extraction) -> Vec<String> {
+        Vec::new()
+    }
 
     /// Resolve unique extracted inputs through an external service.
     ///

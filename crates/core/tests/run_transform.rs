@@ -43,10 +43,6 @@ impl EnrichmentMethod for DatasetTagger {
     type Extraction = EnrichmentParts;
     type Lookup = ();
 
-    fn field(&self) -> &'static str {
-        "types"
-    }
-
     fn extract(&self, record: &Value) -> Extracted<Self::Extraction> {
         let Some(types) = record.get("attributes").and_then(|a| a.get("types")) else {
             return Extracted::Skip("malformed_types");
@@ -68,6 +64,7 @@ impl EnrichmentMethod for DatasetTagger {
         Extracted::Items(vec![EnrichmentParts {
             doi: doi.to_string(),
             action: EnrichmentAction::Update,
+            field: "types",
             original: types.clone(),
             enriched,
         }])

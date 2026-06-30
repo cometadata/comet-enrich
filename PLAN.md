@@ -257,6 +257,44 @@ to run a single stage:
    gzip output (4b.2) or to `enrichments.failed.jsonl`. Write `reconcile.done`. Populate the report
    match block and stage timings.
 
+Stage-6 implementation notes (as built):
+
+- `run_staged` lives in `crates/core/src/staged_run.rs`, takes `svc: &Arc<dyn MatchService>` (not
+  `&dyn`, because the query stage shares it across `tokio::spawn`), and returns a `Report`. The CLI
+  wraps that with `Manifest::from_report(meta, exit_status, report, HashInfo)` (new constructor) and
+  a new optional `Manifest.hash` (`HashInfo { algorithm, bits }`), so the transform path's
+  `Manifest::build` and the reclassifier test are untouched.
+- A generic runner can't name a method's lookup fields, so it builds `M::Lookup` from a service
+  result through a new `From<MatchHit>` seam (`MatchHit { id, confidence }` in core). Both ROR
+  methods share a core `RorLookup { ror_id, confidence }` as their `type Lookup`. Runner bound:
+  `M::Lookup: Serialize + DeserializeOwned + From<MatchHit> + Send + Sync + 'static`.
+- The dedup-hash width moved into `LookupConfig.hash_bits` (rather than a standalone `run_staged`
+  argument), because a method's `extract` hashes each occurrence and the runner hashes `inputs.jsonl`
+  — both must agree. The width is pinned to `.work/hash.bits` during extract and a mismatched resume
+  is refused; it is recorded as `hash { algorithm, bits }` in `manifest.json` for lookup methods.
+- The query stage spawns one task per batch (concrete results only) bounded by a
+  `Semaphore(ror_concurrency)`; `lookups.jsonl`/`lookups.failed.jsonl` open in append mode on resume.
+  The checkpoint is saved once at the end of query (the cadence decision from 4a.2): a crash only
+  costs this run's query work, which a rerun regenerates.
+- `only_stage` runs exactly that stage (its predecessor `.done` markers must exist) rather than
+  intersecting with `stages_to_run`, so an explicit `query`/`reconcile` re-run always executes.
+- Extract persists a small `extract.stats.json` sidecar (records scanned, lines malformed, file
+  counts) so coverage in the report is correct on a resume that skips extract. The report match
+  block is recomputed from `inputs.jsonl` / `lookups.jsonl` / `lookups.failed.jsonl` at the end, so
+  it is correct regardless of which stages ran this invocation.
+- `deny.toml` gained the TLS/hash-stack permissive licenses (ISC, BSD-3-Clause, BSL-1.0,
+  CDLA-Permissive-2.0) that the reqwest/rustls + `xxhash-rust` graph requires; this allow-list gap
+  predated Stage 6 but the lint gate first needed it green here.
+
+Post-Stage-6 cleanup (a `/simplify` pass): the `EnrichmentMethod::field()` trait method was
+**removed** — decision 8.2's per-record `EnrichmentParts.field` fully supersedes it, and after Stage
+6 `field()` had zero call sites (the manifest keys off the method name, not `field()`), so it was a
+required-but-unused seam every method had to satisfy. The parallel fan-out scaffolding shared by the
+transform and staged runners (the per-file `FileError`, input globbing, and rayon pool construction)
+was lifted into `crates/core/src/fanout.rs` instead of being duplicated in `reader.rs` and
+`staged_run.rs`, and the coverage-rate/validation construction was factored into `Coverage::new` /
+`Validation::new` used by both report-building paths.
+
 #### 4a.4 On-disk stage contract files
 
 Concrete shapes (all JSONL unless noted), written under `<output>/.work` except the final output:
@@ -474,7 +512,7 @@ should not require reworking earlier stages.
    4a.4, and the match block of 4a.5. Decisions: 8.1, 8.2. Also wires the dedup-hash width: a
    `--hash-bits {64,128}` flag (default 64), pinned in the run dir and validated on resume (a
    mismatched width silently breaks the hash join), and recorded as `hash { algorithm, bits }` in
-   `manifest.json` for lookup methods (see 4a.1).
+   `manifest.json` for lookup methods (see 4a.1). Done.
 
 7. **Port affiliations.** First lookup method; if the port forces non-trivial framework changes,
    fix the framework before Stage 8. Features: 4a.7. Decisions: 8.2, 8.3.

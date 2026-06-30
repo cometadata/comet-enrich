@@ -11,6 +11,7 @@
 pub mod checkpoint;
 pub mod datacite_enums;
 pub mod dedup;
+mod fanout;
 pub mod manifest;
 pub mod match_service;
 pub mod method;
@@ -18,12 +19,13 @@ pub mod provenance;
 pub mod reader;
 pub mod schema;
 pub mod staged;
+pub mod staged_run;
 pub mod writer;
 
 pub use checkpoint::Checkpoint;
 pub use dedup::{DedupStore, HashBits, hash_input};
-pub use manifest::{Manifest, Report, RunMeta, SourceRelease, StageTimings};
-pub use match_service::{MarpleClient, MatchService};
+pub use manifest::{HashInfo, Manifest, Report, RunMeta, SourceRelease, StageTimings};
+pub use match_service::{MarpleClient, MatchHit, MatchService, RorLookup};
 #[cfg(any(test, feature = "test-support"))]
 pub use match_service::FakeMatchService;
 pub use method::{EnrichmentAction, EnrichmentMethod, EnrichmentParts, Extracted, Lookups};
@@ -31,3 +33,4 @@ pub use provenance::{EnrichmentTemplate, build_enrichment_record, load_template}
 pub use reader::{ENRICHMENTS_DIR, ENRICHMENTS_FAILED_FILE, RunOptions, RunStats, run};
 pub use schema::SCHEMA;
 pub use staged::{LookupConfig, Stage, WorkDir, stages_to_run};
+pub use staged_run::run_staged;

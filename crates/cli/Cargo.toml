@@ -12,6 +12,7 @@ clap = { version = "4", features = ["derive"] }
 comet-enrichment-core = { workspace = true }
 jsonschema = { workspace = true }
 log = { workspace = true }
+serde = { workspace = true }
 simple_logger = "5"
 rtg = { package = "comet-enrich-datacite-resource-type-general", path = "../datacite-resource-type-general" }
 affiliations = { package = "comet-enrich-datacite-affiliations", path = "../datacite-affiliations" }

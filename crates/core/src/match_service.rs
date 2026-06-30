@@ -54,6 +54,34 @@ fn truncate(s: &str, max: usize) -> &str {
     }
 }
 
+/// One successful match for a single input: the resolved id and its confidence.
+///
+/// The generic staged runner converts a service result into a method's `Lookup`
+/// through `From<MatchHit>`, so the runner never names a method's lookup fields.
+#[derive(Debug, Clone)]
+pub struct MatchHit {
+    pub id: String,
+    pub confidence: f64,
+}
+
+/// The lookup result shared by the ROR match methods (affiliations, funders): a
+/// matched ROR id and the service's confidence. Both methods set
+/// `type Lookup = RorLookup`; `map_back` reads it to enrich the record.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RorLookup {
+    pub ror_id: String,
+    pub confidence: f64,
+}
+
+impl From<MatchHit> for RorLookup {
+    fn from(hit: MatchHit) -> Self {
+        RorLookup {
+            ror_id: hit.id,
+            confidence: hit.confidence,
+        }
+    }
+}
+
 /// Resolves batches of inputs against a match service.
 #[async_trait]
 pub trait MatchService: Send + Sync {

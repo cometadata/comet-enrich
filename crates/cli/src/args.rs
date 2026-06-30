@@ -1,8 +1,10 @@
 //! Shared CLI arguments for `comet-enrich`.
 
 use anyhow::{Result, bail};
-use clap::{Args, Subcommand};
-use comet_enrichment_core::{LookupConfig, RunOptions, SCHEMA, SourceRelease, Stage, schema};
+use clap::{Args, Subcommand, ValueEnum};
+use comet_enrichment_core::{
+    HashBits, LookupConfig, RunOptions, SCHEMA, SourceRelease, Stage, schema,
+};
 use log::LevelFilter;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -197,9 +199,41 @@ pub struct LookupArgs {
     )]
     pub ror_timeout: u64,
 
+    /// Width of the content-addressed dedup hash. 64 (default) matches the prototypes;
+    /// pick 128 only if a 64-bit collision is reported.
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = HashBitsArg::Bits64,
+        value_name = "BITS",
+        help_heading = "ROR matching"
+    )]
+    pub hash_bits: HashBitsArg,
+
     /// Ignore existing stage outputs and rerun from the start.
     #[arg(long, help_heading = "Options")]
     pub from_scratch: bool,
+}
+
+/// Dedup-hash width, exposed on the CLI as `--hash-bits {64,128}`.
+#[derive(ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum HashBitsArg {
+    /// xxh3-64 (16 hex chars); matches the prototypes.
+    #[default]
+    #[value(name = "64")]
+    Bits64,
+    /// xxh3-128 (32 hex chars).
+    #[value(name = "128")]
+    Bits128,
+}
+
+impl From<HashBitsArg> for HashBits {
+    fn from(arg: HashBitsArg) -> Self {
+        match arg {
+            HashBitsArg::Bits64 => HashBits::Bits64,
+            HashBitsArg::Bits128 => HashBits::Bits128,
+        }
+    }
 }
 
 /// Pipeline stage to run on its own.
@@ -231,6 +265,7 @@ impl From<&LookupArgs> for LookupConfig {
             ror_batch_size: lookup.ror_batch_size,
             ror_concurrency: lookup.ror_concurrency,
             ror_timeout: lookup.ror_timeout,
+            hash_bits: lookup.hash_bits.into(),
             from_scratch: lookup.from_scratch,
         }
     }

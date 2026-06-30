@@ -13,6 +13,7 @@
 // Manifest/Report are the public names of this module's primary types.
 #![allow(clippy::module_name_repetitions)]
 
+use crate::dedup::HashBits;
 use crate::reader::{ENRICHMENTS_DIR, ENRICHMENTS_FAILED_FILE, RunStats};
 
 use anyhow::{Context, Result};
@@ -30,6 +31,10 @@ pub const MANIFEST_SCHEMA_VERSION: u32 = 1;
 pub struct Manifest {
     pub schema_version: u32,
     pub method: MethodInfo,
+    /// Dedup-hash identity. Present only for lookup methods (the staged path);
+    /// the transform path leaves it unset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hash: Option<HashInfo>,
     pub sources: BTreeMap<String, SourceRelease>,
     pub exit_status: String,
     pub artifact_paths: ArtifactPaths,
@@ -41,6 +46,26 @@ pub struct Manifest {
 pub struct MethodInfo {
     pub name: String,
     pub version: &'static str,
+}
+
+/// The content-addressed dedup hash a lookup run used. A mismatched width across a
+/// resume silently breaks the hash join, so it is pinned and recorded here.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct HashInfo {
+    pub algorithm: &'static str,
+    pub bits: u32,
+}
+
+impl From<HashBits> for HashInfo {
+    fn from(bits: HashBits) -> Self {
+        HashInfo {
+            algorithm: bits.as_str(),
+            bits: match bits {
+                HashBits::Bits64 => 64,
+                HashBits::Bits128 => 128,
+            },
+        }
+    }
 }
 
 /// One data source and the date of the release the run consumed.
@@ -76,12 +101,44 @@ pub struct Coverage {
     pub coverage_rate: f64,
 }
 
+impl Coverage {
+    /// Coverage with the enrichment rate derived from the two counts (an empty
+    /// in-scope corpus yields a rate of `0.0` rather than dividing by zero).
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)]
+    pub fn new(records_in_scope: u64, records_enriched: u64) -> Self {
+        let coverage_rate = if records_in_scope == 0 {
+            0.0
+        } else {
+            records_enriched as f64 / records_in_scope as f64
+        };
+        Coverage {
+            records_in_scope,
+            records_enriched,
+            coverage_rate,
+        }
+    }
+}
+
 /// Schema-validation outcome at the writer boundary.
 #[derive(Debug, Serialize)]
 pub struct Validation {
     pub emitted: u64,
     pub schema_failures: u64,
     pub schema_failure_taxonomy: BTreeMap<String, u64>,
+}
+
+impl Validation {
+    /// Validation counts with an empty failure taxonomy (the taxonomy is not yet
+    /// populated on either path).
+    #[must_use]
+    pub fn new(emitted: u64, schema_failures: u64) -> Self {
+        Validation {
+            emitted,
+            schema_failures,
+            schema_failure_taxonomy: BTreeMap::new(),
+        }
+    }
 }
 
 /// Match-service quality block. Populated by the staged runner; defined here so
@@ -140,7 +197,6 @@ impl Manifest {
     /// `records_in_scope`. `records_enriched` is `emitted` on the transform path
     /// (one enrichment per record).
     #[must_use]
-    #[allow(clippy::cast_precision_loss)]
     pub fn build(
         stats: &RunStats,
         meta: &RunMeta,
@@ -153,40 +209,52 @@ impl Manifest {
             .filter_map(|reason| stats.skipped.get(*reason).copied())
             .sum();
         let records_in_scope = stats.records_scanned.saturating_sub(out_of_scope_total);
-        let records_enriched = stats.emitted;
-        let coverage_rate = if records_in_scope == 0 {
-            0.0
-        } else {
-            records_enriched as f64 / records_in_scope as f64
-        };
 
+        let report = Report {
+            counters: stats.clone(),
+            coverage: Coverage::new(records_in_scope, stats.emitted),
+            match_: None,
+            validation: Validation::new(stats.emitted, stats.schema_failures),
+            stage_timings_ms: timings.clone(),
+        };
+        Self::envelope(meta, None, exit_status, report)
+    }
+
+    /// Build the run manifest for a lookup method from a [`Report`] the staged
+    /// runner already assembled (coverage, match block, validation, stage timings).
+    ///
+    /// `hash` records the dedup-hash width the run was pinned to.
+    #[must_use]
+    pub fn from_report(
+        meta: &RunMeta,
+        exit_status: &str,
+        report: Report,
+        hash: HashInfo,
+    ) -> Self {
+        Self::envelope(meta, Some(hash), exit_status, report)
+    }
+
+    /// Wrap a finished [`Report`] in the audit envelope shared by both build paths.
+    fn envelope(
+        meta: &RunMeta,
+        hash: Option<HashInfo>,
+        exit_status: &str,
+        report: Report,
+    ) -> Self {
         Manifest {
             schema_version: MANIFEST_SCHEMA_VERSION,
             method: MethodInfo {
                 name: meta.method_name.clone(),
                 version: meta.method_version,
             },
+            hash,
             sources: meta.sources.clone(),
             exit_status: exit_status.to_owned(),
             artifact_paths: ArtifactPaths {
                 enrichments: format!("{ENRICHMENTS_DIR}/"),
                 enrichments_failed: ENRICHMENTS_FAILED_FILE.to_owned(),
             },
-            report: Report {
-                counters: stats.clone(),
-                coverage: Coverage {
-                    records_in_scope,
-                    records_enriched,
-                    coverage_rate,
-                },
-                match_: None,
-                validation: Validation {
-                    emitted: stats.emitted,
-                    schema_failures: stats.schema_failures,
-                    schema_failure_taxonomy: BTreeMap::new(),
-                },
-                stage_timings_ms: timings.clone(),
-            },
+            report,
         }
     }
 

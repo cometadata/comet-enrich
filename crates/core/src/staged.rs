@@ -4,6 +4,7 @@
 //! stage writes a marker file in the work directory, allowing later runs to skip
 //! completed leading stages unless `from_scratch` is set.
 
+use crate::dedup::HashBits;
 use std::path::{Path, PathBuf};
 
 /// One stage of a lookup pipeline.
@@ -44,6 +45,10 @@ pub struct LookupConfig {
     pub ror_concurrency: usize,
     /// Match-service request timeout in seconds.
     pub ror_timeout: u64,
+    /// Width of the content-addressed dedup hash. Fixed for a whole run: the runner
+    /// keys `inputs.jsonl`/`lookups.jsonl` at this width and a method's `extract`
+    /// hashes occurrences at the same width so `map_back` can index the results.
+    pub hash_bits: HashBits,
     /// Ignore existing stage outputs and rerun from the start.
     pub from_scratch: bool,
 }
