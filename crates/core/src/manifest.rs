@@ -94,6 +94,12 @@ pub struct Report {
 }
 
 /// How much of the in-scope corpus the method enriched.
+///
+/// "In scope" is record-level on the transform path (records the extractor
+/// selected) and unit-level on the staged path (each extraction — a person, a
+/// funding reference). `records_enriched` is the count of enrichment records
+/// emitted; since each unit yields at most one record, `coverage_rate` stays a true
+/// fraction in `[0, 1]`.
 #[derive(Debug, Serialize)]
 pub struct Coverage {
     pub records_in_scope: u64,
@@ -166,6 +172,31 @@ pub struct MatchFailureTaxonomy {
     pub no_match: u64,
     pub timeout: u64,
     pub error: u64,
+}
+
+/// Manifest `exit_status` for a run that made a complete pass with no data loss.
+pub const EXIT_SUCCESS: &str = "success";
+/// Manifest `exit_status` for a run that lost data or did not complete all stages.
+pub const EXIT_PARTIAL: &str = "partial";
+
+/// Derive a run's manifest `exit_status`.
+///
+/// A run is [`EXIT_SUCCESS`] only when it made a complete pass with no data-losing
+/// condition. Any input-file read failure, schema-validation failure, match-service
+/// batch error, or an incomplete staged pipeline downgrades it to [`EXIT_PARTIAL`],
+/// so the manifest never certifies a lossy run as a full success.
+#[must_use]
+pub fn exit_status(
+    files_failed: u64,
+    schema_failures: u64,
+    match_errors: u64,
+    pipeline_complete: bool,
+) -> &'static str {
+    if files_failed > 0 || schema_failures > 0 || match_errors > 0 || !pipeline_complete {
+        EXIT_PARTIAL
+    } else {
+        EXIT_SUCCESS
+    }
 }
 
 /// Wall time per stage, in milliseconds. The transform path sets only `total`;

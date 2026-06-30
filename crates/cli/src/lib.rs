@@ -13,7 +13,7 @@ use args::{IoArgs, LookupArgs, RunArgs, StageArg, init_logging};
 use clap::{Parser, Subcommand};
 use comet_enrichment_core::{
     EnrichmentMethod, EnrichmentTemplate, HashInfo, LookupConfig, Manifest, MarpleClient, MatchHit,
-    MatchService, RunMeta, RunStats, Stage, StageTimings, run_staged,
+    MatchService, RunMeta, RunStats, Stage, StageTimings, exit_status, pipeline_complete, run_staged,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -189,14 +189,10 @@ fn run_method<M: EnrichmentMethod>(
         total: Some(total_ms),
         ..StageTimings::default()
     };
-    // A run with read failures still produces output, but it is not a complete
-    // corpus pass, so the manifest must not certify it as a full success.
-    let exit_status = if stats.files_failed > 0 {
-        "partial"
-    } else {
-        "success"
-    };
-    Manifest::build(&stats, &meta, out_of_scope, &timings, exit_status).write(&io.output)?;
+    // The transform path is a single complete pass; it is `partial` only if a read
+    // failure or a schema-validation failure lost data.
+    let manifest_status = exit_status(stats.files_failed, stats.schema_failures, 0, true);
+    Manifest::build(&stats, &meta, out_of_scope, &timings, manifest_status).write(&io.output)?;
 
     report_stats(name, &stats);
     Ok(())
@@ -251,15 +247,17 @@ where
         method_version: env!("CARGO_PKG_VERSION"),
         sources,
     };
-    // A run with read failures still produces output, but it is not a complete
-    // corpus pass, so the manifest must not certify it as a full success.
-    let exit_status = if report.counters.files_failed > 0 {
-        "partial"
-    } else {
-        "success"
-    };
+    // `partial` if any data-losing condition occurred (read/schema/match failures) or
+    // the pipeline did not complete every stage (e.g. a single-stage debug run).
+    let match_errors = report.match_.as_ref().map_or(0, |m| m.failure_taxonomy.error);
+    let manifest_status = exit_status(
+        report.counters.files_failed,
+        report.counters.schema_failures,
+        match_errors,
+        pipeline_complete(&io.output),
+    );
     let stats = report.counters.clone();
-    Manifest::from_report(&meta, exit_status, report, HashInfo::from(cfg.hash_bits))
+    Manifest::from_report(&meta, manifest_status, report, HashInfo::from(cfg.hash_bits))
         .write(&io.output)?;
 
     report_stats(name, &stats);

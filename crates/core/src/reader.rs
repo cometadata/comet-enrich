@@ -50,7 +50,7 @@ pub struct RunStats {
     pub lines_malformed: u64,
     pub emitted: u64,
     pub schema_failures: u64,
-    pub skipped: BTreeMap<&'static str, u64>,
+    pub skipped: BTreeMap<String, u64>,
 }
 
 #[derive(Default)]
@@ -154,7 +154,15 @@ pub fn run<M: EnrichmentMethod>(
         lines_malformed: counters.lines_malformed.load(Ordering::Relaxed),
         emitted: counters.emitted.load(Ordering::Relaxed),
         schema_failures: failures.lock().unwrap().records_failed,
-        skipped: skipped.into_inner().unwrap(),
+        // Skip reasons are `&'static str` while counting; own them for the report so
+        // both run paths share one `RunStats` shape (the staged path round-trips them
+        // through a JSON sidecar, which needs owned keys).
+        skipped: skipped
+            .into_inner()
+            .unwrap()
+            .into_iter()
+            .map(|(reason, n)| (reason.to_owned(), n))
+            .collect(),
     })
 }
 

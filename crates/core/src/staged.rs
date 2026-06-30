@@ -74,6 +74,12 @@ impl WorkDir {
     pub fn is_complete(&self, stage: Stage) -> bool {
         self.marker_path(stage).exists()
     }
+
+    /// Return whether every stage of the pipeline has completed.
+    #[must_use]
+    pub fn all_complete(&self) -> bool {
+        Stage::ALL.iter().all(|&s| self.is_complete(s))
+    }
 }
 
 /// Return the stages that should run.

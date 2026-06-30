@@ -295,6 +295,29 @@ was lifted into `crates/core/src/fanout.rs` instead of being duplicated in `read
 `staged_run.rs`, and the coverage-rate/validation construction was factored into `Coverage::new` /
 `Validation::new` used by both report-building paths.
 
+Post-Stage-6 soundness pass (an adversarial review + audit found the staged report could certify a
+lossy run as `success`). Supersedes the within-stage-resume parts of 4a.2 above:
+
+- **Within-stage resume removed.** `checkpoint.rs` is **deleted** and the query stage now truncates
+  and re-runs whole (no checkpoint, no append). Production tears `.work` down on a Batch retry (it is
+  excluded from the S3 upload), so within-stage resume could never fire there; locally, **cross-stage**
+  resume (`stages_to_run` + `.done` markers) is kept — a crashed stage re-runs whole, the completed
+  ones are skipped. This removes the duplicate-rows-on-resume bug and the vestigial checkpoint by
+  construction. (Supersedes the 4a.2 `Checkpoint` bullet and the §5b "checkpoint writes atomically"
+  note — there is no checkpoint.)
+- **Report is a faithful projection of persisted per-stage stats.** `extract.stats.json` gains
+  `in_scope_units` + `skipped`; a new `reconcile.stats.json` holds `emitted` + `schema_failures`;
+  `build_report` reads both, so a rerun that skips a stage (incl. a no-op rerun of a *complete* run)
+  reports the truth instead of `emitted: 0`. The staged path no longer hardcodes `schema_failures: 0`
+  or drops skip reasons.
+- **Honest, shared `exit_status`** (`manifest::exit_status`): `partial` on any of `files_failed`,
+  `schema_failures`, match `failure_taxonomy.error`, or an incomplete pipeline; used by both run
+  paths. A whole-batch lookup error is non-fatal (recorded as `failure_taxonomy.error` → `partial`),
+  not an abort.
+- **Coverage is extraction-unit** (decision D3): `records_in_scope` = extraction units the method
+  produced, `records_enriched` = `emitted`; since each unit yields ≤1 record, `coverage_rate ∈ [0,1]`.
+  This keeps `emitted` identical to the prototypes' "Enriched records" count.
+
 #### 4a.4 On-disk stage contract files
 
 Concrete shapes (all JSONL unless noted), written under `<output>/.work` except the final output:
