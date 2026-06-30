@@ -52,11 +52,14 @@ Available builds:
 ## Test
 
 ```bash
-make test
+make test       # run the workspace test suite
+make coverage   # run the tests under instrumentation and print a coverage summary
 ```
 
-`make lint` runs Clippy and `cargo deny`; `make fmt` runs the formatter; `make setup-rust`
-installs the Rust tooling used by the workspace.
+`make coverage-html` writes an HTML report under `target/llvm-cov/html/`, and
+`make coverage-lcov` writes `lcov.info` for editors or CI. `make lint` runs Clippy and
+`cargo deny`; `make fmt` runs the formatter; `make setup-rust` installs the Rust tooling
+used by the workspace (including `cargo-llvm-cov`, used for coverage).
 
 ## Verify
 
