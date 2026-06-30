@@ -12,50 +12,14 @@ use comet_enrich_datacite_resource_type_general::{Config, ResourceTypeGeneral};
 use comet_enrichment_core::{
     Manifest, RunMeta, RunOptions, RunStats, SourceRelease, StageTimings, run,
 };
-use flate2::Compression;
-use flate2::read::GzDecoder;
-use flate2::write::GzEncoder;
+use comet_test_support::{assert_close, config_path, read_enrichment_parts, write_gz_lines};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
-use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// Skip reasons the reclassifier uses for records its extractor did not select.
 const OUT_OF_SCOPE: &[&str] = &["not_in_scope", "malformed_types"];
-
-/// Read every gzip part under `<output>/enrichments/` into enrichment records.
-///
-/// Record order across parts is not stable, so callers compare sets, not order.
-fn read_enrichment_parts(output: &Path) -> Vec<Value> {
-    let mut recs = Vec::new();
-    for entry in fs::read_dir(output.join(comet_enrichment_core::ENRICHMENTS_DIR)).unwrap() {
-        let path = entry.unwrap().path();
-        if path.extension().and_then(|e| e.to_str()) != Some("gz") {
-            continue;
-        }
-        let mut body = String::new();
-        GzDecoder::new(fs::File::open(&path).unwrap())
-            .read_to_string(&mut body)
-            .unwrap();
-        recs.extend(body.lines().map(|l| serde_json::from_str(l).unwrap()));
-    }
-    recs
-}
-
-/// Method rules, provenance template, and schema used by the real pipeline.
-const RULES_PATH: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../configs/reclassification_rules.yaml"
-);
-const ENRICHMENT_PATH: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../configs/provenance/resource_type_general.yaml"
-);
-const SCHEMA_PATH: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../configs/schema/enrichment_input_schema.json"
-);
 
 /// Representative DataCite records covering matches, skips, typo correction,
 /// camelCase handling, and compact/space-separated type names.
@@ -96,29 +60,29 @@ const EXPECTED_EMITTED: &[(&str, &str)] = &[
 /// run counters.
 fn run_reclassifier() -> (tempfile::TempDir, PathBuf, RunStats) {
     let dir = tempfile::tempdir().unwrap();
-
-    let input_dir = dir.path().join("input/updated_2024-01");
-    fs::create_dir_all(&input_dir).unwrap();
-    let file = input_dir.join("part_0000.jsonl.gz");
-    let f = fs::File::create(&file).unwrap();
-    let mut enc = GzEncoder::new(f, Compression::default());
-    enc.write_all(INPUT_RECORDS.join("\n").as_bytes()).unwrap();
-    enc.finish().unwrap();
+    write_gz_lines(
+        &dir.path().join("input/updated_2024-01/part_0000.jsonl.gz"),
+        INPUT_RECORDS,
+    );
 
     let output = dir.path().join("out");
     let opts = RunOptions {
         input: dir.path().join("input"),
         output: output.clone(),
         threads: 1,
-        batch_size: 5000,
+        batch_size: 100,
     };
 
-    let template = comet_enrichment_core::load_template(ENRICHMENT_PATH).unwrap();
+    let template =
+        comet_enrichment_core::load_template(config_path("provenance/resource_type_general.yaml"))
+            .unwrap();
     let method = ResourceTypeGeneral::try_new(Config {
-        rules: PathBuf::from(RULES_PATH),
+        rules: config_path("reclassification_rules.yaml"),
     })
     .unwrap();
-    let validator = comet_enrichment_core::schema::compile(Path::new(SCHEMA_PATH)).unwrap();
+    let validator =
+        comet_enrichment_core::schema::compile(&config_path("schema/enrichment_input_schema.json"))
+            .unwrap();
     let stats = run(&method, &opts, &template, Some(&validator)).unwrap();
     (dir, output, stats)
 }
@@ -218,7 +182,7 @@ fn reclassifier_writes_run_manifest() {
     assert_eq!(report["coverage"]["records_in_scope"], json!(11));
     assert_eq!(report["coverage"]["records_enriched"], json!(9));
     let rate = report["coverage"]["coverage_rate"].as_f64().unwrap();
-    assert!((rate - 9.0 / 11.0).abs() < 1e-9, "coverage_rate was {rate}");
+    assert_close(rate, 9.0 / 11.0);
     assert_eq!(report["validation"]["emitted"], json!(9));
     assert_eq!(report["validation"]["schema_failures"], json!(0));
     assert!(report["stage_timings_ms"]["total"].is_u64());

@@ -6,6 +6,7 @@ members = [
     "crates/datacite-affiliations",
     "crates/datacite-resource-type-general",
     "crates/datacite-funders",
+    "crates/test-support",
 ]
 
 [workspace.package]
@@ -28,6 +29,7 @@ missing_panics_doc = "allow"
 
 [workspace.dependencies]
 comet-enrichment-core = { path = "crates/core" }
+comet-test-support = { path = "crates/test-support" }
 # Adding dependencies shared by two or more crates here
 # to make it easier to manage their versions
 anyhow = "1"

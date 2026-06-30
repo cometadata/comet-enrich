@@ -253,22 +253,39 @@ impl MatchService for MarpleClient {
     }
 }
 
-/// A fake match service for tests: resolves inputs from an in-memory map.
-#[cfg(any(test, feature = "test-support"))]
-pub struct FakeMatchService {
+/// A fake [`MatchService`] for tests.
+///
+/// In the default mode it resolves inputs from an in-memory map, returning one slot
+/// per input in input order. In erroring mode it fails every batch, simulating a
+/// sustained service outage.
+#[cfg(test)]
+pub(crate) struct FakeMatchService {
     matches: std::collections::HashMap<String, (String, f64)>,
+    error: Option<String>,
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 impl FakeMatchService {
     /// Build a fake from a map of `input -> (id, confidence)`.
     #[must_use]
-    pub fn new(matches: std::collections::HashMap<String, (String, f64)>) -> Self {
-        Self { matches }
+    pub(crate) fn new(matches: std::collections::HashMap<String, (String, f64)>) -> Self {
+        Self {
+            matches,
+            error: None,
+        }
+    }
+
+    /// Build a fake whose every batch fails, simulating a sustained service outage.
+    #[must_use]
+    pub(crate) fn erroring() -> Self {
+        Self {
+            matches: std::collections::HashMap::new(),
+            error: Some("simulated marple outage".to_owned()),
+        }
     }
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 #[async_trait]
 impl MatchService for FakeMatchService {
     async fn match_bulk(
@@ -276,6 +293,9 @@ impl MatchService for FakeMatchService {
         inputs: &[String],
         _task: &str,
     ) -> Result<Vec<Option<(String, f64)>>> {
+        if let Some(msg) = &self.error {
+            anyhow::bail!("{msg}");
+        }
         Ok(inputs
             .iter()
             .map(|i| self.matches.get(i).cloned())
@@ -308,5 +328,13 @@ mod tests {
         assert_eq!(out[0], Some(("https://ror.org/021nxhr62".to_owned(), 0.97)));
         assert_eq!(out[1], None);
         assert_eq!(out[2], Some(("https://ror.org/042nb2s44".to_owned(), 0.99)));
+    }
+
+    #[tokio::test]
+    async fn erroring_fake_fails_every_batch() {
+        let out = FakeMatchService::erroring()
+            .match_bulk(&["MIT".to_owned()], "affiliation")
+            .await;
+        assert!(out.is_err());
     }
 }

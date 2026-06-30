@@ -815,8 +815,9 @@ mod tests {
     use crate::method::{EnrichmentAction, EnrichmentParts, Extracted, Lookups};
     use crate::provenance::EnrichmentTemplate;
     use crate::staged::WORK_DIR;
-    use flate2::Compression;
-    use flate2::write::GzEncoder;
+    use comet_test_support::{
+        assert_close, assert_err_contains, gz_input_fixture, read_enrichment_parts,
+    };
     use serde_json::{Value, json};
     use std::collections::HashMap;
     use std::path::PathBuf;
@@ -880,17 +881,6 @@ mod tests {
         }
     }
 
-    fn write_gz(path: &Path, records: &[Value]) {
-        let file = File::create(path).unwrap();
-        let mut gz = GzEncoder::new(file, Compression::default());
-        for rec in records {
-            gz.write_all(serde_json::to_string(rec).unwrap().as_bytes())
-                .unwrap();
-            gz.write_all(b"\n").unwrap();
-        }
-        gz.finish().unwrap();
-    }
-
     fn template() -> EnrichmentTemplate {
         EnrichmentTemplate {
             contributors: json!([]),
@@ -933,18 +923,10 @@ mod tests {
         }
     }
 
-    /// Lay out an input dir with one gz part and return (input, output) temp roots.
+    /// Lay out an input dir with one gz part of `sample_records` and return the temp
+    /// roots.
     fn fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
-        let dir = tempfile::tempdir().unwrap();
-        let input = dir.path().join("input");
-        let output = dir.path().join("output");
-        fs::create_dir_all(input.join("updated_2024-01")).unwrap();
-        fs::create_dir_all(&output).unwrap();
-        write_gz(
-            &input.join("updated_2024-01/part_0000.jsonl.gz"),
-            &sample_records(),
-        );
-        (dir, input, output)
+        gz_input_fixture(&sample_records())
     }
 
     fn run_opts(input: &Path, output: &Path) -> RunOptions {
@@ -956,6 +938,18 @@ mod tests {
         }
     }
 
+    /// Run the full staged pipeline with the common test defaults: no validator, the
+    /// `"funder"` task, and all stages. Tests that vary those call `run_staged`.
+    fn run_staged_default(
+        method: &TestMethod,
+        io: &RunOptions,
+        cfg: &crate::LookupConfig,
+        svc: &Arc<dyn MatchService>,
+        template: &EnrichmentTemplate,
+    ) -> Result<Report> {
+        run_staged(method, io, cfg, svc, template, None, "funder", None)
+    }
+
     #[test]
     fn full_pipeline_produces_contract_and_match_block() {
         let (_dir, input, output) = fixture();
@@ -965,15 +959,12 @@ mod tests {
         let svc = fake_service();
         let tmpl = template();
 
-        let report = run_staged(
+        let report = run_staged_default(
             &method,
             &run_opts(&input, &output),
             &cfg(HashBits::Bits64, true),
             &svc,
             &tmpl,
-            None,
-            "funder",
-            None,
         )
         .unwrap();
 
@@ -984,7 +975,7 @@ mod tests {
         assert_eq!(m.failure_taxonomy.no_match, 1);
         assert_eq!(m.failure_taxonomy.error, 0);
         let top_bucket = m.confidence_histogram.last().unwrap();
-        assert!((top_bucket.max - 1.0).abs() < f64::EPSILON);
+        assert_close(top_bucket.max, 1.0);
         assert_eq!(top_bucket.count, 2);
 
         // Four records scanned; the empty one is skipped, leaving three in-scope
@@ -994,7 +985,7 @@ mod tests {
         assert_eq!(report.counters.skipped.get("no_name"), Some(&1));
         assert_eq!(report.coverage.records_in_scope, 3);
         assert_eq!(report.coverage.records_enriched, 2);
-        assert!((report.coverage.coverage_rate - 2.0 / 3.0).abs() < 1e-9);
+        assert_close(report.coverage.coverage_rate, 2.0 / 3.0);
 
         // All stage timings present.
         assert!(report.stage_timings_ms.extract.is_some());
@@ -1028,26 +1019,14 @@ mod tests {
     }
 
     fn read_output_dois(output: &Path) -> Vec<String> {
-        let mut dois = Vec::new();
-        let parts = sorted_glob(&format!(
-            "{}/part_*.jsonl.gz",
-            output.join(ENRICHMENTS_DIR).to_string_lossy()
-        ))
-        .unwrap();
-        for part in parts {
-            let f = File::open(&part).unwrap();
-            for line in BufReader::new(flate2::read::GzDecoder::new(f)).lines() {
-                let line = line.unwrap();
-                if line.trim().is_empty() {
-                    continue;
-                }
-                let rec: Value = serde_json::from_str(&line).unwrap();
+        read_enrichment_parts(output)
+            .iter()
+            .map(|rec| {
                 assert_eq!(rec["field"], "fundingReferences");
                 assert_eq!(rec["action"], "updateChild");
-                dois.push(rec["doi"].as_str().unwrap().to_owned());
-            }
-        }
-        dois
+                rec["doi"].as_str().unwrap().to_owned()
+            })
+            .collect()
     }
 
     #[test]
@@ -1088,18 +1067,19 @@ mod tests {
         let svc = fake_service();
         let tmpl = template();
 
-        let err = run_staged(
-            &method,
-            &run_opts(&input, &output),
-            &cfg(HashBits::Bits64, true),
-            &svc,
-            &tmpl,
-            None,
-            "funder",
-            Some(Stage::Query),
-        )
-        .unwrap_err();
-        assert!(err.to_string().contains("extract"), "got: {err}");
+        assert_err_contains(
+            run_staged(
+                &method,
+                &run_opts(&input, &output),
+                &cfg(HashBits::Bits64, true),
+                &svc,
+                &tmpl,
+                None,
+                "funder",
+                Some(Stage::Query),
+            ),
+            "extract",
+        );
     }
 
     #[test]
@@ -1112,31 +1092,12 @@ mod tests {
         let tmpl = template();
         let opts = run_opts(&input, &output);
 
-        run_staged(
-            &method,
-            &opts,
-            &cfg(HashBits::Bits64, true),
-            &svc,
-            &tmpl,
-            None,
-            "funder",
-            None,
-        )
-        .unwrap();
+        run_staged_default(&method, &opts, &cfg(HashBits::Bits64, true), &svc, &tmpl).unwrap();
 
         // Drop the reconcile marker and resume: only reconcile should rerun.
         fs::remove_file(output.join(WORK_DIR).join("reconcile.done")).unwrap();
-        let report = run_staged(
-            &method,
-            &opts,
-            &cfg(HashBits::Bits64, false),
-            &svc,
-            &tmpl,
-            None,
-            "funder",
-            None,
-        )
-        .unwrap();
+        let report =
+            run_staged_default(&method, &opts, &cfg(HashBits::Bits64, false), &svc, &tmpl).unwrap();
 
         assert_eq!(report.counters.emitted, 2);
         assert!(report.stage_timings_ms.reconcile.is_some());
@@ -1155,47 +1116,12 @@ mod tests {
         let tmpl = template();
         let opts = run_opts(&input, &output);
 
-        run_staged(
-            &method,
-            &opts,
-            &cfg(HashBits::Bits64, true),
-            &svc,
-            &tmpl,
-            None,
-            "funder",
-            None,
-        )
-        .unwrap();
+        run_staged_default(&method, &opts, &cfg(HashBits::Bits64, true), &svc, &tmpl).unwrap();
 
-        let err = run_staged(
-            &method,
-            &opts,
-            &cfg(HashBits::Bits128, false),
-            &svc,
-            &tmpl,
-            None,
-            "funder",
-            None,
-        )
-        .unwrap_err();
-        assert!(
-            err.to_string().contains("hash-width mismatch"),
-            "got: {err}"
+        assert_err_contains(
+            run_staged_default(&method, &opts, &cfg(HashBits::Bits128, false), &svc, &tmpl),
+            "hash-width mismatch",
         );
-    }
-
-    /// A match service that always errors a whole batch (a sustained outage).
-    struct ErroringService;
-
-    #[async_trait::async_trait]
-    impl MatchService for ErroringService {
-        async fn match_bulk(
-            &self,
-            _inputs: &[String],
-            _task: &str,
-        ) -> Result<Vec<Option<(String, f64)>>> {
-            anyhow::bail!("simulated marple outage")
-        }
     }
 
     #[test]
@@ -1210,31 +1136,13 @@ mod tests {
         let tmpl = template();
         let opts = run_opts(&input, &output);
 
-        let first = run_staged(
-            &method,
-            &opts,
-            &cfg(HashBits::Bits64, true),
-            &svc,
-            &tmpl,
-            None,
-            "funder",
-            None,
-        )
-        .unwrap();
+        let first =
+            run_staged_default(&method, &opts, &cfg(HashBits::Bits64, true), &svc, &tmpl).unwrap();
 
         // Re-run into the same dir without --from-scratch: every stage is complete, so
         // no stage runs this invocation, but the report is read from the sidecars.
-        let again = run_staged(
-            &method,
-            &opts,
-            &cfg(HashBits::Bits64, false),
-            &svc,
-            &tmpl,
-            None,
-            "funder",
-            None,
-        )
-        .unwrap();
+        let again =
+            run_staged_default(&method, &opts, &cfg(HashBits::Bits64, false), &svc, &tmpl).unwrap();
 
         assert_eq!(again.counters.emitted, first.counters.emitted);
         assert_eq!(again.counters.emitted, 2);
@@ -1288,18 +1196,15 @@ mod tests {
         let method = TestMethod {
             hash_bits: HashBits::Bits64,
         };
-        let svc: Arc<dyn MatchService> = Arc::new(ErroringService);
+        let svc: Arc<dyn MatchService> = Arc::new(FakeMatchService::erroring());
         let tmpl = template();
 
-        let report = run_staged(
+        let report = run_staged_default(
             &method,
             &run_opts(&input, &output),
             &cfg(HashBits::Bits64, true),
             &svc,
             &tmpl,
-            None,
-            "funder",
-            None,
         )
         .unwrap();
 

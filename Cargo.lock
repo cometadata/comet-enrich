@@ -310,6 +310,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "comet-enrichment-core",
+ "comet-test-support",
  "flate2",
  "regex",
  "serde",
@@ -325,6 +326,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "comet-test-support",
  "flate2",
  "glob",
  "indicatif",
@@ -340,6 +342,15 @@ dependencies = [
  "tokio",
  "wiremock",
  "xxhash-rust",
+]
+
+[[package]]
+name = "comet-test-support"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

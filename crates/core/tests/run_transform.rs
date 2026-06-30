@@ -3,38 +3,9 @@
 use comet_enrichment_core::{
     EnrichmentAction, EnrichmentMethod, EnrichmentParts, Extracted, Lookups, RunOptions, run,
 };
-use flate2::Compression;
-use flate2::read::GzDecoder;
-use flate2::write::GzEncoder;
+use comet_test_support::{config_path, read_enrichment_parts, write_gz_lines};
 use serde_json::{Value, json};
 use std::fs;
-use std::io::{Read, Write};
-use std::path::Path;
-
-/// Read every gzip part under `<output>/enrichments/` into enrichment records.
-///
-/// Record order across parts is not stable, so callers compare sets, not order.
-fn read_enrichment_parts(output: &Path) -> Vec<Value> {
-    let mut recs = Vec::new();
-    for entry in fs::read_dir(output.join(comet_enrichment_core::ENRICHMENTS_DIR)).unwrap() {
-        let path = entry.unwrap().path();
-        if path.extension().and_then(|e| e.to_str()) != Some("gz") {
-            continue;
-        }
-        let mut body = String::new();
-        GzDecoder::new(fs::File::open(&path).unwrap())
-            .read_to_string(&mut body)
-            .unwrap();
-        recs.extend(body.lines().map(|l| serde_json::from_str(l).unwrap()));
-    }
-    recs
-}
-
-/// Schema file used to validate records written by the test.
-const SCHEMA_PATH: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../configs/schema/enrichment_input_schema.json"
-);
 
 /// Test method that rewrites `resourceTypeGeneral` to `"Dataset"`.
 struct DatasetTagger;
@@ -100,8 +71,6 @@ fn run_drives_transform_end_to_end() {
     let dir = tempfile::tempdir().unwrap();
 
     // Match the nested layout used by DataCite snapshots.
-    let input_dir = dir.path().join("input/updated_2024-01");
-    fs::create_dir_all(&input_dir).unwrap();
     let lines = [
         r#"{"id":"10.1/a","attributes":{"types":{"resourceType":"Journal article","resourceTypeGeneral":"Text"}}}"#,
         r#"{"id":"10.1/b","attributes":{"types":{"resourceType":"Spreadsheet"}}}"#,
@@ -109,11 +78,10 @@ fn run_drives_transform_end_to_end() {
         "",                                             // blank line: ignored, not malformed
         "{not valid json",                              // malformed
     ];
-    let file = input_dir.join("part_0000.jsonl.gz");
-    let f = fs::File::create(&file).unwrap();
-    let mut enc = GzEncoder::new(f, Compression::default());
-    enc.write_all(lines.join("\n").as_bytes()).unwrap();
-    enc.finish().unwrap();
+    write_gz_lines(
+        &dir.path().join("input/updated_2024-01/part_0000.jsonl.gz"),
+        &lines,
+    );
 
     let provenance = dir.path().join("enrichment.yaml");
     fs::write(&provenance, ENRICHMENT_YAML).unwrap();
@@ -124,11 +92,13 @@ fn run_drives_transform_end_to_end() {
         input: dir.path().join("input"),
         output: output.clone(),
         threads: 1,
-        batch_size: 5000,
+        batch_size: 100,
     };
 
     // Validate records using the same schema check as a normal run.
-    let validator = comet_enrichment_core::schema::compile(Path::new(SCHEMA_PATH)).unwrap();
+    let validator =
+        comet_enrichment_core::schema::compile(&config_path("schema/enrichment_input_schema.json"))
+            .unwrap();
     let stats = run(&DatasetTagger, &opts, &template, Some(&validator)).unwrap();
 
     assert_eq!(stats.files_processed, 1);
@@ -159,14 +129,10 @@ fn write_failure_fails_the_run() {
     // opening it for writing then errors the moment a record is diverted.
     let dir = tempfile::tempdir().unwrap();
 
-    let input_dir = dir.path().join("input/updated_2024-01");
-    fs::create_dir_all(&input_dir).unwrap();
-    let line = r#"{"id":"10.1/a","attributes":{"types":{"resourceType":"Spreadsheet"}}}"#;
-    let file = input_dir.join("part_0000.jsonl.gz");
-    let f = fs::File::create(&file).unwrap();
-    let mut enc = GzEncoder::new(f, Compression::default());
-    enc.write_all(line.as_bytes()).unwrap();
-    enc.finish().unwrap();
+    write_gz_lines(
+        &dir.path().join("input/updated_2024-01/part_0000.jsonl.gz"),
+        &[r#"{"id":"10.1/a","attributes":{"types":{"resourceType":"Spreadsheet"}}}"#],
+    );
 
     let provenance = dir.path().join("enrichment.yaml");
     fs::write(&provenance, ENRICHMENT_YAML).unwrap();
@@ -178,9 +144,9 @@ fn write_failure_fails_the_run() {
 
     let opts = RunOptions {
         input: dir.path().join("input"),
-        output,
+        output: output.clone(),
         threads: 1,
-        batch_size: 5000,
+        batch_size: 100,
     };
 
     // A validator that rejects every record, so the one emitted record is diverted.

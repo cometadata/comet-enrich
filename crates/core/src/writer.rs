@@ -215,30 +215,28 @@ fn open_buffered(path: &Path, capacity: usize) -> Result<BufWriter<File>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use flate2::read::GzDecoder;
+    use comet_test_support::read_gz_string;
     use serde_json::json;
-    use std::io::Read;
 
-    /// Read a gzip part back into a string.
-    fn read_gz(path: &Path) -> String {
-        let f = File::open(path).unwrap();
-        let mut s = String::new();
-        GzDecoder::new(f).read_to_string(&mut s).unwrap();
-        s
-    }
-
-    #[test]
-    fn part_writer_writes_one_per_line() {
+    /// Set up a temp dir with a part path, a failed-records path, and an open
+    /// `FailureSink` — the scaffolding shared by the writer tests.
+    fn writer_fixture() -> (tempfile::TempDir, PathBuf, PathBuf, Mutex<FailureSink>) {
         let dir = tempfile::tempdir().unwrap();
         let part = dir.path().join("part_0000.jsonl.gz");
         let failed = dir.path().join("out.failed.jsonl");
         let failures = Mutex::new(FailureSink::create(&failed).unwrap());
+        (dir, part, failed, failures)
+    }
+
+    #[test]
+    fn part_writer_writes_one_per_line() {
+        let (_dir, part, failed, failures) = writer_fixture();
         {
             let mut w = PartWriter::create(&part, None, &failures, 5000).unwrap();
             w.write_batch(&[json!({"a":1}), json!({"b":2})]).unwrap();
             assert_eq!(w.finish().unwrap(), 2);
         }
-        let s = read_gz(&part);
+        let s = read_gz_string(&part);
         let lines: Vec<_> = s.lines().collect();
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0], r#"{"a":1}"#);
@@ -251,10 +249,7 @@ mod tests {
     fn push_buffers_and_flushes_every_record() {
         // batch_size 2: pushing three records flushes the first two at the
         // threshold and the third on finish, so none are lost at the boundary.
-        let dir = tempfile::tempdir().unwrap();
-        let part = dir.path().join("part_0000.jsonl.gz");
-        let failed = dir.path().join("out.failed.jsonl");
-        let failures = Mutex::new(FailureSink::create(&failed).unwrap());
+        let (_dir, part, failed, failures) = writer_fixture();
         let written = {
             let mut w = PartWriter::create(&part, None, &failures, 2).unwrap();
             w.push(json!({"n":1})).unwrap();
@@ -263,19 +258,16 @@ mod tests {
             w.finish().unwrap()
         };
         assert_eq!(written, 3);
-        let lines: Vec<String> = read_gz(&part).lines().map(str::to_owned).collect();
+        let lines: Vec<String> = read_gz_string(&part).lines().map(str::to_owned).collect();
         assert_eq!(lines, vec![r#"{"n":1}"#, r#"{"n":2}"#, r#"{"n":3}"#]);
         assert!(!failed.exists());
     }
 
     #[test]
     fn invalid_records_are_diverted() {
-        let dir = tempfile::tempdir().unwrap();
-        let part = dir.path().join("part_0000.jsonl.gz");
-        let failed = dir.path().join("out.failed.jsonl");
+        let (_dir, part, failed, failures) = writer_fixture();
         // Minimal schema: an object that requires property "a".
         let schema = crate::schema::compile_str(r#"{"type":"object","required":["a"]}"#).unwrap();
-        let failures = Mutex::new(FailureSink::create(&failed).unwrap());
 
         let records_written = {
             let mut w = PartWriter::create(&part, Some(&schema), &failures, 5000).unwrap();
@@ -287,7 +279,7 @@ mod tests {
         assert_eq!(records_written, 1);
         assert_eq!(failures.lock().unwrap().records_failed, 1);
 
-        let main = read_gz(&part);
+        let main = read_gz_string(&part);
         assert_eq!(main.lines().count(), 1);
         assert_eq!(main.lines().next().unwrap(), r#"{"a":1}"#);
 
