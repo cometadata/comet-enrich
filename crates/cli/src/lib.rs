@@ -243,20 +243,25 @@ where
         .match_
         .as_ref()
         .map_or(0, |m| m.failure_taxonomy.error);
+    let complete = pipeline_complete(&io.output);
     let manifest_status = exit_status(
         report.counters.files_failed,
         report.counters.schema_failures,
         match_errors,
-        pipeline_complete(&io.output),
+        complete,
     );
     let stats = report.counters.clone();
-    Manifest::from_report(
-        &meta,
-        manifest_status,
-        report,
-        HashInfo::from(cfg.hash_bits),
-    )
-    .write(&io.output)?;
+    if complete {
+        Manifest::from_report(
+            &meta,
+            manifest_status,
+            report,
+            HashInfo::from(cfg.hash_bits),
+        )
+        .write(&io.output)?;
+    } else {
+        log::info!("staged pipeline incomplete; not writing manifest.json");
+    }
 
     report_stats(name, &stats);
     Ok(())

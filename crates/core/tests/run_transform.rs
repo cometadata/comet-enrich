@@ -157,3 +157,96 @@ fn write_failure_fails_the_run() {
     let result = run(&DatasetTagger, &opts, &template, Some(&validator));
     assert!(result.is_err(), "write failure should fail the run");
 }
+
+#[test]
+fn rerun_with_fewer_inputs_removes_stale_enrichment_parts() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input");
+    write_gz_lines(
+        &input.join("updated_2024-01/part_0000.jsonl.gz"),
+        &[r#"{"id":"10.1/a","attributes":{"types":{"resourceType":"Spreadsheet"}}}"#],
+    );
+    write_gz_lines(
+        &input.join("updated_2024-01/part_0001.jsonl.gz"),
+        &[r#"{"id":"10.1/b","attributes":{"types":{"resourceType":"Table"}}}"#],
+    );
+
+    let provenance = dir.path().join("enrichment.yaml");
+    fs::write(&provenance, ENRICHMENT_YAML).unwrap();
+    let template = comet_enrichment_core::load_template(&provenance).unwrap();
+    let output = dir.path().join("out");
+    let opts = RunOptions {
+        input: input.clone(),
+        output: output.clone(),
+        threads: 1,
+        batch_size: 100,
+    };
+
+    run(&DatasetTagger, &opts, &template, None).unwrap();
+    assert_eq!(read_enrichment_parts(&output).len(), 2);
+    assert!(
+        output
+            .join(comet_enrichment_core::ENRICHMENTS_DIR)
+            .join("part_0001.jsonl.gz")
+            .exists()
+    );
+
+    fs::remove_file(input.join("updated_2024-01/part_0001.jsonl.gz")).unwrap();
+    fs::write(output.join("manifest.json"), "stale").unwrap();
+    let stats = run(&DatasetTagger, &opts, &template, None).unwrap();
+
+    assert_eq!(stats.emitted, 1);
+    assert!(!output.join("manifest.json").exists());
+    assert!(
+        !output
+            .join(comet_enrichment_core::ENRICHMENTS_DIR)
+            .join("part_0001.jsonl.gz")
+            .exists()
+    );
+    let recs = read_enrichment_parts(&output);
+    assert_eq!(recs.len(), 1);
+    assert_eq!(recs[0]["doi"], json!("10.1/a"));
+}
+
+#[test]
+fn empty_input_rerun_removes_stale_transform_outputs() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input");
+    write_gz_lines(
+        &input.join("updated_2024-01/part_0000.jsonl.gz"),
+        &[r#"{"id":"10.1/a","attributes":{"types":{"resourceType":"Spreadsheet"}}}"#],
+    );
+
+    let provenance = dir.path().join("enrichment.yaml");
+    fs::write(&provenance, ENRICHMENT_YAML).unwrap();
+    let template = comet_enrichment_core::load_template(&provenance).unwrap();
+    let output = dir.path().join("out");
+    let opts = RunOptions {
+        input: input.clone(),
+        output: output.clone(),
+        threads: 1,
+        batch_size: 100,
+    };
+
+    run(&DatasetTagger, &opts, &template, None).unwrap();
+    assert_eq!(read_enrichment_parts(&output).len(), 1);
+
+    fs::remove_file(input.join("updated_2024-01/part_0000.jsonl.gz")).unwrap();
+    fs::write(output.join("manifest.json"), "stale").unwrap();
+    fs::write(
+        output.join(comet_enrichment_core::ENRICHMENTS_FAILED_FILE),
+        "stale\n",
+    )
+    .unwrap();
+
+    let stats = run(&DatasetTagger, &opts, &template, None).unwrap();
+
+    assert_eq!(stats.emitted, 0);
+    assert!(!output.join("manifest.json").exists());
+    assert!(
+        !output
+            .join(comet_enrichment_core::ENRICHMENTS_FAILED_FILE)
+            .exists()
+    );
+    assert_eq!(read_enrichment_parts(&output), Vec::<Value>::new());
+}

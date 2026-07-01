@@ -12,12 +12,14 @@
 //! builds a method's `Lookup` from a service result through `From<MatchHit>`, so it
 //! never names a method's fields.
 
+use crate::artifact_lifecycle as lifecycle;
 use crate::dedup::{DedupStore, HashBits};
 use crate::fanout::{
     FileError, input_files, make_pool, own_skips, scan_jsonl_records, sorted_glob,
 };
 use crate::manifest::{
-    Coverage, HistogramBucket, MatchFailureTaxonomy, MatchSummary, Report, StageTimings, Validation,
+    Coverage, HistogramBucket, MANIFEST_FILE, MatchFailureTaxonomy, MatchSummary, Report,
+    StageTimings, Validation,
 };
 use crate::match_service::{MatchHit, MatchService};
 use crate::method::EnrichmentMethod;
@@ -158,25 +160,36 @@ where
 {
     let wd = WorkDir::for_output(&io.output);
     let work_path = wd.path.as_path();
+    let full_from_scratch = cfg.from_scratch && only_stage.is_none();
+
+    if full_from_scratch {
+        clear_public_run_artifacts(&io.output)?;
+        lifecycle::remove_dir_if_exists(work_path)?;
+    }
+
     fs::create_dir_all(work_path)
         .with_context(|| format!("creating work dir {}", work_path.display()))?;
-
-    // Pin the hash width on the first run, or refuse a resume that asks for a
-    // different one (a width mismatch silently breaks the hash join).
-    pin_or_validate_hash_bits(work_path, cfg.hash_bits, cfg.from_scratch)?;
 
     let stages = match only_stage {
         Some(stage) => {
             ensure_predecessors_done(&wd, stage)?;
+            let repin_hash = stage == Stage::Extract && cfg.from_scratch;
+            pin_or_validate_hash_bits(work_path, cfg.hash_bits, repin_hash)?;
             vec![stage]
         }
-        None => stages_to_run(work_path, cfg.from_scratch),
+        None => {
+            // Pin the hash width on the first run, or refuse a resume that asks for a
+            // different one (a width mismatch silently breaks the hash join).
+            pin_or_validate_hash_bits(work_path, cfg.hash_bits, full_from_scratch)?;
+            stages_to_run(work_path, full_from_scratch)
+        }
     };
 
     let mut timings = StageTimings::default();
     let run_start = Instant::now();
 
     for stage in stages {
+        prepare_stage_rerun(&wd, stage, work_path, &io.output)?;
         let started = Instant::now();
         match stage {
             Stage::Extract => {
@@ -192,7 +205,7 @@ where
                 timings.reconcile = Some(elapsed_ms(started));
             }
         }
-        fs::write(wd.marker_path(stage), b"")
+        lifecycle::write_marker(&wd.marker_path(stage))
             .with_context(|| format!("writing {} marker", stage.marker()))?;
     }
 
@@ -250,6 +263,63 @@ fn ensure_predecessors_done(wd: &WorkDir, stage: Stage) -> Result<()> {
             );
         }
     }
+    Ok(())
+}
+
+/// Clear the marker and artifacts that become obsolete when `stage` is rerun.
+fn prepare_stage_rerun(wd: &WorkDir, stage: Stage, work: &Path, output: &Path) -> Result<()> {
+    clear_markers_from(wd, stage)?;
+    match stage {
+        Stage::Extract => {
+            clear_extract_artifacts(work)?;
+            clear_query_artifacts(work)?;
+            clear_reconcile_artifacts(work, output)?;
+        }
+        Stage::Query => {
+            clear_query_artifacts(work)?;
+            clear_reconcile_artifacts(work, output)?;
+        }
+        Stage::Reconcile => {
+            clear_reconcile_artifacts(work, output)?;
+        }
+    }
+    Ok(())
+}
+
+fn clear_markers_from(wd: &WorkDir, stage: Stage) -> Result<()> {
+    let stages: &[Stage] = match stage {
+        Stage::Extract => &Stage::ALL,
+        Stage::Query => &[Stage::Query, Stage::Reconcile],
+        Stage::Reconcile => &[Stage::Reconcile],
+    };
+    for &stage in stages {
+        lifecycle::remove_file_if_exists(&wd.marker_path(stage))?;
+    }
+    Ok(())
+}
+
+fn clear_extract_artifacts(work: &Path) -> Result<()> {
+    lifecycle::recreate_dir(&work.join(EXTRACTIONS_DIR))?;
+    lifecycle::remove_file_if_exists(&work.join(INPUTS_FILE))?;
+    lifecycle::remove_file_if_exists(&work.join(EXTRACT_STATS_FILE))?;
+    Ok(())
+}
+
+fn clear_query_artifacts(work: &Path) -> Result<()> {
+    lifecycle::remove_file_if_exists(&work.join(LOOKUPS_FILE))?;
+    lifecycle::remove_file_if_exists(&work.join(LOOKUPS_FAILED_FILE))?;
+    Ok(())
+}
+
+fn clear_reconcile_artifacts(work: &Path, output: &Path) -> Result<()> {
+    lifecycle::remove_file_if_exists(&work.join(RECONCILE_STATS_FILE))?;
+    clear_public_run_artifacts(output)
+}
+
+fn clear_public_run_artifacts(output: &Path) -> Result<()> {
+    lifecycle::remove_file_if_exists(&output.join(MANIFEST_FILE))?;
+    lifecycle::recreate_dir(&output.join(ENRICHMENTS_DIR))?;
+    lifecycle::remove_file_if_exists(&output.join(ENRICHMENTS_FAILED_FILE))?;
     Ok(())
 }
 
@@ -815,8 +885,10 @@ mod tests {
     use crate::method::{EnrichmentAction, EnrichmentParts, Extracted, Lookups};
     use crate::provenance::EnrichmentTemplate;
     use crate::staged::WORK_DIR;
+    use async_trait::async_trait;
     use comet_test_support::{
-        assert_close, assert_err_contains, gz_input_fixture, read_enrichment_parts,
+        assert_close, assert_err_contains, gz_input_fixture, read_enrichment_parts, write_gz_lines,
+        write_gz_part,
     };
     use serde_json::{Value, json};
     use std::collections::HashMap;
@@ -901,6 +973,19 @@ mod tests {
         Arc::new(FakeMatchService::new(map))
     }
 
+    struct PanickingMatchService;
+
+    #[async_trait]
+    impl MatchService for PanickingMatchService {
+        async fn match_bulk(
+            &self,
+            _inputs: &[String],
+            _task: &str,
+        ) -> Result<Vec<Option<(String, f64)>>> {
+            panic!("simulated query panic");
+        }
+    }
+
     /// Four records: two match, one has no match, one has no funder name (skipped).
     fn sample_records() -> Vec<Value> {
         vec![
@@ -927,6 +1012,25 @@ mod tests {
     /// roots.
     fn fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
         gz_input_fixture(&sample_records())
+    }
+
+    fn two_part_fixture(
+        first: &[Value],
+        second: &[Value],
+    ) -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("input");
+        let output = dir.path().join("output");
+        fs::create_dir_all(&output).unwrap();
+        write_gz_part(
+            &input.join("updated_2024-01").join("part_0000.jsonl.gz"),
+            first,
+        );
+        write_gz_part(
+            &input.join("updated_2024-01").join("part_0001.jsonl.gz"),
+            second,
+        );
+        (dir, input, output)
     }
 
     fn run_opts(input: &Path, output: &Path) -> RunOptions {
@@ -1055,7 +1159,7 @@ mod tests {
         assert!(work.join(INPUTS_FILE).exists());
         assert!(!work.join("query.done").exists());
         assert!(!work.join("reconcile.done").exists());
-        assert!(!output.join(ENRICHMENTS_DIR).exists());
+        assert_eq!(read_output_dois(&output), Vec::<String>::new());
     }
 
     #[test]
@@ -1104,6 +1208,193 @@ mod tests {
         // Extract was skipped this run, so its timing is absent.
         assert!(report.stage_timings_ms.extract.is_none());
         assert_eq!(read_output_dois(&output).len(), 2);
+    }
+
+    #[test]
+    fn from_scratch_failure_invalidates_old_downstream_markers() {
+        let (_dir, input, output) = fixture();
+        let method = TestMethod {
+            hash_bits: HashBits::Bits64,
+        };
+        let svc = fake_service();
+        let tmpl = template();
+        let opts = run_opts(&input, &output);
+
+        run_staged_default(&method, &opts, &cfg(HashBits::Bits64, true), &svc, &tmpl).unwrap();
+
+        let failing: Arc<dyn MatchService> = Arc::new(PanickingMatchService);
+        assert_err_contains(
+            run_staged_default(
+                &method,
+                &opts,
+                &cfg(HashBits::Bits64, true),
+                &failing,
+                &tmpl,
+            ),
+            "query task panicked",
+        );
+
+        let work = output.join(WORK_DIR);
+        assert!(work.join("extract.done").exists());
+        assert!(!work.join("query.done").exists());
+        assert!(!work.join("reconcile.done").exists());
+        assert_eq!(read_output_dois(&output), Vec::<String>::new());
+    }
+
+    #[test]
+    fn from_scratch_with_fewer_inputs_removes_obsolete_extraction_parts() {
+        let first = [json!({ "id": "10.1/mit", "attributes": { "name": "MIT" } })];
+        let second = [json!({ "id": "10.1/nsf", "attributes": { "name": "NSF" } })];
+        let (_dir, input, output) = two_part_fixture(&first, &second);
+        let method = TestMethod {
+            hash_bits: HashBits::Bits64,
+        };
+        let svc = fake_service();
+        let tmpl = template();
+        let opts = run_opts(&input, &output);
+
+        run_staged_default(&method, &opts, &cfg(HashBits::Bits64, true), &svc, &tmpl).unwrap();
+        assert!(
+            output
+                .join(WORK_DIR)
+                .join("extractions/part_0001.jsonl")
+                .exists()
+        );
+        assert!(
+            output
+                .join(ENRICHMENTS_DIR)
+                .join("part_0001.jsonl.gz")
+                .exists()
+        );
+
+        fs::remove_file(input.join("updated_2024-01/part_0001.jsonl.gz")).unwrap();
+        run_staged_default(&method, &opts, &cfg(HashBits::Bits64, true), &svc, &tmpl).unwrap();
+
+        assert!(
+            !output
+                .join(WORK_DIR)
+                .join("extractions/part_0001.jsonl")
+                .exists()
+        );
+        assert!(
+            !output
+                .join(ENRICHMENTS_DIR)
+                .join("part_0001.jsonl.gz")
+                .exists()
+        );
+        assert_eq!(read_output_dois(&output), vec!["10.1/mit".to_owned()]);
+    }
+
+    #[test]
+    fn single_stage_extract_invalidates_downstream_artifacts() {
+        let (_dir, input, output) = fixture();
+        let method = TestMethod {
+            hash_bits: HashBits::Bits64,
+        };
+        let svc = fake_service();
+        let tmpl = template();
+        let opts = run_opts(&input, &output);
+
+        run_staged_default(&method, &opts, &cfg(HashBits::Bits64, true), &svc, &tmpl).unwrap();
+        fs::write(output.join(MANIFEST_FILE), "stale").unwrap();
+
+        run_staged(
+            &method,
+            &opts,
+            &cfg(HashBits::Bits64, false),
+            &svc,
+            &tmpl,
+            None,
+            "funder",
+            Some(Stage::Extract),
+        )
+        .unwrap();
+
+        let work = output.join(WORK_DIR);
+        assert!(work.join("extract.done").exists());
+        assert!(!work.join("query.done").exists());
+        assert!(!work.join("reconcile.done").exists());
+        assert!(!work.join(LOOKUPS_FILE).exists());
+        assert!(!work.join(RECONCILE_STATS_FILE).exists());
+        assert!(!output.join(MANIFEST_FILE).exists());
+        assert_eq!(read_output_dois(&output), Vec::<String>::new());
+    }
+
+    #[test]
+    fn single_stage_query_invalidates_reconcile_artifacts() {
+        let (_dir, input, output) = fixture();
+        let method = TestMethod {
+            hash_bits: HashBits::Bits64,
+        };
+        let svc = fake_service();
+        let tmpl = template();
+        let opts = run_opts(&input, &output);
+
+        run_staged_default(&method, &opts, &cfg(HashBits::Bits64, true), &svc, &tmpl).unwrap();
+        fs::write(output.join(MANIFEST_FILE), "stale").unwrap();
+
+        run_staged(
+            &method,
+            &opts,
+            &cfg(HashBits::Bits64, false),
+            &svc,
+            &tmpl,
+            None,
+            "funder",
+            Some(Stage::Query),
+        )
+        .unwrap();
+
+        let work = output.join(WORK_DIR);
+        assert!(work.join("extract.done").exists());
+        assert!(work.join("query.done").exists());
+        assert!(!work.join("reconcile.done").exists());
+        assert!(!work.join(RECONCILE_STATS_FILE).exists());
+        assert!(!output.join(MANIFEST_FILE).exists());
+        assert_eq!(read_output_dois(&output), Vec::<String>::new());
+    }
+
+    #[test]
+    fn single_stage_reconcile_replaces_stale_public_outputs() {
+        let (_dir, input, output) = fixture();
+        let method = TestMethod {
+            hash_bits: HashBits::Bits64,
+        };
+        let svc = fake_service();
+        let tmpl = template();
+        let opts = run_opts(&input, &output);
+
+        run_staged_default(&method, &opts, &cfg(HashBits::Bits64, true), &svc, &tmpl).unwrap();
+        write_gz_lines(
+            &output.join(ENRICHMENTS_DIR).join("part_9999.jsonl.gz"),
+            &[r#"{"doi":"stale"}"#],
+        );
+        fs::write(output.join(ENRICHMENTS_FAILED_FILE), "stale\n").unwrap();
+
+        run_staged(
+            &method,
+            &opts,
+            &cfg(HashBits::Bits64, false),
+            &svc,
+            &tmpl,
+            None,
+            "funder",
+            Some(Stage::Reconcile),
+        )
+        .unwrap();
+
+        assert!(output.join(WORK_DIR).join("reconcile.done").exists());
+        assert!(
+            !output
+                .join(ENRICHMENTS_DIR)
+                .join("part_9999.jsonl.gz")
+                .exists()
+        );
+        assert!(!output.join(ENRICHMENTS_FAILED_FILE).exists());
+        let dois = read_output_dois(&output);
+        assert_eq!(dois.len(), 2);
+        assert!(dois.contains(&"10.1/mit".to_owned()));
+        assert!(dois.contains(&"10.1/nsf".to_owned()));
     }
 
     #[test]

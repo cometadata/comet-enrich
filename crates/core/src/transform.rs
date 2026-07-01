@@ -7,13 +7,15 @@
 //! output writer. Records are validated at the write boundary when a schema
 //! validator is provided.
 
+use crate::artifact_lifecycle as lifecycle;
 use crate::fanout::{FileError, input_files, make_pool, own_skips, scan_jsonl_records};
+use crate::manifest::MANIFEST_FILE;
 use crate::method::{EnrichmentMethod, Extracted, Lookups};
 use crate::provenance::{EnrichmentTemplate, build_enrichment_record};
 use crate::run::{RunOptions, RunStats};
 use crate::writer::{ENRICHMENTS_DIR, ENRICHMENTS_FAILED_FILE, FailureSink, PartWriter};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use flate2::read::GzDecoder;
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
@@ -55,8 +57,7 @@ pub fn run<M: EnrichmentMethod>(
     log::info!("found {} input files", files.len());
 
     let enrich_dir = opts.output.join(ENRICHMENTS_DIR);
-    std::fs::create_dir_all(&enrich_dir)
-        .with_context(|| format!("creating output dir {}", enrich_dir.display()))?;
+    clear_transform_artifacts(&opts.output)?;
     let failed_path = opts.output.join(ENRICHMENTS_FAILED_FILE);
     // One shared failures sink: validation failures are rare, so the mutex is
     // uncontended in practice. Creating it clears any stale failures file.
@@ -181,6 +182,13 @@ fn process_file<M: EnrichmentMethod>(
         .fetch_add(tally.malformed, Ordering::Relaxed);
     counters.emitted.fetch_add(written, Ordering::Relaxed);
     merge_skips(skipped, local_skips);
+    Ok(())
+}
+
+fn clear_transform_artifacts(output: &Path) -> Result<()> {
+    lifecycle::remove_file_if_exists(&output.join(MANIFEST_FILE))?;
+    lifecycle::recreate_dir(&output.join(ENRICHMENTS_DIR))?;
+    lifecycle::remove_file_if_exists(&output.join(ENRICHMENTS_FAILED_FILE))?;
     Ok(())
 }
 

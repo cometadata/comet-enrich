@@ -8,6 +8,7 @@
 // DataCite, COMET, JSONL, and xxh3 are names, not Rust identifiers.
 #![allow(clippy::doc_markdown)]
 
+mod artifact_lifecycle;
 pub mod datacite_enums;
 pub mod dedup;
 mod fanout;
