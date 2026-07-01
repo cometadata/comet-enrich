@@ -122,6 +122,9 @@ mod tests {
         }
     }
 
+    // Transform-only methods intentionally use `Lookup = ()`; this test pins that
+    // the generic `Lookups<L>` API still works for that no-lookup case.
+    #[allow(clippy::zero_sized_map_values)]
     #[test]
     fn enrichment_method_default_lookup_hooks_are_empty() {
         let method = TransformOnly;

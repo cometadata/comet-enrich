@@ -164,9 +164,8 @@ fn process_file<M: EnrichmentMethod>(
                     for parts in method.map_back(item, &lookups) {
                         output_batch.push(build_enrichment_record(template, parts));
                         if output_batch.len() >= batch_size.max(1) {
-                            writer
-                                .push_batch(std::mem::take(&mut output_batch))
-                                .map_err(FileError::Fatal)?;
+                            writer.push_batch(&output_batch).map_err(FileError::Fatal)?;
+                            output_batch.clear();
                         }
                     }
                 }
@@ -175,7 +174,7 @@ fn process_file<M: EnrichmentMethod>(
         Ok(())
     })?;
 
-    writer.push_batch(output_batch).map_err(FileError::Fatal)?;
+    writer.push_batch(&output_batch).map_err(FileError::Fatal)?;
     counters
         .records_scanned
         .fetch_add(tally.scanned, Ordering::Relaxed);

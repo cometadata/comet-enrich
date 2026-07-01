@@ -161,19 +161,16 @@ where
     fs::create_dir_all(work_path)
         .with_context(|| format!("creating work dir {}", work_path.display()))?;
 
-    let stages = match only_stage {
-        Some(stage) => {
-            ensure_predecessors_done(&wd, stage)?;
-            let repin_hash = stage == Stage::Extract && cfg.from_scratch;
-            pin_or_validate_hash_bits(work_path, cfg.hash_bits, repin_hash)?;
-            vec![stage]
-        }
-        None => {
-            // Pin the hash width on the first run, or refuse a resume that asks for a
-            // different one (a width mismatch silently breaks the hash join).
-            pin_or_validate_hash_bits(work_path, cfg.hash_bits, full_from_scratch)?;
-            stages_to_run(work_path, full_from_scratch)
-        }
+    let stages = if let Some(stage) = only_stage {
+        ensure_predecessors_done(&wd, stage)?;
+        let repin_hash = stage == Stage::Extract && cfg.from_scratch;
+        pin_or_validate_hash_bits(work_path, cfg.hash_bits, repin_hash)?;
+        vec![stage]
+    } else {
+        // Pin the hash width on the first run, or refuse a resume that asks for a
+        // different one (a width mismatch silently breaks the hash join).
+        pin_or_validate_hash_bits(work_path, cfg.hash_bits, full_from_scratch)?;
+        stages_to_run(work_path, full_from_scratch)
     };
 
     let mut timings = StageTimings::default();
@@ -699,11 +696,12 @@ where
         for parts in method.map_back(extraction, lookups) {
             output_batch.push(build_enrichment_record(template, parts));
             if output_batch.len() >= batch_size.max(1) {
-                writer.push_batch(std::mem::take(&mut output_batch))?;
+                writer.push_batch(&output_batch)?;
+                output_batch.clear();
             }
         }
     }
-    writer.push_batch(output_batch)?;
+    writer.push_batch(&output_batch)?;
     Ok(())
 }
 

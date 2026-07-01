@@ -100,117 +100,6 @@ impl FailureSink {
     }
 }
 
-/// Writes schema-valid enrichment records to one gzip output part.
-///
-/// Each worker owns one `PartWriter` for the input file it processes, so parts are
-/// written in parallel with no shared output writer. Records are buffered with
-/// [`PartWriter::push`] and flushed to the part in `batch_size` chunks; each record
-/// is validated before writing when a validator is provided, and failures are
-/// diverted to the shared [`FailureSink`].
-pub struct PartWriter<'a> {
-    inner: GzEncoder<BufWriter<File>>,
-    validator: Option<&'a jsonschema::JSONSchema>,
-    failures: &'a Mutex<FailureSink>,
-    /// Records buffered since the last flush; drained in `batch_size` chunks.
-    batch: Vec<Value>,
-    /// Flush threshold: the batch is written once it reaches this many records.
-    batch_size: usize,
-    pub records_written: u64,
-}
-
-impl<'a> PartWriter<'a> {
-    /// Create a gzip output part at `path`, flushing buffered records to it in
-    /// chunks of `batch_size`.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the part file cannot be created.
-    pub fn create(
-        path: &Path,
-        validator: Option<&'a jsonschema::JSONSchema>,
-        failures: &'a Mutex<FailureSink>,
-        batch_size: usize,
-    ) -> Result<Self> {
-        Ok(Self {
-            inner: GzEncoder::new(open_buffered(path, 256 * 1024)?, Compression::default()),
-            validator,
-            failures,
-            batch: Vec::with_capacity(batch_size),
-            batch_size: batch_size.max(1),
-            records_written: 0,
-        })
-    }
-
-    /// Buffer one record, flushing the batch to the part once it reaches
-    /// `batch_size` records.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if flushing the batch fails (a record cannot be written or
-    /// the failures file cannot be created).
-    pub fn push(&mut self, record: Value) -> Result<()> {
-        self.batch.push(record);
-        if self.batch.len() >= self.batch_size {
-            self.flush_batch()?;
-        }
-        Ok(())
-    }
-
-    /// Write the buffered batch to the part, keeping its allocation for reuse.
-    fn flush_batch(&mut self) -> Result<()> {
-        if self.batch.is_empty() {
-            return Ok(());
-        }
-        let mut batch = std::mem::take(&mut self.batch);
-        let result = self.write_batch(&batch);
-        batch.clear();
-        self.batch = batch;
-        result
-    }
-
-    /// Write records as JSONL, validating each one first when a validator is set.
-    ///
-    /// Valid records are written to this part. Records that fail validation are
-    /// diverted to the shared failures sink rather than aborting.
-    fn write_batch(&mut self, batch: &[Value]) -> Result<()> {
-        for rec in batch {
-            // Resolve validation into an owned result so the borrow of `validator`
-            // ends before we touch `inner` / `failures`.
-            let errors: Option<Vec<String>> = self
-                .validator
-                .and_then(|v| v.validate(rec).err())
-                .map(|errs| errs.map(|e| e.to_string()).collect());
-
-            if let Some(msgs) = errors {
-                self.failures.lock().unwrap().divert(rec, &msgs)?;
-            } else {
-                serde_json::to_writer(&mut self.inner, rec)?;
-                self.inner.write_all(b"\n")?;
-                self.records_written += 1;
-            }
-        }
-        Ok(())
-    }
-
-    /// Flush any buffered records, finish the gzip stream, and flush the part to
-    /// disk, returning the number of records written.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if a buffered record cannot be written, the gzip trailer
-    /// cannot be written, or the underlying file cannot be flushed.
-    pub fn finish(mut self) -> Result<u64> {
-        // Flush records still buffered below the batch threshold.
-        self.flush_batch()?;
-        // `finish` writes the gzip trailer into the BufWriter, which may still hold
-        // those bytes, so flush it explicitly rather than relying on Drop (which
-        // would swallow the error).
-        let mut buf = self.inner.finish()?;
-        buf.flush()?;
-        Ok(self.records_written)
-    }
-}
-
 /// Open `path` for writing, wrapped in a sized buffer.
 fn open_buffered(path: &Path, capacity: usize) -> Result<BufWriter<File>> {
     let f = File::create(path).with_context(|| format!("creating {}", path.display()))?;
@@ -281,8 +170,8 @@ impl<'a> ParallelRollingWriter<'a> {
     /// # Errors
     ///
     /// Returns an error if validation diversion or part writing fails.
-    pub fn push(&self, record: Value) -> Result<()> {
-        let lane = self.lane_for_record(&record);
+    pub fn push(&self, record: &Value) -> Result<()> {
+        let lane = self.lane_for_record(record);
         self.lanes[lane].lock().unwrap().push(record)
     }
 
@@ -292,7 +181,7 @@ impl<'a> ParallelRollingWriter<'a> {
     /// # Errors
     ///
     /// Returns an error if validation diversion or part writing fails.
-    pub fn push_batch(&self, records: Vec<Value>) -> Result<()> {
+    pub fn push_batch(&self, records: &[Value]) -> Result<()> {
         if records.is_empty() {
             return Ok(());
         }
@@ -305,9 +194,9 @@ impl<'a> ParallelRollingWriter<'a> {
             return Ok(());
         }
 
-        let mut by_lane: Vec<Vec<Value>> = (0..self.lanes.len()).map(|_| Vec::new()).collect();
+        let mut by_lane: Vec<Vec<&Value>> = (0..self.lanes.len()).map(|_| Vec::new()).collect();
         for record in records {
-            let lane = self.lane_for_record(&record);
+            let lane = self.lane_for_record(record);
             by_lane[lane].push(record);
         }
 
@@ -409,20 +298,20 @@ impl<'a> RollingLaneWriter<'a> {
         }
     }
 
-    fn push(&mut self, record: Value) -> Result<()> {
+    fn push(&mut self, record: &Value) -> Result<()> {
         let errors: Option<Vec<String>> = self
             .validator
-            .and_then(|v| v.validate(&record).err())
+            .and_then(|v| v.validate(record).err())
             .map(|errs| errs.map(|e| e.to_string()).collect());
 
         if let Some(msgs) = errors {
-            self.failures.lock().unwrap().divert(&record, &msgs)?;
+            self.failures.lock().unwrap().divert(record, &msgs)?;
             return Ok(());
         }
 
         self.ensure_current()?;
         let current = self.current.as_mut().expect("part opened above");
-        current.write_record(&record)?;
+        current.write_record(record)?;
         self.records_written += 1;
 
         if current.compressed_bytes() >= self.part_size_bytes {
@@ -537,56 +426,82 @@ mod tests {
     /// Common fixture for writer tests.
     fn writer_fixture() -> (tempfile::TempDir, PathBuf, PathBuf, Mutex<FailureSink>) {
         let dir = tempfile::tempdir().unwrap();
-        let part = dir.path().join("part_0000.jsonl.gz");
+        let enrich_dir = dir.path().join("enrichments");
         let failed = dir.path().join("out.failed.jsonl");
         let failures = Mutex::new(FailureSink::create(&failed).unwrap());
-        (dir, part, failed, failures)
+        (dir, enrich_dir, failed, failures)
     }
 
     #[test]
-    fn part_writer_writes_one_per_line() {
-        let (_dir, part, failed, failures) = writer_fixture();
+    fn rolling_writer_writes_one_per_line() {
+        let (_dir, enrich_dir, failed, failures) = writer_fixture();
         {
-            let mut w = PartWriter::create(&part, None, &failures, 5000).unwrap();
-            w.write_batch(&[json!({"a":1}), json!({"b":2})]).unwrap();
+            let w =
+                ParallelRollingWriter::create(&enrich_dir, None, &failures, 256 * 1024 * 1024, 1)
+                    .unwrap();
+            let records = vec![json!({"doi":"10.1/a","a":1}), json!({"doi":"10.1/b","b":2})];
+            w.push_batch(&records).unwrap();
             assert_eq!(w.finish().unwrap(), 2);
         }
+        let part = enrich_dir.join("part_0000.jsonl.gz");
         let s = read_gz_string(&part);
         let lines: Vec<_> = s.lines().collect();
         assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0], r#"{"a":1}"#);
-        assert_eq!(lines[1], r#"{"b":2}"#);
+        assert_eq!(lines[0], r#"{"doi":"10.1/a","a":1}"#);
+        assert_eq!(lines[1], r#"{"doi":"10.1/b","b":2}"#);
         // No failures, so the failures file is never created.
         assert!(!failed.exists());
+        assert!(!enrich_dir.join(ENRICHMENTS_TMP_DIR).exists());
     }
 
     #[test]
-    fn push_buffers_and_flushes_every_record() {
-        // batch_size 2: pushing three records flushes the first two at the
-        // threshold and the third on finish, so none are lost at the boundary.
-        let (_dir, part, failed, failures) = writer_fixture();
-        let written = {
-            let mut w = PartWriter::create(&part, None, &failures, 2).unwrap();
-            w.push(json!({"n":1})).unwrap();
-            w.push(json!({"n":2})).unwrap();
-            w.push(json!({"n":3})).unwrap();
-            w.finish().unwrap()
-        };
-        assert_eq!(written, 3);
-        let lines: Vec<String> = read_gz_string(&part).lines().map(str::to_owned).collect();
-        assert_eq!(lines, vec![r#"{"n":1}"#, r#"{"n":2}"#, r#"{"n":3}"#]);
+    fn push_batch_writes_every_record_across_lanes() {
+        let (_dir, enrich_dir, failed, failures) = writer_fixture();
+        let records = vec![
+            json!({"doi":"10.2/a","n":1}),
+            json!({"doi":"10.2/b","n":2}),
+            json!({"doi":"10.2/c","n":3}),
+            json!({"doi":"10.2/d","n":4}),
+        ];
+
+        let w = ParallelRollingWriter::create(&enrich_dir, None, &failures, 256 * 1024 * 1024, 4)
+            .unwrap();
+        w.push_batch(&records).unwrap();
+        assert_eq!(w.finish().unwrap(), 4);
+
+        let mut seen = Vec::new();
+        for entry in std::fs::read_dir(&enrich_dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|e| e.to_str()) == Some("gz") {
+                seen.extend(
+                    read_gz_string(&path)
+                        .lines()
+                        .map(|line| serde_json::from_str::<Value>(line).unwrap()),
+                );
+            }
+        }
+        seen.sort_by_key(|rec| rec["n"].as_i64().unwrap());
+        assert_eq!(seen, records);
         assert!(!failed.exists());
     }
 
     #[test]
     fn invalid_records_are_diverted() {
-        let (_dir, part, failed, failures) = writer_fixture();
+        let (_dir, enrich_dir, failed, failures) = writer_fixture();
         // Minimal schema: an object that requires property "a".
         let schema = crate::schema::compile_str(r#"{"type":"object","required":["a"]}"#).unwrap();
+        let records = vec![json!({"doi":"10.3/a","a":1}), json!({"doi":"10.3/b","b":2})];
 
         let records_written = {
-            let mut w = PartWriter::create(&part, Some(&schema), &failures, 5000).unwrap();
-            w.write_batch(&[json!({"a":1}), json!({"b":2})]).unwrap();
+            let w = ParallelRollingWriter::create(
+                &enrich_dir,
+                Some(&schema),
+                &failures,
+                256 * 1024 * 1024,
+                1,
+            )
+            .unwrap();
+            w.push_batch(&records).unwrap();
             w.finish().unwrap()
         };
         failures.lock().unwrap().flush().unwrap();
@@ -594,20 +509,20 @@ mod tests {
         assert_eq!(records_written, 1);
         assert_eq!(failures.lock().unwrap().records_failed, 1);
 
-        let main = read_gz_string(&part);
+        let main = read_gz_string(&enrich_dir.join("part_0000.jsonl.gz"));
         assert_eq!(main.lines().count(), 1);
-        assert_eq!(main.lines().next().unwrap(), r#"{"a":1}"#);
+        assert_eq!(main.lines().next().unwrap(), r#"{"doi":"10.3/a","a":1}"#);
 
         let fail = std::fs::read_to_string(&failed).unwrap();
         let entry: Value = serde_json::from_str(fail.lines().next().unwrap()).unwrap();
-        assert_eq!(entry["record"], json!({"b":2}));
+        assert_eq!(entry["record"], json!({"doi":"10.3/b","b":2}));
         assert!(!entry["errors"].as_array().unwrap().is_empty());
     }
 
     #[test]
     fn rerun_clears_stale_failures_file() {
         let dir = tempfile::tempdir().unwrap();
-        let part = dir.path().join("part_0000.jsonl.gz");
+        let enrich_dir = dir.path().join("enrichments");
         let failed = dir.path().join("out.failed.jsonl");
         let schema_text = r#"{"type":"object","required":["a"]}"#;
 
@@ -616,8 +531,16 @@ mod tests {
             let schema = crate::schema::compile_str(schema_text).unwrap();
             let failures = Mutex::new(FailureSink::create(&failed).unwrap());
             {
-                let mut w = PartWriter::create(&part, Some(&schema), &failures, 5000).unwrap();
-                w.write_batch(&[json!({"b":2})]).unwrap();
+                let w = ParallelRollingWriter::create(
+                    &enrich_dir,
+                    Some(&schema),
+                    &failures,
+                    256 * 1024 * 1024,
+                    1,
+                )
+                .unwrap();
+                let records = vec![json!({"doi":"10.4/b","b":2})];
+                w.push_batch(&records).unwrap();
                 w.finish().unwrap();
             }
             failures.lock().unwrap().flush().unwrap();
@@ -629,8 +552,16 @@ mod tests {
             let schema = crate::schema::compile_str(schema_text).unwrap();
             let failures = Mutex::new(FailureSink::create(&failed).unwrap());
             {
-                let mut w = PartWriter::create(&part, Some(&schema), &failures, 5000).unwrap();
-                w.write_batch(&[json!({"a":1})]).unwrap();
+                let w = ParallelRollingWriter::create(
+                    &enrich_dir,
+                    Some(&schema),
+                    &failures,
+                    256 * 1024 * 1024,
+                    1,
+                )
+                .unwrap();
+                let records = vec![json!({"doi":"10.4/a","a":1})];
+                w.push_batch(&records).unwrap();
                 w.finish().unwrap();
             }
             failures.lock().unwrap().flush().unwrap();
