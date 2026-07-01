@@ -38,11 +38,17 @@ recursively.
 ## Output and validation
 
 Each method writes enrichment records as gzip-compressed, newline-delimited JSON into an
-`enrichments/` directory inside the `--output` directory, one part per input file
-(`enrichments/part_NNNN.jsonl.gz`) written in parallel, one record per line. Records are validated
-against the built-in enrichment input schema as they are written; any that fail are written to
-`enrichments.failed.jsonl` in the output directory (with the validator error attached) and the run
-continues.
+`enrichments/` directory inside the `--output` directory (`enrichments/part_NNNN.jsonl.gz`), one
+record per line. Parts roll by output volume, controlled by `--output-part-size-mib`, rather than
+by the number of input files. Records are validated against the built-in enrichment input schema as
+they are written; any that fail are written to `enrichments.failed.jsonl` in the output directory
+(with the validator error attached) and the run continues.
+
+By default output is written through one rolling gzip writer. Use `--output-writer-lanes <N>` to
+enable parallel final-output writers; records are routed to lanes by a stable hash of their DOI,
+then lane-local temp files are published as contiguous `part_NNNN.jsonl.gz` names at the end of a
+successful run. Part names are storage chunks, not semantic partitions; consumers should read every
+file under `enrichments/`.
 
 Use these options to change the validation behaviour:
 
@@ -65,16 +71,18 @@ The provenance file is validated before the method runs.
 
 These flags are shared by every method:
 
-| Option                 | Default    | Description                                                          |
-|------------------------|------------|----------------------------------------------------------------------|
-| `-i, --input <DIR>`    | _required_ | Input directory of DataCite `*.jsonl.gz` files, searched recursively |
-| `-o, --output <DIR>`   | _required_ | Output directory; writes `enrichments/part_NNNN.jsonl.gz` (and `enrichments.failed.jsonl`) |
-| `--provenance <FILE>`  | _required_ | YAML provenance metadata attached to each record                     |
-| `-t, --threads <N>`    | `0`        | Worker threads; `0` uses all available CPUs                          |
-| `-b, --batch-size <N>` | `5000`     | Enrichment records per writer batch                                  |
-| `--schema <FILE>`      | built-in   | Validate output against a custom JSON Schema                         |
-| `--no-validate`        | off        | Skip output schema validation                                        |
-| `--log-level <LEVEL>`  | `info`     | Minimum log level (`trace`, `debug`, `info`, `warn`, `error`)        |
+| Option                         | Default    | Description                                                          |
+|--------------------------------|------------|----------------------------------------------------------------------|
+| `-i, --input <DIR>`            | _required_ | Input directory of DataCite `*.jsonl.gz` files, searched recursively |
+| `-o, --output <DIR>`           | _required_ | Output directory; writes `enrichments/part_NNNN.jsonl.gz` (and `enrichments.failed.jsonl`) |
+| `--provenance <FILE>`          | _required_ | YAML provenance metadata attached to each record                     |
+| `-t, --threads <N>`            | `0`        | Worker threads; `0` uses all available CPUs                          |
+| `-b, --batch-size <N>`         | `5000`     | Enrichment records per internal batch                                |
+| `--output-part-size-mib <MIB>` | `256`      | Target compressed MiB per final enrichment part                      |
+| `--output-writer-lanes <N>`    | `1`        | Parallel writer lanes for final enrichment output                    |
+| `--schema <FILE>`              | built-in   | Validate output against a custom JSON Schema                         |
+| `--no-validate`                | off        | Skip output schema validation                                        |
+| `--log-level <LEVEL>`          | `info`     | Minimum log level (`trace`, `debug`, `info`, `warn`, `error`)        |
 
 Each method adds its own options. See its page below.
 

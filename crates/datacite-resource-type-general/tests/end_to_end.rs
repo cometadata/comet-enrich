@@ -71,6 +71,8 @@ fn run_reclassifier() -> (tempfile::TempDir, PathBuf, RunStats) {
         output: output.clone(),
         threads: 1,
         batch_size: 100,
+        output_part_size_bytes: 256 * 1024 * 1024,
+        output_writer_lanes: 1,
     };
 
     let template =

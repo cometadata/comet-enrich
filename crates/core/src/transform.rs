@@ -2,10 +2,9 @@
 //!
 //! [`run`] finds `*.jsonl.gz` files under the input directory and processes them in
 //! parallel: each record is extracted and mapped straight to enrichment records,
-//! with no lookup step (contrast [`crate::staged_run::run_staged`]). Each worker
-//! writes the records it emits to its own gzip output part, so there is no shared
-//! output writer. Records are validated at the write boundary when a schema
-//! validator is provided.
+//! with no lookup step (contrast [`crate::staged_run::run_staged`]). Final
+//! enrichment records are routed to a bounded set of rolling gzip writer lanes and
+//! validated at the write boundary when a schema validator is provided.
 
 use crate::artifact_lifecycle as lifecycle;
 use crate::fanout::{FileError, input_files, make_pool, own_skips, scan_jsonl_records};
@@ -13,7 +12,7 @@ use crate::manifest::MANIFEST_FILE;
 use crate::method::{EnrichmentMethod, Extracted, Lookups};
 use crate::provenance::{EnrichmentTemplate, build_enrichment_record};
 use crate::run::{RunOptions, RunStats};
-use crate::writer::{ENRICHMENTS_DIR, ENRICHMENTS_FAILED_FILE, FailureSink, PartWriter};
+use crate::writer::{ENRICHMENTS_DIR, ENRICHMENTS_FAILED_FILE, FailureSink, ParallelRollingWriter};
 
 use anyhow::Result;
 use flate2::read::GzDecoder;
@@ -31,7 +30,6 @@ struct Counters {
     records_scanned: AtomicU64,
     lines_malformed: AtomicU64,
     files_failed: AtomicU64,
-    emitted: AtomicU64,
 }
 
 /// Run an enrichment method over all input files.
@@ -66,6 +64,14 @@ pub fn run<M: EnrichmentMethod>(
         return Ok(RunStats::default());
     }
 
+    let writer = ParallelRollingWriter::create(
+        &enrich_dir,
+        validator,
+        &failures,
+        opts.output_part_size_bytes,
+        opts.output_writer_lanes,
+    )?;
+
     let pb = ProgressBar::new(files.len() as u64);
     pb.set_style(
         ProgressStyle::default_bar()
@@ -77,9 +83,9 @@ pub fn run<M: EnrichmentMethod>(
     let skipped: Mutex<BTreeMap<&'static str, u64>> = Mutex::new(BTreeMap::new());
 
     let pool = make_pool(opts.threads)?;
-    // Each worker writes its own gzip part, so there is no shared writer. A read
-    // failure is counted and the run continues; a write/flush failure is fatal, so
-    // `try_for_each` short-circuits and the error propagates out of the run.
+    // Workers scan input files in parallel and send emitted records to the rolling
+    // output writer. A read failure is counted and the run continues; a write/flush
+    // failure is fatal, so `try_for_each` short-circuits and the error propagates.
     pool.install(|| {
         files
             .par_iter()
@@ -92,9 +98,7 @@ pub fn run<M: EnrichmentMethod>(
                 match process_file(
                     idx,
                     path,
-                    &enrich_dir,
-                    validator,
-                    &failures,
+                    &writer,
                     opts.batch_size,
                     method,
                     template,
@@ -113,6 +117,7 @@ pub fn run<M: EnrichmentMethod>(
             })
     })?;
 
+    let emitted = writer.finish()?;
     // A failures-file flush error means the output is incomplete, so it aborts the run.
     failures.lock().unwrap().flush()?;
     pb.finish_with_message("done");
@@ -123,7 +128,7 @@ pub fn run<M: EnrichmentMethod>(
         files_failed,
         records_scanned: counters.records_scanned.load(Ordering::Relaxed),
         lines_malformed: counters.lines_malformed.load(Ordering::Relaxed),
-        emitted: counters.emitted.load(Ordering::Relaxed),
+        emitted,
         schema_failures: failures.lock().unwrap().records_failed,
         skipped: own_skips(skipped.into_inner().unwrap()),
     })
@@ -131,11 +136,9 @@ pub fn run<M: EnrichmentMethod>(
 
 #[allow(clippy::too_many_arguments)]
 fn process_file<M: EnrichmentMethod>(
-    file_index: usize,
+    _file_index: usize,
     path: &Path,
-    enrich_dir: &Path,
-    validator: Option<&jsonschema::JSONSchema>,
-    failures: &Mutex<FailureSink>,
+    writer: &ParallelRollingWriter<'_>,
     batch_size: usize,
     method: &M,
     template: &EnrichmentTemplate,
@@ -145,15 +148,11 @@ fn process_file<M: EnrichmentMethod>(
     let f = File::open(path).map_err(|e| FileError::Read(e.into()))?;
     let reader = BufReader::new(GzDecoder::new(f));
 
-    // One output part per input file, named by the input's index in the sorted glob.
-    let part_path = enrich_dir.join(format!("part_{file_index:04}.jsonl.gz"));
-    let mut part = PartWriter::create(&part_path, validator, failures, batch_size)
-        .map_err(FileError::Fatal)?;
-
     let mut local_skips: BTreeMap<&'static str, u64> = BTreeMap::new();
 
     // This runner handles the transform path, so there are no external lookups.
     let lookups: Lookups<M::Lookup> = HashMap::new();
+    let mut output_batch = Vec::with_capacity(batch_size.max(1));
 
     let tally = scan_jsonl_records(reader, |rec| {
         match method.extract(rec) {
@@ -163,8 +162,12 @@ fn process_file<M: EnrichmentMethod>(
             Extracted::Items(items) => {
                 for item in items {
                     for parts in method.map_back(item, &lookups) {
-                        part.push(build_enrichment_record(template, parts))
-                            .map_err(FileError::Fatal)?;
+                        output_batch.push(build_enrichment_record(template, parts));
+                        if output_batch.len() >= batch_size.max(1) {
+                            writer
+                                .push_batch(std::mem::take(&mut output_batch))
+                                .map_err(FileError::Fatal)?;
+                        }
                     }
                 }
             }
@@ -172,14 +175,13 @@ fn process_file<M: EnrichmentMethod>(
         Ok(())
     })?;
 
-    let written = part.finish().map_err(FileError::Fatal)?;
+    writer.push_batch(output_batch).map_err(FileError::Fatal)?;
     counters
         .records_scanned
         .fetch_add(tally.scanned, Ordering::Relaxed);
     counters
         .lines_malformed
         .fetch_add(tally.malformed, Ordering::Relaxed);
-    counters.emitted.fetch_add(written, Ordering::Relaxed);
     merge_skips(skipped, local_skips);
     Ok(())
 }

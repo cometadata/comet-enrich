@@ -113,8 +113,9 @@ Notes:
 - The work area is always `<output>/.work`; there is no separate work-dir option.
 - The reclassifier (transform, no lookup) produces only `enrichments/`,
   `enrichments.failed.jsonl`, `report.json`, and `manifest.json`. It has no `.work` lookup files.
-- Output is split into compressed parts but is order agnostic: record order across parts is not
-  stable run to run, which is acceptable. Diffing (a later track) sorts a manifest, not the data.
+- Output is split into compressed parts that roll by output volume, not by input-file count. Record
+  order across parts is not stable run to run, which is acceptable. Diffing (a later track) sorts a
+  manifest, not the data.
 
 ## 4. Features to implement
 
@@ -451,11 +452,11 @@ the bulk size and applies to both methods.
 #### 4b.2 Compressed, split output
 
 The writer (`crates/core/src/writer.rs`) changes from a single uncompressed file to a directory of
-gzip parts under `<output>/enrichments/`. Each input file maps to one output part
-`part_<seq>.jsonl.gz`, written by the worker that processed it (wrap the part's `BufWriter` in a
-`flate2` `GzEncoder`), which also removes the current single-writer-thread bottleneck. Schema
-validation stays at the write boundary; failures go to `enrichments.failed.jsonl` (Stage 1). If
-part sizes turn out uneven, switch to size-based rolling later. Output is order agnostic.
+gzip parts under `<output>/enrichments/`. Final parts roll by compressed output size
+(`--output-part-size-mib`, default 256) and may be written through multiple DOI-hash writer lanes
+(`--output-writer-lanes`, default 1). Lane-local temp files are renamed into contiguous
+`part_<seq>.jsonl.gz` names after a successful run. Schema validation stays at the write boundary;
+failures go to `enrichments.failed.jsonl` (Stage 1). Output is order agnostic.
 
 #### 4b.3 Airflow-owned run directory and vintage
 
@@ -517,9 +518,9 @@ should not require reworking earlier stages.
    `--output` change for the `comet-data-infrastructure` DAG and the s5cmd exclude rule. Features:
    4a.4, 4b.2 (failure-diversion part), 4b.3 (output-directory part). Decision: 8.5. Done.
 
-2. **Writer: compressed split output.** Split `<output>/enrichments.jsonl` into
-   `<output>/enrichments/part_NNNN.jsonl.gz`, one part per input file written in parallel (removing
-   the single-writer bottleneck). Update the reclassifier end-to-end test. Features: 4b.2.
+2. **Writer: compressed split output.** Split `<output>/enrichments.jsonl` into rolling
+   `<output>/enrichments/part_NNNN.jsonl.gz` files, with optional parallel writer lanes. Update the
+   reclassifier end-to-end test. Features: 4b.2.
 
 3. **Core reporting: `report.json` and `manifest.json`.** Produce both in core. Validate on the
    reclassifier (transform path, no match block). Features: 4a.5, 4a.6, 4b.4. Decision: 8.4.

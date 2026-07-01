@@ -33,4 +33,7 @@ pub use schema::SCHEMA;
 pub use staged::{LookupConfig, Stage, WorkDir, stages_to_run};
 pub use staged_run::{pipeline_complete, run_staged};
 pub use transform::run;
-pub use writer::{ENRICHMENTS_DIR, ENRICHMENTS_FAILED_FILE};
+pub use writer::{
+    DEFAULT_OUTPUT_PART_SIZE_MIB, DEFAULT_OUTPUT_WRITER_LANES, ENRICHMENTS_DIR,
+    ENRICHMENTS_FAILED_FILE,
+};

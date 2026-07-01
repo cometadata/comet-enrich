@@ -46,8 +46,8 @@ Lead with the unit under test so related tests sort together.
 - Use `write_gz_lines(path, &lines)` for gzip input made from raw lines.
 - Read output with `read_enrichment_parts(&output)` or `read_gz_string(&path)`.
 
-Default `RunOptions` to single-threaded with `batch_size: 100`. Tests that exercise
-batching should set `batch_size` explicitly.
+Default `RunOptions` to single-threaded with `batch_size: 100`, `output_writer_lanes: 1`,
+and a large `output_part_size_bytes` unless the test is specifically exercising output rolling.
 
 Use `config_path("provenance/…")` for committed config files instead of re-inlining
 YAML or building manifest-relative paths.

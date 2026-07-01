@@ -309,6 +309,8 @@ mod tests {
         assert_eq!(a.lookup.ror_concurrency, 50);
         assert_eq!(a.lookup.ror_batch_size, 50);
         assert_eq!(a.run.threads, 0);
+        assert_eq!(a.run.output_part_size_mib, 256);
+        assert_eq!(a.run.output_writer_lanes, 1);
         assert_eq!(a.run.log_level, log::LevelFilter::Info);
         assert_eq!(a.lookup.hash_bits, args::HashBitsArg::Bits64);
         assert!(a.stage.is_none());
@@ -396,6 +398,20 @@ mod tests {
             "--no-validate",
         ]);
         assert!(res.is_err());
+    }
+
+    #[test]
+    fn output_part_options_parse_and_reject_zero() {
+        let cli =
+            parse_rtg(&["--output-part-size-mib", "16", "--output-writer-lanes", "4"]).unwrap();
+        let Method::ResourceTypeGeneral(a) = cli.method else {
+            panic!("expected resource-type-general");
+        };
+        assert_eq!(a.run.output_part_size_mib, 16);
+        assert_eq!(a.run.output_writer_lanes, 4);
+
+        assert!(parse_rtg(&["--output-part-size-mib", "0"]).is_err());
+        assert!(parse_rtg(&["--output-writer-lanes", "0"]).is_err());
     }
 
     #[test]

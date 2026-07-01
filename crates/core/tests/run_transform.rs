@@ -66,6 +66,26 @@ resources:
     resourceTypeGeneral: Dataset
 "#;
 
+fn enrichment_part_names(output: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(output.join(comet_enrichment_core::ENRICHMENTS_DIR))
+        .unwrap()
+        .filter_map(|entry| {
+            let path = entry.unwrap().path();
+            (path.extension().and_then(|e| e.to_str()) == Some("gz"))
+                .then(|| path.file_name().unwrap().to_string_lossy().into_owned())
+        })
+        .collect();
+    names.sort();
+    names
+}
+
+fn assert_contiguous_part_names(names: &[String]) {
+    let expected: Vec<String> = (0..names.len())
+        .map(|idx| format!("part_{idx:04}.jsonl.gz"))
+        .collect();
+    assert_eq!(names, expected);
+}
+
 #[test]
 fn run_drives_transform_end_to_end() {
     let dir = tempfile::tempdir().unwrap();
@@ -93,6 +113,8 @@ fn run_drives_transform_end_to_end() {
         output: output.clone(),
         threads: 1,
         batch_size: 100,
+        output_part_size_bytes: 256 * 1024 * 1024,
+        output_writer_lanes: 1,
     };
 
     // Validate records using the same schema check as a normal run.
@@ -123,6 +145,129 @@ fn run_drives_transform_end_to_end() {
 }
 
 #[test]
+fn many_input_files_with_small_output_write_one_part_by_default() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input/updated_2024-01");
+    for idx in 0..3 {
+        write_gz_lines(
+            &input.join(format!("part_{idx:04}.jsonl.gz")),
+            &[&format!(
+                r#"{{"id":"10.1/{idx}","attributes":{{"types":{{"resourceType":"Spreadsheet"}}}}}}"#
+            )],
+        );
+    }
+
+    let provenance = dir.path().join("enrichment.yaml");
+    fs::write(&provenance, ENRICHMENT_YAML).unwrap();
+    let template = comet_enrichment_core::load_template(&provenance).unwrap();
+    let output = dir.path().join("out");
+
+    let opts = RunOptions {
+        input: dir.path().join("input"),
+        output: output.clone(),
+        threads: 2,
+        batch_size: 100,
+        output_part_size_bytes: 256 * 1024 * 1024,
+        output_writer_lanes: 1,
+    };
+
+    let stats = run(&DatasetTagger, &opts, &template, None).unwrap();
+
+    assert_eq!(stats.emitted, 3);
+    assert_eq!(
+        enrichment_part_names(&output),
+        vec!["part_0000.jsonl.gz".to_owned()]
+    );
+    assert_eq!(read_enrichment_parts(&output).len(), 3);
+}
+
+#[test]
+fn small_output_part_size_rolls_into_contiguous_parts() {
+    let dir = tempfile::tempdir().unwrap();
+    let lines: Vec<String> = (0..20)
+        .map(|idx| {
+            format!(
+                r#"{{"id":"10.1/{idx}","attributes":{{"types":{{"resourceType":"Spreadsheet"}}}}}}"#
+            )
+        })
+        .collect();
+    let line_refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+    write_gz_lines(
+        &dir.path().join("input/updated_2024-01/part_0000.jsonl.gz"),
+        &line_refs,
+    );
+
+    let provenance = dir.path().join("enrichment.yaml");
+    fs::write(&provenance, ENRICHMENT_YAML).unwrap();
+    let template = comet_enrichment_core::load_template(&provenance).unwrap();
+    let output = dir.path().join("out");
+
+    let opts = RunOptions {
+        input: dir.path().join("input"),
+        output: output.clone(),
+        threads: 1,
+        batch_size: 100,
+        output_part_size_bytes: 1,
+        output_writer_lanes: 1,
+    };
+
+    let stats = run(&DatasetTagger, &opts, &template, None).unwrap();
+    let names = enrichment_part_names(&output);
+
+    assert_eq!(stats.emitted, 20);
+    assert!(
+        names.len() > 1,
+        "tiny part target should roll output, got {names:?}"
+    );
+    assert_contiguous_part_names(&names);
+    assert_eq!(read_enrichment_parts(&output).len(), 20);
+}
+
+#[test]
+fn parallel_writer_lanes_publish_global_part_sequence() {
+    let dir = tempfile::tempdir().unwrap();
+    let lines: Vec<String> = (0..40)
+        .map(|idx| {
+            format!(
+                r#"{{"id":"10.2/{idx}","attributes":{{"types":{{"resourceType":"Spreadsheet"}}}}}}"#
+            )
+        })
+        .collect();
+    let line_refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+    write_gz_lines(
+        &dir.path().join("input/updated_2024-01/part_0000.jsonl.gz"),
+        &line_refs,
+    );
+
+    let provenance = dir.path().join("enrichment.yaml");
+    fs::write(&provenance, ENRICHMENT_YAML).unwrap();
+    let template = comet_enrichment_core::load_template(&provenance).unwrap();
+    let output = dir.path().join("out");
+
+    let opts = RunOptions {
+        input: dir.path().join("input"),
+        output: output.clone(),
+        threads: 4,
+        batch_size: 100,
+        output_part_size_bytes: 1,
+        output_writer_lanes: 4,
+    };
+
+    let stats = run(&DatasetTagger, &opts, &template, None).unwrap();
+    let names = enrichment_part_names(&output);
+
+    assert_eq!(stats.emitted, 40);
+    assert_contiguous_part_names(&names);
+    assert!(
+        !output
+            .join(comet_enrichment_core::ENRICHMENTS_DIR)
+            .join(".tmp")
+            .exists()
+    );
+    assert_eq!(read_enrichment_parts(&output).len(), 40);
+}
+
+#[test]
 fn write_failure_fails_the_run() {
     // A failed write must abort the run rather than being logged and dropped. We force
     // the divert path to fail by putting a directory where the failures file should go:
@@ -147,6 +292,8 @@ fn write_failure_fails_the_run() {
         output: output.clone(),
         threads: 1,
         batch_size: 100,
+        output_part_size_bytes: 256 * 1024 * 1024,
+        output_writer_lanes: 1,
     };
 
     // A validator that rejects every record, so the one emitted record is diverted.
@@ -180,14 +327,22 @@ fn rerun_with_fewer_inputs_removes_stale_enrichment_parts() {
         output: output.clone(),
         threads: 1,
         batch_size: 100,
+        output_part_size_bytes: 256 * 1024 * 1024,
+        output_writer_lanes: 1,
     };
 
     run(&DatasetTagger, &opts, &template, None).unwrap();
     assert_eq!(read_enrichment_parts(&output).len(), 2);
+    write_gz_lines(
+        &output
+            .join(comet_enrichment_core::ENRICHMENTS_DIR)
+            .join("part_9999.jsonl.gz"),
+        &[r#"{"doi":"stale"}"#],
+    );
     assert!(
         output
             .join(comet_enrichment_core::ENRICHMENTS_DIR)
-            .join("part_0001.jsonl.gz")
+            .join("part_9999.jsonl.gz")
             .exists()
     );
 
@@ -200,7 +355,7 @@ fn rerun_with_fewer_inputs_removes_stale_enrichment_parts() {
     assert!(
         !output
             .join(comet_enrichment_core::ENRICHMENTS_DIR)
-            .join("part_0001.jsonl.gz")
+            .join("part_9999.jsonl.gz")
             .exists()
     );
     let recs = read_enrichment_parts(&output);
@@ -226,6 +381,8 @@ fn empty_input_rerun_removes_stale_transform_outputs() {
         output: output.clone(),
         threads: 1,
         batch_size: 100,
+        output_part_size_bytes: 256 * 1024 * 1024,
+        output_writer_lanes: 1,
     };
 
     run(&DatasetTagger, &opts, &template, None).unwrap();
@@ -246,6 +403,12 @@ fn empty_input_rerun_removes_stale_transform_outputs() {
     assert!(
         !output
             .join(comet_enrichment_core::ENRICHMENTS_FAILED_FILE)
+            .exists()
+    );
+    assert!(
+        !output
+            .join(comet_enrichment_core::ENRICHMENTS_DIR)
+            .join(".tmp")
             .exists()
     );
     assert_eq!(read_enrichment_parts(&output), Vec::<Value>::new());

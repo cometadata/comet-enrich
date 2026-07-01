@@ -3,7 +3,8 @@
 use anyhow::{Result, bail};
 use clap::{Args, Subcommand, ValueEnum};
 use comet_enrichment_core::{
-    HashBits, LookupConfig, RunOptions, SCHEMA, SourceRelease, Stage, schema,
+    DEFAULT_OUTPUT_PART_SIZE_MIB, DEFAULT_OUTPUT_WRITER_LANES, HashBits, LookupConfig, RunOptions,
+    SCHEMA, SourceRelease, Stage, schema,
 };
 use log::LevelFilter;
 use std::collections::BTreeMap;
@@ -16,7 +17,7 @@ pub struct IoArgs {
     #[arg(short, long, value_name = "DIR", help_heading = "Input/output")]
     pub input: PathBuf,
 
-    /// Output directory for enrichment records (writes enrichments/part_NNNN.jsonl.gz).
+    /// Output directory for enrichment records (writes rolling enrichments/part_NNNN.jsonl.gz).
     #[arg(short, long, value_name = "DIR", help_heading = "Input/output")]
     pub output: PathBuf,
 
@@ -43,6 +44,8 @@ impl IoArgs {
             output: self.output.clone(),
             threads: run.threads,
             batch_size: run.batch_size,
+            output_part_size_bytes: run.output_part_size_mib.saturating_mul(1024 * 1024),
+            output_writer_lanes: run.output_writer_lanes,
         }
     }
 
@@ -94,6 +97,28 @@ fn is_iso_date(s: &str) -> bool {
         })
 }
 
+fn parse_positive_u64(s: &str) -> Result<u64, String> {
+    let n = s
+        .parse::<u64>()
+        .map_err(|e| format!("expected positive integer, got `{s}`: {e}"))?;
+    if n == 0 {
+        Err(format!("expected positive integer, got `{s}`"))
+    } else {
+        Ok(n)
+    }
+}
+
+fn parse_positive_usize(s: &str) -> Result<usize, String> {
+    let n = s
+        .parse::<usize>()
+        .map_err(|e| format!("expected positive integer, got `{s}`: {e}"))?;
+    if n == 0 {
+        Err(format!("expected positive integer, got `{s}`"))
+    } else {
+        Ok(n)
+    }
+}
+
 /// Run and validation options used by every method.
 #[derive(Args, Debug, Clone)]
 pub struct RunArgs {
@@ -116,6 +141,26 @@ pub struct RunArgs {
         help_heading = "Options"
     )]
     pub batch_size: usize,
+
+    /// Target compressed size in MiB for each final enrichment output part.
+    #[arg(
+        long,
+        default_value_t = DEFAULT_OUTPUT_PART_SIZE_MIB,
+        value_name = "MIB",
+        value_parser = parse_positive_u64,
+        help_heading = "Options"
+    )]
+    pub output_part_size_mib: u64,
+
+    /// Parallel writer lanes for final enrichment output. Records route to lanes by DOI hash.
+    #[arg(
+        long,
+        default_value_t = DEFAULT_OUTPUT_WRITER_LANES,
+        value_name = "N",
+        value_parser = parse_positive_usize,
+        help_heading = "Options"
+    )]
+    pub output_writer_lanes: usize,
 
     /// Validate output against this JSON Schema instead of the built-in schema.
     #[arg(
@@ -292,6 +337,8 @@ mod tests {
         RunArgs {
             threads: 2,
             batch_size: 7,
+            output_part_size_mib: 3,
+            output_writer_lanes: 4,
             schema,
             no_validate,
             log_level: LevelFilter::Off,
@@ -332,6 +379,8 @@ mod tests {
         assert_eq!(opts.output, PathBuf::from("output"));
         assert_eq!(opts.threads, 2);
         assert_eq!(opts.batch_size, 7);
+        assert_eq!(opts.output_part_size_bytes, 3 * 1024 * 1024);
+        assert_eq!(opts.output_writer_lanes, 4);
     }
 
     #[test]

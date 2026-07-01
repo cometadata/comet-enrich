@@ -17,7 +17,7 @@ use crate::method::EnrichmentMethod;
 use crate::provenance::{EnrichmentTemplate, build_enrichment_record};
 use crate::run::{RunOptions, RunStats};
 use crate::staged::{Stage, WorkDir, stages_to_run};
-use crate::writer::{ENRICHMENTS_DIR, ENRICHMENTS_FAILED_FILE, FailureSink, PartWriter};
+use crate::writer::{ENRICHMENTS_DIR, ENRICHMENTS_FAILED_FILE, FailureSink, ParallelRollingWriter};
 
 use anyhow::{Context, Result, bail};
 use flate2::read::GzDecoder;
@@ -622,31 +622,35 @@ where
     let failures = Mutex::new(FailureSink::create(
         &io.output.join(ENRICHMENTS_FAILED_FILE),
     )?);
+    let writer = ParallelRollingWriter::create(
+        &enrich_dir,
+        validator,
+        &failures,
+        io.output_part_size_bytes,
+        io.output_writer_lanes,
+    )?;
 
-    let emitted = AtomicU64::new(0);
     let pool = make_pool(io.threads)?;
     pool.install(|| {
         parts.par_iter().enumerate().try_for_each(|(idx, path)| {
-            let written = reconcile_one_part(
+            reconcile_one_part(
                 idx,
                 path,
-                &enrich_dir,
                 &lookups,
                 method,
                 template,
-                validator,
-                &failures,
+                &writer,
                 io.batch_size,
             )?;
-            emitted.fetch_add(written, Ordering::Relaxed);
             Ok::<(), anyhow::Error>(())
         })
     })?;
 
+    let emitted = writer.finish()?;
     let mut failures = failures.lock().unwrap();
     failures.flush()?;
     let stats = ReconcileStats {
-        emitted: emitted.load(Ordering::Relaxed),
+        emitted,
         schema_failures: failures.records_failed,
     };
     let json = serde_json::to_string(&stats).context("serializing reconcile stats")?;
@@ -669,25 +673,21 @@ fn load_lookups<L: DeserializeOwned>(path: &Path) -> Result<crate::method::Looku
 
 #[allow(clippy::too_many_arguments)]
 fn reconcile_one_part<M>(
-    idx: usize,
+    _idx: usize,
     path: &Path,
-    enrich_dir: &Path,
     lookups: &crate::method::Lookups<M::Lookup>,
     method: &M,
     template: &EnrichmentTemplate,
-    validator: Option<&jsonschema::JSONSchema>,
-    failures: &Mutex<FailureSink>,
+    writer: &ParallelRollingWriter<'_>,
     batch_size: usize,
-) -> Result<u64>
+) -> Result<()>
 where
     M: EnrichmentMethod,
     M::Extraction: DeserializeOwned,
 {
     let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
     let reader = BufReader::new(file);
-
-    let part_path = enrich_dir.join(format!("part_{idx:04}.jsonl.gz"));
-    let mut part = PartWriter::create(&part_path, validator, failures, batch_size)?;
+    let mut output_batch = Vec::with_capacity(batch_size.max(1));
 
     for line in reader.lines() {
         let line = line.with_context(|| format!("reading {}", path.display()))?;
@@ -697,10 +697,14 @@ where
         let extraction: M::Extraction =
             serde_json::from_str(&line).context("parsing extraction row")?;
         for parts in method.map_back(extraction, lookups) {
-            part.push(build_enrichment_record(template, parts))?;
+            output_batch.push(build_enrichment_record(template, parts));
+            if output_batch.len() >= batch_size.max(1) {
+                writer.push_batch(std::mem::take(&mut output_batch))?;
+            }
         }
     }
-    part.finish()
+    writer.push_batch(output_batch)?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1029,6 +1033,8 @@ mod tests {
             output: output.to_path_buf(),
             threads: 1,
             batch_size: 100,
+            output_part_size_bytes: 256 * 1024 * 1024,
+            output_writer_lanes: 1,
         }
     }
 
@@ -1250,10 +1256,14 @@ mod tests {
                 .join("extractions/part_0001.jsonl")
                 .exists()
         );
+        write_gz_lines(
+            &output.join(ENRICHMENTS_DIR).join("part_9999.jsonl.gz"),
+            &[r#"{"doi":"stale"}"#],
+        );
         assert!(
             output
                 .join(ENRICHMENTS_DIR)
-                .join("part_0001.jsonl.gz")
+                .join("part_9999.jsonl.gz")
                 .exists()
         );
 
@@ -1269,7 +1279,7 @@ mod tests {
         assert!(
             !output
                 .join(ENRICHMENTS_DIR)
-                .join("part_0001.jsonl.gz")
+                .join("part_9999.jsonl.gz")
                 .exists()
         );
         assert_eq!(read_output_dois(&output), vec!["10.1/mit".to_owned()]);
