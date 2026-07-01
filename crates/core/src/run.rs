@@ -1,9 +1,4 @@
-//! Shared run configuration and counters.
-//!
-//! Both run paths — the single-pass transform path ([`crate::transform::run`]) and
-//! the staged lookup path ([`crate::staged_run::run_staged`]) — take a [`RunOptions`]
-//! and report a [`RunStats`]. They live here, in a neutral module, so neither run
-//! path nor the manifest has to reach into the other to name them.
+//! Shared run options and counters.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;

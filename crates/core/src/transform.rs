@@ -59,8 +59,7 @@ pub fn run<M: EnrichmentMethod>(
     let enrich_dir = opts.output.join(ENRICHMENTS_DIR);
     clear_transform_artifacts(&opts.output)?;
     let failed_path = opts.output.join(ENRICHMENTS_FAILED_FILE);
-    // One shared failures sink: validation failures are rare, so the mutex is
-    // uncontended in practice. Creating it clears any stale failures file.
+    // Shared sink for schema-validation failures; creating it clears stale failures.
     let failures = Mutex::new(FailureSink::create(&failed_path)?);
 
     if files.is_empty() {

@@ -199,8 +199,8 @@ pub struct LookupArgs {
     )]
     pub ror_timeout: u64,
 
-    /// Width of the content-addressed dedup hash. 64 (default) matches the prototypes;
-    /// pick 128 only if a 64-bit collision is reported.
+    /// Width of the content-addressed dedup hash. Use 128 if a 64-bit collision
+    /// is reported.
     #[arg(
         long,
         value_enum,
@@ -218,7 +218,7 @@ pub struct LookupArgs {
 /// Dedup-hash width, exposed on the CLI as `--hash-bits {64,128}`.
 #[derive(ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum HashBitsArg {
-    /// xxh3-64 (16 hex chars); matches the prototypes.
+    /// xxh3-64, 16 hex chars.
     #[default]
     #[value(name = "64")]
     Bits64,

@@ -34,8 +34,7 @@ fn a_stage_has_its_own_help() {
 
 #[test]
 fn lookup_methods_report_unimplemented() {
-    // Temporary test: lookup methods should parse successfully before failing in their constructors.
-    // Replace this once affiliations and funders are implemented.
+    // Lookup methods parse successfully before failing in their constructors.
     let cases: [(&str, &[&str]); 2] = [
         ("affiliations", &["--ror-file", "ror.json"]),
         ("funders", &["--ror-file", "ror.json"]),
@@ -64,7 +63,7 @@ fn lookup_methods_report_unimplemented() {
 
 #[test]
 fn resource_type_general_is_wired() {
-    // `resource-type-general` should load its rules file, not fail as an unimplemented stub.
+    // `resource-type-general` should load its rules file before failing.
     cli()
         .args([
             "resource-type-general",

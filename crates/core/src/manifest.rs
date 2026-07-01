@@ -1,14 +1,4 @@
 //! Run manifest written at the end of an enrichment run.
-//!
-//! Each run writes a single `manifest.json` to the output directory: an audit
-//! envelope (method identity, data sources, artifact paths, exit status) with all
-//! the quantitative stats nested under a [`Report`] block (raw counters, coverage,
-//! match quality, validation, and stage timings).
-//!
-//! The transform path (`transform::run`) produces a manifest with no `match` block;
-//! the staged runner fills it in a later stage. A data-source `content_hash` and a
-//! provenance fingerprint are intentionally not produced yet — they are deferred to
-//! the hashing module.
 
 // Manifest/Report are the public names of this module's primary types.
 #![allow(clippy::module_name_repetitions)]
@@ -27,7 +17,7 @@ pub const MANIFEST_FILE: &str = "manifest.json";
 /// Manifest schema version. Additive-only within a major version.
 pub const MANIFEST_SCHEMA_VERSION: u32 = 1;
 
-/// The run manifest: an audit envelope around a nested stats [`Report`].
+/// Run manifest with metadata, artifact paths, status, and stats.
 #[derive(Debug, Serialize)]
 pub struct Manifest {
     pub schema_version: u32,
@@ -136,8 +126,7 @@ pub struct Validation {
 }
 
 impl Validation {
-    /// Validation counts with an empty failure taxonomy (the taxonomy is not yet
-    /// populated on either path).
+    /// Validation counts with an empty failure taxonomy.
     #[must_use]
     pub fn new(emitted: u64, schema_failures: u64) -> Self {
         Validation {
@@ -261,7 +250,7 @@ impl Manifest {
         Self::envelope(meta, Some(hash), exit_status, report)
     }
 
-    /// Wrap a finished [`Report`] in the audit envelope shared by both build paths.
+    /// Wrap a finished [`Report`] in a [`Manifest`].
     fn envelope(meta: &RunMeta, hash: Option<HashInfo>, exit_status: &str, report: Report) -> Self {
         Manifest {
             schema_version: MANIFEST_SCHEMA_VERSION,

@@ -131,8 +131,7 @@ fn reclassifier_matches_golden_outcomes() {
 
 #[test]
 fn reclassifier_writes_run_manifest() {
-    // The transform path produces a manifest.json with the stats nested under
-    // `report`, no `match` block, and no content hash / provenance fingerprint.
+    // Transform manifests have no match block or hash fields.
     let (_dir, output, stats) = run_reclassifier();
 
     let mut sources = BTreeMap::new();
@@ -187,7 +186,7 @@ fn reclassifier_writes_run_manifest() {
     assert_eq!(report["validation"]["schema_failures"], json!(0));
     assert!(report["stage_timings_ms"]["total"].is_u64());
 
-    // No match block on the transform path; no hash fields yet.
+    // No match block or hash fields on the transform path.
     assert!(report.get("match").is_none());
     assert!(!raw.contains("content_hash"));
     assert!(!raw.contains("provenance_fingerprint"));

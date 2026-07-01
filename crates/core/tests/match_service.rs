@@ -1,8 +1,4 @@
-//! Wiremock tests for the real `MarpleClient`.
-//!
-//! Ported from the affiliations prototype `tests/query_tests.rs` (the four
-//! `match_bulk` cases), plus a length-mismatch and a 429-retry case the prototype
-//! lacked.
+//! Wiremock tests for `MarpleClient`.
 
 use comet_enrichment_core::{MarpleClient, MatchService};
 use std::time::Duration;

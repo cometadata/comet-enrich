@@ -34,8 +34,6 @@ impl Affiliations {
 }
 
 impl EnrichmentMethod for Affiliations {
-    // Placeholder stub types so the staged-runner wiring compiles; the real
-    // per-person extraction lands when the method is ported (PLAN.md Stage 7).
     type Extraction = Value;
     type Lookup = RorLookup;
 

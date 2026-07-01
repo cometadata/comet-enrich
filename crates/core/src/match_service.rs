@@ -1,14 +1,7 @@
-//! The ROR match service behind a trait, with a real bulk HTTP client and a fake.
+//! ROR match-service client.
 //!
-//! Lookup methods resolve unique inputs (funder names, affiliation strings) against
-//! a "Marple" match service. [`MatchService`] abstracts that call so the staged
-//! runner can be driven by a [`FakeMatchService`] in tests while production uses
-//! [`MarpleClient`] against the real bulk endpoint.
-//!
-//! The client is ported from the prototype query stage. The contract: `match_bulk`
-//! returns one slot per input **in input order** — `Some((id, confidence))` for a
-//! match (first candidate wins) or `None` for no match; a whole-batch failure is an
-//! `Err`.
+//! Sends batches to Marple's `/match/bulk` endpoint and returns one result slot
+//! per input.
 
 use crate::LookupConfig;
 
@@ -60,10 +53,7 @@ fn truncate(s: &str, max: usize) -> &str {
     }
 }
 
-/// One successful match for a single input: the resolved id and its confidence.
-///
-/// The generic staged runner converts a service result into a method's `Lookup`
-/// through `From<MatchHit>`, so the runner never names a method's lookup fields.
+/// One successful match returned by the match service.
 #[derive(Debug, Clone)]
 pub struct MatchHit {
     pub id: String,
@@ -212,7 +202,6 @@ impl MatchService for MarpleClient {
                             })
                             .collect());
                     } else if status == StatusCode::PAYLOAD_TOO_LARGE {
-                        // Domain-phrased; the CLI layer owns the batch-size flag name.
                         return Err(anyhow!(
                             "batch size {} exceeds the match-service batch cap (HTTP 413); reduce the per-request batch size",
                             inputs.len()

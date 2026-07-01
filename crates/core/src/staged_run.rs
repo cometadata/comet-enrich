@@ -1,16 +1,7 @@
-//! The staged runner that drives a lookup method through extract → query →
-//! reconcile, serializing the on-disk stage contract under `<output>/.work`.
+//! Staged runner for lookup methods.
 //!
-//! Where [`crate::transform::run`] is the single-pass transform path, [`run_staged`]
-//! is the lookup path: it scans the corpus once (extract), resolves the unique
-//! inputs against a [`MatchService`] (query), then joins the matches back onto each
-//! extraction and emits enrichment records (reconcile). Each stage writes a `.done`
-//! marker; an interrupted run resumes from the first incomplete stage.
-//!
-//! The runner is generic over the method's `Extraction` and `Lookup` types. It
-//! reads inputs out of an opaque extraction through [`EnrichmentMethod::inputs`] and
-//! builds a method's `Lookup` from a service result through `From<MatchHit>`, so it
-//! never names a method's fields.
+//! Runs extract, query, and reconcile under `<output>/.work`, using `.done`
+//! markers to resume interrupted runs.
 
 use crate::artifact_lifecycle as lifecycle;
 use crate::dedup::{DedupStore, HashBits};
@@ -544,9 +535,8 @@ where
                     write_lines(&failed_w, &misses).await?;
                 }
                 Err(e) => {
-                    // A whole-batch failure is recorded (and surfaces as
-                    // `failure_taxonomy.error` -> a `partial` run) rather than
-                    // aborting: one bad batch must not sink the whole corpus.
+                    // Record whole-batch failures as failed lookup rows; the
+                    // manifest marks the run partial.
                     let error = format!("batch error: {e}");
                     let lines: Vec<String> = batch
                         .iter()
@@ -1096,7 +1086,7 @@ mod tests {
         assert!(report.stage_timings_ms.query.is_some());
         assert!(report.stage_timings_ms.reconcile.is_some());
 
-        // The on-disk contract exists.
+        // Expected work artifacts are written.
         let work = output.join(WORK_DIR);
         for f in [
             "extractions/part_0000.jsonl",
@@ -1417,8 +1407,7 @@ mod tests {
 
     #[test]
     fn rerun_of_complete_pipeline_keeps_truthful_manifest() {
-        // The audit-integrity regression: re-running an already-complete run must not
-        // rewrite the report with emitted: 0 / coverage 0.0.
+        // Rerunning a completed run must preserve the persisted report.
         let (_dir, input, output) = fixture();
         let method = TestMethod {
             hash_bits: HashBits::Bits64,

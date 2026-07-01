@@ -1,8 +1,7 @@
-//! `funders` method: match DataCite funder names to ROR IDs.
+//! DataCite funder matching.
 //!
-//! Stub: the [`EnrichmentMethod`] implementation is in place and the method takes a
-//! [`LookupConfig`]; the matching pipeline isn't wired yet, so [`Funders::try_new`]
-//! returns an error.
+//! Extracts funder names from DataCite funding references and maps them to ROR
+//! organizations through the configured matching service.
 
 // DataCite, ROR, and COMET are names, not Rust identifiers.
 #![allow(clippy::doc_markdown)]
@@ -34,8 +33,6 @@ impl Funders {
 }
 
 impl EnrichmentMethod for Funders {
-    // Placeholder stub types so the staged-runner wiring compiles; the real
-    // funding-reference extraction lands when the method is ported (PLAN.md Stage 8).
     type Extraction = Value;
     type Lookup = RorLookup;
 

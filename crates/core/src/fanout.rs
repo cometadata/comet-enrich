@@ -1,9 +1,4 @@
-//! Shared helpers for the parallel file fan-out used by both runners.
-//!
-//! The transform path ([`crate::transform::run`]) and the staged path
-//! ([`crate::staged_run::run_staged`]) both discover `*.jsonl.gz` inputs, build a
-//! rayon pool, and process each file with the same read-vs-fatal error policy.
-//! These helpers keep that shared scaffolding in one place.
+//! Shared input-file scanning helpers for the transform and staged runners.
 
 use anyhow::{Context, Result};
 use glob::glob;

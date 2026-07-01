@@ -1,8 +1,4 @@
-//! Small filesystem lifecycle helpers for run artifacts.
-//!
-//! The runners intentionally keep a simple stable artifact layout. These helpers
-//! centralise the cleanup and marker-write rules so reruns cannot accidentally
-//! certify stale files left by an earlier invocation.
+//! Filesystem helpers for run artifacts.
 
 use anyhow::{Context, Result};
 use std::fs;

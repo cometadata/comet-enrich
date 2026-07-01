@@ -1,14 +1,6 @@
-//! Shared, dependency-light test helpers for the comet-enrich workspace.
+//! Test helpers for workspace integration tests.
 //!
-//! These helpers were previously duplicated across crates' test modules: gzip input
-//! fixtures, gzip readers, config-file paths, and a couple of assertion helpers.
-//! Centralising them keeps tests across crates building fixtures and asserting
-//! failures the same way.
-//!
-//! This crate is dev-only (`publish = false`) and intentionally does **not** depend on
-//! `comet-enrichment-core`: staying free of workspace types lets a crate's own unit
-//! tests use it without creating a dev-dependency cycle. Helpers that need core types
-//! (e.g. a `MatchService` fake or a `RunOptions` builder) stay in `core` itself.
+//! Writes gzip fixtures, reads enrichment output parts, and locates config files.
 
 // JSONL, gzip, and DataCite are names, not Rust identifiers.
 #![allow(clippy::doc_markdown)]
@@ -90,11 +82,7 @@ pub fn read_gz_string(path: &Path) -> String {
 
 /// Read every gzip part under `<output>/enrichments/` into enrichment records.
 ///
-/// `enrichments` mirrors `comet_enrichment_core::ENRICHMENTS_DIR`; it is inlined so
-/// this helper crate stays free of a `core` dependency (which would otherwise create a
-/// dev-dependency cycle for `core`'s own tests).
-///
-/// Record order across parts is not stable, so callers compare sets, not order.
+/// Record order across parts is not stable.
 #[must_use]
 pub fn read_enrichment_parts(output: &Path) -> Vec<Value> {
     let mut recs = Vec::new();
@@ -137,9 +125,6 @@ pub fn assert_close(actual: f64, expected: f64) {
 }
 
 /// Assert that `result` is an `Err` whose `Display` text contains `needle`.
-///
-/// One idiom for "this should fail with a message naming X", replacing ad-hoc
-/// `unwrap_err().to_string().contains(..)` chains.
 #[track_caller]
 pub fn assert_err_contains<T, E: std::fmt::Display>(
     result: std::result::Result<T, E>,

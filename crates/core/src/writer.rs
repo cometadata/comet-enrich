@@ -21,10 +21,8 @@ pub const ENRICHMENTS_FAILED_FILE: &str = "enrichments.failed.jsonl";
 
 /// Shared sink for records that fail schema validation.
 ///
-/// One failures file serves the whole run, so all workers share a single
-/// [`FailureSink`] behind a [`Mutex`]. Validation failures are rare, so lock
-/// contention is negligible. The file is created lazily on the first diverted
-/// record.
+/// The failures file is shared across workers and opened lazily on the first
+/// diverted record.
 pub struct FailureSink {
     /// Path the failures file is created at on first use.
     failed_path: PathBuf,
@@ -218,8 +216,7 @@ mod tests {
     use comet_test_support::read_gz_string;
     use serde_json::json;
 
-    /// Set up a temp dir with a part path, a failed-records path, and an open
-    /// `FailureSink` — the scaffolding shared by the writer tests.
+    /// Common fixture for writer tests.
     fn writer_fixture() -> (tempfile::TempDir, PathBuf, PathBuf, Mutex<FailureSink>) {
         let dir = tempfile::tempdir().unwrap();
         let part = dir.path().join("part_0000.jsonl.gz");
