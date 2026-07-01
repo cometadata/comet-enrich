@@ -137,6 +137,27 @@ async fn match_bulk_length_mismatch_is_error() {
 }
 
 #[tokio::test]
+async fn match_bulk_parse_error_includes_truncated_body() {
+    let server = MockServer::start().await;
+    let body = "x".repeat(300);
+    Mock::given(method("POST"))
+        .and(path("/match/bulk"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(body))
+        .mount(&server)
+        .await;
+
+    let err = client(server.uri())
+        .match_bulk(&["One Input".to_owned()], "affiliation")
+        .await
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("parsing match response"));
+    assert!(err.contains(&"x".repeat(200)));
+    assert!(!err.contains(&"x".repeat(250)));
+}
+
+#[tokio::test]
 async fn match_bulk_retries_after_429() {
     let server = MockServer::start().await;
     // First call: 429 with Retry-After: 0 (immediate retry), consumed after one hit.

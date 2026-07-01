@@ -31,3 +31,22 @@ pub fn compile_str(text: &str) -> Result<jsonschema::JSONSchema> {
     let schema_val: Value = serde_json::from_str(text).context("parsing schema")?;
     jsonschema::JSONSchema::compile(&schema_val).map_err(|e| anyhow::anyhow!("schema compile: {e}"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use comet_test_support::assert_err_contains;
+
+    #[test]
+    fn compile_str_invalid_json_reports_schema_parse_context() {
+        assert_err_contains(compile_str("{"), "parsing schema");
+    }
+
+    #[test]
+    fn compile_missing_file_reports_path() {
+        assert_err_contains(
+            compile(Path::new("__missing_schema__.json")),
+            "reading schema __missing_schema__.json",
+        );
+    }
+}

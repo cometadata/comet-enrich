@@ -295,6 +295,7 @@ impl MatchService for FakeMatchService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use comet_test_support::assert_err_contains;
     use std::collections::HashMap;
 
     #[tokio::test]
@@ -325,5 +326,13 @@ mod tests {
             .match_bulk(&["MIT".to_owned()], "affiliation")
             .await;
         assert!(out.is_err());
+    }
+
+    #[test]
+    fn marple_client_new_rejects_invalid_base_url() {
+        assert_err_contains(
+            MarpleClient::new("not a url", Duration::from_secs(1)),
+            "invalid match-service URL",
+        );
     }
 }

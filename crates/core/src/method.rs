@@ -98,3 +98,48 @@ pub trait EnrichmentMethod: Sync {
         lookups: &Lookups<Self::Lookup>,
     ) -> Vec<EnrichmentParts>;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct TransformOnly;
+
+    impl EnrichmentMethod for TransformOnly {
+        type Extraction = ();
+        type Lookup = ();
+
+        fn extract(&self, _record: &Value) -> Extracted<Self::Extraction> {
+            Extracted::Items(vec![()])
+        }
+
+        fn map_back(
+            &self,
+            _extraction: Self::Extraction,
+            _lookups: &Lookups<Self::Lookup>,
+        ) -> Vec<EnrichmentParts> {
+            Vec::new()
+        }
+    }
+
+    #[test]
+    fn enrichment_method_default_lookup_hooks_are_empty() {
+        let method = TransformOnly;
+        let lookups = Lookups::new();
+
+        assert!(
+            matches!(method.extract(&Value::Null), Extracted::Items(items) if items == vec![()])
+        );
+        assert!(method.inputs(&()).is_empty());
+        assert!(method.lookup(&["x".to_owned()]).unwrap().is_empty());
+        assert!(method.map_back((), &lookups).is_empty());
+    }
+
+    #[test]
+    fn enrichment_action_matches_schema_values() {
+        assert_eq!(EnrichmentAction::Update.as_str(), "update");
+        assert_eq!(EnrichmentAction::UpdateChild.as_str(), "updateChild");
+        assert_eq!(EnrichmentAction::Insert.as_str(), "insert");
+        assert_eq!(EnrichmentAction::DeleteChild.as_str(), "deleteChild");
+    }
+}

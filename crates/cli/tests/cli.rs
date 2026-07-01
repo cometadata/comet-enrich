@@ -1,5 +1,8 @@
 use assert_cmd::Command;
+use comet_test_support::{config_path, gz_input_fixture, read_enrichment_parts};
 use predicates::prelude::*;
+use serde_json::{Value, json};
+use std::fs;
 
 fn cli() -> Command {
     Command::cargo_bin("comet-enrich").unwrap()
@@ -7,14 +10,20 @@ fn cli() -> Command {
 
 /// Path to a committed provenance file used by CLI integration tests.
 fn provenance(method: &str) -> String {
-    format!(
-        "{}/../../configs/provenance/{method}.yaml",
-        env!("CARGO_MANIFEST_DIR")
-    )
+    config_path(&format!("provenance/{method}.yaml"))
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Path to a committed rules file used by CLI integration tests.
+fn rules() -> String {
+    config_path("reclassification_rules.yaml")
+        .to_string_lossy()
+        .into_owned()
 }
 
 #[test]
-fn help_lists_every_method() {
+fn cli_help_lists_every_method() {
     cli()
         .arg("--help")
         .assert()
@@ -25,7 +34,7 @@ fn help_lists_every_method() {
 }
 
 #[test]
-fn a_stage_has_its_own_help() {
+fn cli_stage_help_displays() {
     cli()
         .args(["affiliations", "query", "--help"])
         .assert()
@@ -33,7 +42,7 @@ fn a_stage_has_its_own_help() {
 }
 
 #[test]
-fn lookup_methods_report_unimplemented() {
+fn cli_lookup_methods_report_unimplemented() {
     // Lookup methods parse successfully before failing in their constructors.
     let cases: [(&str, &[&str]); 2] = [
         ("affiliations", &["--ror-file", "ror.json"]),
@@ -62,7 +71,7 @@ fn lookup_methods_report_unimplemented() {
 }
 
 #[test]
-fn resource_type_general_is_wired() {
+fn cli_resource_type_general_loads_rules() {
     // `resource-type-general` should load its rules file before failing.
     cli()
         .args([
@@ -83,7 +92,62 @@ fn resource_type_general_is_wired() {
 }
 
 #[test]
-fn provenance_is_validated_before_the_method() {
+fn cli_resource_type_general_runs_and_writes_manifest() {
+    let (_dir, input, output) = gz_input_fixture(&[json!({
+        "id": "10.x/1",
+        "attributes": {
+            "types": {
+                "resourceType": "Dataset",
+                "resourceTypeGeneral": "Other"
+            }
+        }
+    })]);
+
+    let input = input.to_string_lossy().into_owned();
+    let output_arg = output.to_string_lossy().into_owned();
+    let provenance = provenance("resource_type_general");
+    let rules = rules();
+    cli()
+        .args([
+            "resource-type-general",
+            "-i",
+            input.as_str(),
+            "-o",
+            output_arg.as_str(),
+            "--provenance",
+            provenance.as_str(),
+            "--rules",
+            rules.as_str(),
+            "--source-release-date",
+            "datacite=2024-01-01",
+            "--threads",
+            "1",
+            "--batch-size",
+            "100",
+        ])
+        .assert()
+        .success();
+
+    let records = read_enrichment_parts(&output);
+    assert_eq!(records.len(), 1);
+    assert_eq!(
+        records[0]["enrichedValue"]["resourceTypeGeneral"],
+        json!("Dataset")
+    );
+
+    let manifest: Value =
+        serde_json::from_str(&fs::read_to_string(output.join("manifest.json")).unwrap()).unwrap();
+    assert_eq!(manifest["exit_status"], json!("success"));
+    assert_eq!(
+        manifest["sources"]["datacite"]["release_date"],
+        json!("2024-01-01")
+    );
+    assert_eq!(manifest["report"]["counters"]["records_scanned"], json!(1));
+    assert_eq!(manifest["report"]["counters"]["emitted"], json!(1));
+}
+
+#[test]
+fn cli_validates_provenance_before_method_files() {
     // Provenance errors should be reported before method-specific files are read.
     cli()
         .args([
@@ -104,6 +168,6 @@ fn provenance_is_validated_before_the_method() {
 }
 
 #[test]
-fn missing_args_are_rejected() {
+fn cli_missing_args_are_rejected() {
     cli().arg("resource-type-general").assert().failure();
 }

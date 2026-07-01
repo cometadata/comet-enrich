@@ -45,3 +45,26 @@ pub(crate) fn write_marker(path: &Path) -> Result<()> {
     fs::rename(&tmp, path).with_context(|| format!("publishing marker {}", path.display()))?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use comet_test_support::assert_err_contains;
+
+    #[test]
+    fn remove_dir_if_exists_missing_directory_is_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing");
+
+        remove_dir_if_exists(&missing).unwrap();
+    }
+
+    #[test]
+    fn remove_dir_if_exists_file_path_reports_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("file");
+        fs::write(&file, b"not a directory").unwrap();
+
+        assert_err_contains(remove_dir_if_exists(&file), "removing");
+    }
+}

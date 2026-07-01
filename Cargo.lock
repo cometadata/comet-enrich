@@ -279,10 +279,12 @@ dependencies = [
  "comet-enrich-datacite-funders",
  "comet-enrich-datacite-resource-type-general",
  "comet-enrichment-core",
+ "comet-test-support",
  "jsonschema",
  "log",
  "predicates",
  "serde",
+ "serde_json",
  "simple_logger",
 ]
 

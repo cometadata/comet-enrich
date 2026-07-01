@@ -282,3 +282,79 @@ pub fn init_logging(level: LevelFilter) -> Result<()> {
         .init()?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use comet_test_support::assert_err_contains;
+
+    fn run_args(no_validate: bool, schema: Option<PathBuf>) -> RunArgs {
+        RunArgs {
+            threads: 2,
+            batch_size: 7,
+            schema,
+            no_validate,
+            log_level: LevelFilter::Off,
+        }
+    }
+
+    #[test]
+    fn parse_source_release_requires_source_and_iso_date() {
+        assert_eq!(
+            parse_source_release("datacite=2024-01-01").unwrap(),
+            ("datacite".to_owned(), "2024-01-01".to_owned())
+        );
+
+        assert_err_contains(
+            parse_source_release("datacite:2024-01-01"),
+            "expected name=YYYY-MM-DD",
+        );
+        assert_err_contains(parse_source_release("=2024-01-01"), "source name is empty");
+        assert_err_contains(
+            parse_source_release("datacite=20240101"),
+            "expected YYYY-MM-DD",
+        );
+    }
+
+    #[test]
+    fn io_args_run_options_copies_io_and_run_values() {
+        let io = IoArgs {
+            input: PathBuf::from("input"),
+            output: PathBuf::from("output"),
+            provenance: PathBuf::from("prov.yaml"),
+            source_release_date: Vec::new(),
+        };
+        let run = run_args(true, None);
+
+        let opts = io.run_options(&run);
+
+        assert_eq!(opts.input, PathBuf::from("input"));
+        assert_eq!(opts.output, PathBuf::from("output"));
+        assert_eq!(opts.threads, 2);
+        assert_eq!(opts.batch_size, 7);
+    }
+
+    #[test]
+    fn run_args_validator_respects_disabled_builtin_and_custom_schema_modes() {
+        assert!(run_args(true, None).validator().unwrap().is_none());
+        assert!(run_args(false, None).validator().unwrap().is_some());
+
+        assert_err_contains(
+            run_args(false, Some(PathBuf::from("__missing_schema__.json"))).validator(),
+            "reading schema __missing_schema__.json",
+        );
+    }
+
+    #[test]
+    fn hash_bits_arg_converts_to_core_hash_bits() {
+        assert_eq!(HashBits::from(HashBitsArg::Bits64), HashBits::Bits64);
+        assert_eq!(HashBits::from(HashBitsArg::Bits128), HashBits::Bits128);
+    }
+
+    #[test]
+    fn stage_arg_converts_to_core_stage() {
+        assert_eq!(Stage::from(StageArg::Extract), Stage::Extract);
+        assert_eq!(Stage::from(StageArg::Query), Stage::Query);
+        assert_eq!(Stage::from(StageArg::Reconcile), Stage::Reconcile);
+    }
+}

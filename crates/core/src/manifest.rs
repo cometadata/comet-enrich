@@ -282,3 +282,85 @@ impl Manifest {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use comet_test_support::assert_close;
+    use serde_json::json;
+
+    #[test]
+    fn hash_info_from_hash_bits_records_width() {
+        let hash = HashInfo::from(HashBits::Bits128);
+
+        assert_eq!(hash.algorithm, "xxh3-128");
+        assert_eq!(hash.bits, 128);
+    }
+
+    #[test]
+    fn coverage_new_zero_in_scope_has_zero_rate() {
+        let coverage = Coverage::new(0, 5);
+
+        assert_eq!(coverage.records_in_scope, 0);
+        assert_eq!(coverage.records_enriched, 5);
+        assert_close(coverage.coverage_rate, 0.0);
+    }
+
+    #[test]
+    fn manifest_from_report_wraps_supplied_report_and_hash() {
+        let mut sources = BTreeMap::new();
+        sources.insert(
+            "datacite".to_owned(),
+            SourceRelease {
+                release_date: "2024-01-01".to_owned(),
+            },
+        );
+        let meta = RunMeta {
+            method_name: "affiliations".to_owned(),
+            method_version: "test-version",
+            sources,
+        };
+        let report = Report {
+            counters: RunStats {
+                records_scanned: 3,
+                emitted: 2,
+                ..RunStats::default()
+            },
+            coverage: Coverage::new(3, 2),
+            match_: None,
+            validation: Validation::new(2, 0),
+            stage_timings_ms: StageTimings {
+                query: Some(10),
+                ..StageTimings::default()
+            },
+        };
+
+        let manifest = Manifest::from_report(
+            &meta,
+            EXIT_SUCCESS,
+            report,
+            HashInfo::from(HashBits::Bits128),
+        );
+        let value = serde_json::to_value(manifest).unwrap();
+
+        assert_eq!(value["method"]["name"], json!("affiliations"));
+        assert_eq!(
+            value["sources"]["datacite"]["release_date"],
+            json!("2024-01-01")
+        );
+        assert_eq!(value["exit_status"], json!("success"));
+        assert_eq!(value["hash"]["algorithm"], json!("xxh3-128"));
+        assert_eq!(value["hash"]["bits"], json!(128));
+        assert_eq!(
+            value["artifact_paths"]["enrichments"],
+            json!("enrichments/")
+        );
+        assert_eq!(
+            value["artifact_paths"]["enrichments_failed"],
+            json!("enrichments.failed.jsonl")
+        );
+        assert_eq!(value["report"]["counters"]["records_scanned"], json!(3));
+        assert_eq!(value["report"]["validation"]["emitted"], json!(2));
+        assert_eq!(value["report"]["stage_timings_ms"]["query"], json!(10));
+    }
+}
