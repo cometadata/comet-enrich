@@ -23,6 +23,10 @@ tokio = { workspace = true }
 reqwest = { workspace = true }
 async-trait = { workspace = true }
 
+[features]
+# Expose FakeMatchService to other crates' tests (via comet-enrich-test-support).
+test-support = []
+
 [dev-dependencies]
 comet-enrich-test-support = { workspace = true }
 tempfile = { workspace = true }

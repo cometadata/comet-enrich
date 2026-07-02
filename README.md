@@ -9,7 +9,7 @@ enrichment input schema
 It currently provides three enrichment methods:
 
 - **resource-type-general**: reclassify `types.resourceTypeGeneral` from free-text `resourceType` values.
-- **affiliations**: match creator affiliation strings to ROR IDs.
+- **affiliations**: match creator and contributor affiliation strings to ROR IDs.
 - **funders**: match funder names to ROR IDs.
 
 ## Install

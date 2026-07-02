@@ -60,9 +60,7 @@ pub struct MatchHit {
     pub confidence: f64,
 }
 
-/// The lookup result shared by the ROR match methods (affiliations, funders): a
-/// matched ROR id and the service's confidence. Both methods set
-/// `type Lookup = RorLookup`; `map_back` reads it to enrich the record.
+/// ROR lookup result stored between query and reconcile.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RorLookup {
     pub ror_id: String,
@@ -81,12 +79,10 @@ impl From<MatchHit> for RorLookup {
 /// Resolves batches of inputs against a match service.
 #[async_trait]
 pub trait MatchService: Send + Sync {
-    /// Resolve one batch. Returns one slot per input, in input order:
-    /// `Some((id, confidence))` on a match (first candidate wins), `None` for no
-    /// match. A whole-batch failure returns `Err`.
+    /// Resolve one batch, returning one result per input in input order.
     ///
-    /// Results are matched to inputs **positionally**: the implementation validates
-    /// only the result count and trusts the service to return results in input order.
+    /// Slots are `Some((id, confidence))` for a match and `None` for no match.
+    /// Whole-batch failures return `Err`.
     async fn match_bulk(&self, inputs: &[String], task: &str)
     -> Result<Vec<Option<(String, f64)>>>;
 }
@@ -247,17 +243,23 @@ impl MatchService for MarpleClient {
 /// In the default mode it resolves inputs from an in-memory map, returning one slot
 /// per input in input order. In erroring mode it fails every batch, simulating a
 /// sustained service outage.
-#[cfg(test)]
-pub(crate) struct FakeMatchService {
+///
+/// Compiled for this crate's own tests and, behind the `test-support` feature, for
+/// other crates' tests (re-exported by `comet-enrich-test-support`). It lives here
+/// rather than in the test-support crate because this crate's unit tests need an
+/// implementation of *their* [`MatchService`] instance, which an external crate
+/// built against the regular library cannot provide.
+#[cfg(any(test, feature = "test-support"))]
+pub struct FakeMatchService {
     matches: std::collections::HashMap<String, (String, f64)>,
     error: Option<String>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl FakeMatchService {
     /// Build a fake from a map of `input -> (id, confidence)`.
     #[must_use]
-    pub(crate) fn new(matches: std::collections::HashMap<String, (String, f64)>) -> Self {
+    pub fn new(matches: std::collections::HashMap<String, (String, f64)>) -> Self {
         Self {
             matches,
             error: None,
@@ -267,7 +269,7 @@ impl FakeMatchService {
     /// Build a fake whose every batch fails with `message`, simulating a sustained
     /// service outage.
     #[must_use]
-    pub(crate) fn erroring(message: &str) -> Self {
+    pub fn erroring(message: &str) -> Self {
         Self {
             matches: std::collections::HashMap::new(),
             error: Some(message.to_owned()),
@@ -275,7 +277,7 @@ impl FakeMatchService {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[async_trait]
 impl MatchService for FakeMatchService {
     async fn match_bulk(

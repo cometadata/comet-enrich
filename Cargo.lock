@@ -340,7 +340,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "comet-enrich-core",
+ "comet-enrich-test-support",
+ "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -372,6 +375,7 @@ dependencies = [
 name = "comet-enrich-test-support"
 version = "0.1.0"
 dependencies = [
+ "comet-enrich-core",
  "flate2",
  "serde_json",
  "tempfile",

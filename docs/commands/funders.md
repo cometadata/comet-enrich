@@ -43,6 +43,7 @@ In addition to the [global options](../usage.md#global-options):
 | `--ror-batch-size <N>`    | `50`                    | Inputs per ROR match-service bulk request                                                  |
 | `--ror-concurrency <N>`   | `50`                    | Concurrent ROR match-service requests                                                      |
 | `--ror-timeout <SECS>`    | `30`                    | ROR match-service request timeout in seconds                                               |
+| `--hash-bits <N>`         | `64`                    | Width of the dedup hash (`64` or `128`); fixed for a whole run                             |
 | `--from-scratch`          | off                     | Ignore existing stage outputs in `.work` and rerun all stages                             |
 
 ## Stages

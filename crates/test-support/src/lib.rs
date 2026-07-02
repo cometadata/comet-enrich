@@ -1,9 +1,9 @@
-//! Test helpers for workspace integration tests.
-//!
-//! Writes gzip fixtures, reads enrichment output parts, and locates config files.
+//! Test helpers for gzip fixtures, config paths, and fake match services.
 
 // JSONL, gzip, and DataCite are names, not Rust identifiers.
 #![allow(clippy::doc_markdown)]
+
+pub use comet_enrich_core::FakeMatchService;
 
 use std::fs::{self, File};
 use std::io::{Read, Write};
@@ -32,10 +32,9 @@ pub fn write_gz_part(path: &Path, records: &[Value]) {
     gz.finish().unwrap();
 }
 
-/// Write raw `lines` (joined by newlines) into a gzip part at `path`.
+/// Write raw newline-delimited `lines` into a gzip part at `path`.
 ///
-/// Unlike [`write_gz_part`], the lines are written verbatim, so a fixture may include
-/// blank or deliberately malformed entries. Missing parent directories are created.
+/// Lines are written verbatim, so fixtures can include blanks or malformed entries.
 pub fn write_gz_lines(path: &Path, lines: &[&str]) {
     create_parent(path);
     let mut gz = GzEncoder::new(File::create(path).unwrap(), Compression::default());

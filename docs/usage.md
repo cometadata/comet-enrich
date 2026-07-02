@@ -85,5 +85,5 @@ Each method adds its own options. See its page below.
 | Method                                                       | What it does                                                                |
 |--------------------------------------------------------------|-----------------------------------------------------------------------------|
 | [`resource-type-general`](commands/resource-type-general.md) | Reclassify `types.resourceTypeGeneral` from free-text `resourceType` values |
-| [`affiliations`](commands/affiliations.md)                   | Match creator affiliation strings to ROR IDs                                |
+| [`affiliations`](commands/affiliations.md)                   | Match creator and contributor affiliation strings to ROR IDs                |
 | [`funders`](commands/funders.md)                             | Match funder names to ROR IDs                                               |

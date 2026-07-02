@@ -8,14 +8,12 @@ fn cli() -> Command {
     Command::cargo_bin("comet-enrich").unwrap()
 }
 
-/// Path to a committed provenance file used by CLI integration tests.
 fn provenance(method: &str) -> String {
     config_path(&format!("provenance/{method}.yaml"))
         .to_string_lossy()
         .into_owned()
 }
 
-/// Path to a committed rules file used by CLI integration tests.
 fn rules() -> String {
     config_path("reclassification_rules.yaml")
         .to_string_lossy()
@@ -35,20 +33,17 @@ fn cli_help_lists_every_method() {
 
 #[test]
 fn cli_completions_emit_shell_scripts() {
-    // Bash defines and registers a completion function.
     cli()
         .args(["completions", "bash"])
         .assert()
         .success()
         .stdout(predicate::str::contains("_comet-enrich"))
         .stdout(predicate::str::contains("complete"));
-    // Zsh scripts start with the compdef header.
     cli()
         .args(["completions", "zsh"])
         .assert()
         .success()
         .stdout(predicate::str::starts_with("#compdef comet-enrich"));
-    // Fish registers per-command completions, including the subcommands.
     cli()
         .args(["completions", "fish"])
         .assert()
@@ -80,37 +75,43 @@ fn cli_stage_help_displays() {
 }
 
 #[test]
-fn cli_lookup_methods_report_unimplemented() {
-    // Lookup methods parse successfully before failing in their constructors.
-    let cases: [(&str, &[&str]); 2] = [
-        ("affiliations", &[]),
-        ("funders", &["--ror-file", "ror.json"]),
-    ];
-    for (method, extra) in cases {
-        let prov = provenance(method);
-        let mut args = vec![
-            method,
+fn cli_funders_reports_unimplemented() {
+    cli()
+        .args([
+            "funders",
             "-i",
             "in",
             "-o",
             "out.jsonl",
             "--provenance",
-            prov.as_str(),
-        ];
-        args.extend_from_slice(extra);
-        cli()
-            .args(&args)
-            .assert()
-            .failure()
-            .stderr(predicate::str::contains(format!(
-                "{method}: not yet implemented"
-            )));
-    }
+            provenance("funders").as_str(),
+            "--ror-file",
+            "ror.json",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("funders: not yet implemented"));
+}
+
+#[test]
+fn cli_affiliations_constructs_and_validates_input() {
+    cli()
+        .args([
+            "affiliations",
+            "-i",
+            "in",
+            "-o",
+            "out.jsonl",
+            "--provenance",
+            provenance("affiliations").as_str(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no *.jsonl.gz input files found"));
 }
 
 #[test]
 fn cli_resource_type_general_loads_rules() {
-    // `resource-type-general` should load its rules file before failing.
     cli()
         .args([
             "resource-type-general",
@@ -186,7 +187,6 @@ fn cli_resource_type_general_runs_and_writes_manifest() {
 
 #[test]
 fn cli_validates_provenance_before_method_files() {
-    // Provenance errors should be reported before method-specific files are read.
     cli()
         .args([
             "resource-type-general",
