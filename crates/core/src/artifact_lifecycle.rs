@@ -7,13 +7,7 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::Path;
 
-/// Clear a run's public outputs: the manifest, the enrichments directory
-/// (recreated empty), and the schema-failures file.
-///
-/// Both run paths call this before writing, so stale outputs from a previous run
-/// into the same directory can never survive alongside fresh ones. This is also
-/// the single owner of stale-failures cleanup: a clean run leaves no failures
-/// file, and the sink recreates it only when a record is diverted.
+/// Clear public outputs from a previous run.
 pub(crate) fn clear_run_outputs(output: &Path) -> Result<()> {
     remove_file_if_exists(&output.join(MANIFEST_FILE))?;
     recreate_dir(&output.join(ENRICHMENTS_DIR))?;
@@ -22,10 +16,6 @@ pub(crate) fn clear_run_outputs(output: &Path) -> Result<()> {
 }
 
 /// Remove a file if it exists.
-///
-/// Missing files are fine. Other errors are surfaced because they normally mean
-/// the output path is blocked by permissions or by a directory where a file should
-/// be.
 pub(crate) fn remove_file_if_exists(path: &Path) -> Result<()> {
     match fs::remove_file(path) {
         Ok(()) => Ok(()),
@@ -49,11 +39,7 @@ pub(crate) fn recreate_dir(path: &Path) -> Result<()> {
     fs::create_dir_all(path).with_context(|| format!("creating {}", path.display()))
 }
 
-/// Atomically publish a marker file.
-///
-/// The caller should have invalidated the marker before the stage starts. Writing
-/// via a temporary file avoids exposing the final marker path before the write has
-/// succeeded.
+/// Publish a marker file via temporary file and rename.
 pub(crate) fn write_marker(path: &Path) -> Result<()> {
     let tmp = path.with_extension("tmp");
     fs::write(&tmp, b"").with_context(|| format!("writing {}", tmp.display()))?;

@@ -30,8 +30,6 @@ missing_panics_doc = "allow"
 [workspace.dependencies]
 comet-enrich-core = { path = "crates/core" }
 comet-enrich-test-support = { path = "crates/test-support" }
-# Adding dependencies shared by two or more crates here
-# to make it easier to manage their versions
 anyhow = "1"
 flate2 = "1"
 jsonschema = { version = "0.46", default-features = false }

@@ -51,23 +51,13 @@ fn create_parent(path: &Path) {
     }
 }
 
-/// Lay out a single-part gzip input tree and return the temp dir plus the input and
-/// output roots.
-///
-/// Layout: `<tmp>/input/updated_2024-01/part_0000.jsonl.gz` holding `records`, and an
-/// empty `<tmp>/output`. The returned [`TempDir`] must be kept alive for the duration
-/// of the test (bind it, e.g. `let (_dir, input, output) = gz_input_fixture(..)`).
+/// Build a single-part gzip input fixture.
 #[must_use]
 pub fn gz_input_fixture(records: &[Value]) -> (TempDir, PathBuf, PathBuf) {
     gz_parts_fixture(&[records])
 }
 
-/// Lay out a gzip input tree with one part file per record slice and return the
-/// temp dir plus the input and output roots.
-///
-/// Parts are named `part_0000.jsonl.gz`, `part_0001.jsonl.gz`, … under the
-/// snapshot subdirectory. The returned [`TempDir`] must be kept alive for the
-/// duration of the test.
+/// Build a gzip input fixture with one part per record slice.
 #[must_use]
 pub fn gz_parts_fixture(parts: &[&[Value]]) -> (TempDir, PathBuf, PathBuf) {
     let dir = tempfile::tempdir().unwrap();
@@ -116,10 +106,6 @@ pub fn read_enrichment_parts(output: &Path) -> Vec<Value> {
 }
 
 /// Absolute path to a file under the workspace `configs/` directory.
-///
-/// Resolved from this crate's manifest dir (`crates/test-support`), which sits at the
-/// same depth as every other crate, so `../../configs` always points at the workspace
-/// config tree regardless of which crate calls this.
 #[must_use]
 pub fn config_path(rel: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -127,10 +113,7 @@ pub fn config_path(rel: &str) -> PathBuf {
         .join(rel)
 }
 
-/// Assert two floats are equal within a small tolerance (`1e-9`).
-///
-/// Use this for computed values such as coverage rates; do not compare them with
-/// `f64::EPSILON`, which is far tighter than these values warrant.
+/// Assert two floats are equal within a small tolerance.
 #[track_caller]
 pub fn assert_close(actual: f64, expected: f64) {
     assert!(

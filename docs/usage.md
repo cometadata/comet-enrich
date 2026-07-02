@@ -37,18 +37,12 @@ recursively.
 
 ## Output and validation
 
-Each method writes enrichment records as gzip-compressed, newline-delimited JSON into an
-`enrichments/` directory inside the `--output` directory (`enrichments/part_NNNN.jsonl.gz`), one
-record per line. Parts roll by output volume, controlled by `--output-part-size-mib`, rather than
-by the number of input files. Records are validated against the built-in enrichment input schema as
-they are written; any that fail are written to `enrichments.failed.jsonl` in the output directory
-(with the validator error attached) and the run continues.
+Each method writes gzip-compressed JSONL parts under `--output/enrichments/`, one record per line.
+Records are validated as they are written. Invalid records are diverted to
+`enrichments.failed.jsonl` with the validator error attached, and the run continues.
 
-By default output is written through one rolling gzip writer. Use `--output-writer-lanes <N>` to
-enable parallel final-output writers; records are routed to lanes by a stable hash of their DOI,
-then lane-local temp files are published as contiguous `part_NNNN.jsonl.gz` names at the end of a
-successful run. Part names are storage chunks, not semantic partitions; consumers should read every
-file under `enrichments/`.
+Part files are storage chunks, not semantic partitions. Consumers should read every
+`*.jsonl.gz` file under `enrichments/`.
 
 Use these options to change the validation behaviour:
 

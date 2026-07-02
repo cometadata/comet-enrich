@@ -79,8 +79,6 @@ mod tests {
 
     #[test]
     fn load_rules_parses_sample_yaml() {
-        // Checks that a normal rules file parses into the expected Rust structs,
-        // including nullable scope entries.
         let yaml = r"
 threshold: 0.85
 reference_values:
@@ -116,8 +114,6 @@ scope:
 
     #[test]
     fn validate_rules_rejects_unknown_reference_value() {
-        // Checks that reference values must come from the DataCite
-        // resourceTypeGeneral vocabulary.
         let yaml = r"
 threshold: 0.85
 reference_values: [Dataset, FakeType]
@@ -133,8 +129,6 @@ scope:
 
     #[test]
     fn validate_rules_rejects_bad_threshold() {
-        // Checks that the fuzzy-match threshold must be between 0 and 1,
-        // inclusive.
         let yaml = r"
 threshold: 1.5
 reference_values: [Dataset]

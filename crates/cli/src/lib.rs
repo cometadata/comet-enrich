@@ -53,16 +53,12 @@ pub enum Command {
 
     /// Match creator affiliation strings to ROR IDs.
     ///
-    /// Runs the extract, query, and reconcile stages. Omit the stage to run the full
-    /// pipeline. Intermediate files are written to a `.work` directory inside the output
-    /// directory, and existing stage outputs there are reused unless `--from-scratch` is used.
+    /// Runs the extract, query, and reconcile stages.
     Affiliations(AffiliationsArgs),
 
     /// Match funder names to ROR IDs.
     ///
-    /// Runs the extract, query, and reconcile stages. Omit the stage to run the full
-    /// pipeline. Intermediate files are written to a `.work` directory inside the output
-    /// directory, and existing stage outputs there are reused unless `--from-scratch` is used.
+    /// Runs the extract, query, and reconcile stages.
     Funders(FundersArgs),
 
     /// Generate a shell completion script on stdout.
@@ -93,9 +89,6 @@ pub struct CompletionsArgs {
 }
 
 /// Arguments for the affiliations method.
-///
-/// Affiliations needs no ROR registry file: the matched ROR id comes straight
-/// from the match service.
 #[derive(clap::Args, Debug)]
 pub struct AffiliationsArgs {
     #[command(flatten)]
@@ -188,17 +181,13 @@ pub fn run(cli: Cli) -> Result<()> {
     }
 }
 
-/// Per-method preamble: initialise logging, then load and validate provenance —
-/// before any method files are read or corpus work starts.
+/// Initialise logging and load provenance.
 fn setup(run: &RunArgs, io: &IoArgs) -> Result<EnrichmentTemplate> {
     init_logging(run.log_level)?;
     comet_enrich_core::load_template(&io.provenance)
 }
 
-/// Run a configured method, write the run manifest, and log the summary.
-///
-/// `out_of_scope` lists the method's skip reasons that mean a record was not
-/// selected by the extractor; they are excluded from the manifest's in-scope count.
+/// Run a transform method and write its manifest.
 ///
 /// # Errors
 /// Propagates any error from [`comet_enrich_core::run`] (including schema
@@ -212,8 +201,7 @@ fn run_method<M: EnrichmentMethod>(
     out_of_scope: &[&str],
 ) -> Result<()> {
     let validator = run.validator()?;
-    // Validate all CLI metadata before any work, so a typo (e.g. a duplicate
-    // source) cannot waste a full corpus pass or leave artifacts without a manifest.
+    // Validate CLI metadata before scanning the corpus.
     let sources = io.sources()?;
 
     let started = Instant::now();
@@ -229,8 +217,7 @@ fn run_method<M: EnrichmentMethod>(
         total: Some(total_ms),
         ..StageTimings::default()
     };
-    // The transform path is a single complete pass; it is `partial` only if a read
-    // failure or a schema-validation failure lost data.
+    // The transform path is complete unless it lost input or output records.
     let manifest_status = exit_status(stats.files_failed, stats.schema_failures, 0, true);
     Manifest::build(&stats, &meta, out_of_scope, &timings, manifest_status).write(&io.output)?;
 
@@ -238,11 +225,7 @@ fn run_method<M: EnrichmentMethod>(
     Ok(())
 }
 
-/// Run a lookup method through the staged pipeline and write the run manifest.
-///
-/// Drives extract → query → reconcile (or the single `stage` when given) against the
-/// Marple match service, then records the result plus the dedup-hash identity in the
-/// manifest.
+/// Run a lookup method and write its manifest.
 ///
 /// # Errors
 /// Propagates any error from schema compilation, source validation, building the
@@ -264,7 +247,7 @@ where
     M::Lookup: Serialize + DeserializeOwned + From<MatchHit> + Send + Sync + 'static,
 {
     let validator = run.validator()?;
-    // Validate all CLI metadata before any work (a typo must not waste a corpus pass).
+    // Validate CLI metadata before scanning the corpus.
     let sources = io.sources()?;
 
     let cfg: LookupConfig = lookup.into();
@@ -287,9 +270,7 @@ where
         method_version: env!("CARGO_PKG_VERSION"),
         sources,
     };
-    // `partial` if any data-losing condition occurred (read/schema failures, or
-    // lookups lost to match-service errors and timeouts) or the pipeline did not
-    // complete every stage (e.g. a single-stage debug run).
+    // Mark partial for data loss or incomplete staged runs.
     let match_errors = report
         .match_
         .as_ref()
@@ -387,7 +368,6 @@ mod tests {
         };
         assert_eq!(a.lookup.hash_bits, args::HashBitsArg::Bits128);
 
-        // Only 64 and 128 are valid widths.
         assert!(
             parse(&[
                 "comet-enrich",
@@ -429,8 +409,6 @@ mod tests {
 
     #[test]
     fn ror_file_is_required_for_funders_and_rejected_for_affiliations() {
-        // Funders needs the registry for the Crossref-to-ROR crosswalk; clap
-        // enforces the flag. Affiliations never reads it, so it has no such flag.
         let base = |method: &'static str| {
             vec![
                 "comet-enrich",
@@ -523,7 +501,6 @@ mod tests {
         assert!(res.is_err());
     }
 
-    /// Build a reclassifier CLI with the given trailing args appended.
     fn parse_rtg(extra: &[&str]) -> Result<Cli, clap::Error> {
         let mut args = vec![
             "comet-enrich",
@@ -551,7 +528,6 @@ mod tests {
         assert!(parse(&["comet-enrich", "completions"]).is_err());
     }
 
-    /// Destructure a parsed reclassifier command into its args.
     fn rtg_args(cli: Cli) -> ResourceTypeGeneralArgs {
         let Command::ResourceTypeGeneral(a) = cli.command else {
             panic!("expected resource-type-general");
@@ -561,8 +537,6 @@ mod tests {
 
     #[test]
     fn duplicate_source_release_date_is_rejected() {
-        // The duplicate is caught by sources(), which run_method calls before the
-        // run, so a metadata typo fails before any output is written.
         let cli = parse_rtg(&[
             "--source-release-date",
             "datacite=2024-01-01",

@@ -152,8 +152,6 @@ impl EnrichmentMethod for ResourceTypeGeneral {
 mod tests {
     use super::*;
 
-    /// A method with a tiny reference vocabulary and a `text`/`txt` redundancy rule, scoped to
-    /// the given `resourceTypeGeneral` targets.
     fn test_method(scope_targets: Vec<Option<String>>) -> ResourceTypeGeneral {
         let rules = config::RulesConfig {
             threshold: 0.85,
@@ -178,8 +176,6 @@ mod tests {
 
     #[test]
     fn extract_emits_on_match() {
-        // Tests that a record is updated when `resourceType` matches a
-        // different DataCite resource type.
         let m = test_method(scope_text_other_null());
         let rec = json!({"id": "10.5281/x", "attributes": {
             "types": {"resourceType": "Journal article", "resourceTypeGeneral": "Text"}}});
@@ -192,7 +188,6 @@ mod tests {
                     items[0].enriched["resourceTypeGeneral"],
                     json!("JournalArticle")
                 );
-                // The original `types` is preserved untouched.
                 assert_eq!(items[0].original["resourceTypeGeneral"], json!("Text"));
             }
             Extracted::Skip(r) => panic!("expected Items, got skip {r}"),
@@ -201,8 +196,6 @@ mod tests {
 
     #[test]
     fn extract_skips_out_of_scope() {
-        // Tests that records outside the configured `resourceTypeGeneral` scope are
-        // not reclassified.
         let m = test_method(scope_text_other_null());
         let rec = json!({"id": "10.5281/x", "attributes": {
             "types": {"resourceType": "Dataset", "resourceTypeGeneral": "Image"}}});
@@ -211,7 +204,6 @@ mod tests {
 
     #[test]
     fn extract_skips_redundant() {
-        // Tests that values covered by a redundancy rule are not reclassified.
         let m = test_method(scope_text_other_null());
         let rec = json!({"id": "10.5281/x", "attributes": {
             "types": {"resourceType": "Text", "resourceTypeGeneral": "Text"}}});
@@ -220,8 +212,6 @@ mod tests {
 
     #[test]
     fn extract_skips_no_match() {
-        // Tests that records are skipped when `resourceType` has no accepted
-        // vocabulary match.
         let m = test_method(scope_text_other_null());
         let rec = json!({"id": "10.5281/x", "attributes": {
             "types": {"resourceType": "Completely unrelated string", "resourceTypeGeneral": "Other"}}});
@@ -230,8 +220,6 @@ mod tests {
 
     #[test]
     fn extract_handles_null_rtg() {
-        // Tests that a missing `resourceTypeGeneral` can be filled when null is in
-        // the configured scope.
         let m = test_method(scope_text_other_null());
         let rec = json!({"id": "10.5281/x", "attributes": {
             "types": {"resourceType": "Dataset"}}});
@@ -245,8 +233,6 @@ mod tests {
 
     #[test]
     fn extract_skips_no_change() {
-        // Tests that no enrichment is emitted when the matched value is already the
-        // current `resourceTypeGeneral`.
         let m = test_method(vec![Some("Dataset".into())]);
         let rec = json!({"id": "10.5281/x", "attributes": {
             "types": {"resourceType": "Dataset", "resourceTypeGeneral": "Dataset"}}});
@@ -255,7 +241,6 @@ mod tests {
 
     #[test]
     fn extract_skips_malformed_types() {
-        // Tests that records without a usable DataCite `types` object are skipped.
         let m = test_method(scope_text_other_null());
         let rec = json!({"id": "10.5281/x", "attributes": {}});
         assert!(matches!(
@@ -266,8 +251,6 @@ mod tests {
 
     #[test]
     fn extract_skips_no_doi() {
-        // Tests that a record is skipped when an enrichment cannot be associated
-        // with a DOI.
         let m = test_method(scope_text_other_null());
         let rec = json!({"attributes": {
             "types": {"resourceType": "Journal article", "resourceTypeGeneral": "Text"}}});

@@ -1,8 +1,7 @@
-//! Staged pipeline for lookup methods: stage planning plus the runner.
+//! Staged runner for lookup methods.
 //!
-//! Lookup methods run as extract, query, and reconcile stages under
-//! `<output>/.work`. Each completed stage writes a `.done` marker there, so a
-//! later run can resume from the first incomplete stage.
+//! Completed stages leave markers under `<output>/.work`, allowing later runs to
+//! resume from the first incomplete stage.
 
 use crate::artifact_lifecycle as lifecycle;
 use crate::dedup::{DedupStore, HashBits};
@@ -83,8 +82,7 @@ pub struct LookupConfig {
     pub from_scratch: bool,
 }
 
-/// Scratch subdirectory inside a run's output directory, holding the staged
-/// pipeline's intermediate files. Excluded from the S3 upload by the orchestrator.
+/// Scratch subdirectory for staged intermediates.
 pub const WORK_DIR: &str = ".work";
 
 /// Work directory for a staged lookup run.
@@ -98,8 +96,7 @@ impl WorkDir {
         Self { path: path.into() }
     }
 
-    /// The work directory for a run whose output directory is `output_dir`
-    /// (always `<output_dir>/.work`).
+    /// The work directory for a run output directory.
     #[must_use]
     pub fn for_output(output_dir: &Path) -> Self {
         Self::new(output_dir.join(WORK_DIR))
@@ -152,19 +149,17 @@ const HASH_BITS_FILE: &str = "hash.bits";
 const EXTRACT_STATS_FILE: &str = "extract.stats.json";
 const RECONCILE_STATS_FILE: &str = "reconcile.stats.json";
 
-/// Confidence-histogram bucket edges. Each adjacent pair is one bucket; the last
-/// bucket includes the upper bound so a perfect `1.0` is counted.
+/// Match-confidence histogram edges. The last bucket includes `1.0`.
 const HISTOGRAM_EDGES: [f64; 6] = [0.0, 0.5, 0.7, 0.8, 0.9, 1.0];
 
-/// One `inputs.jsonl` row, read back during query.
+/// One `inputs.jsonl` row.
 #[derive(Clone, Deserialize)]
 struct InputRecord {
     hash: String,
     value: String,
 }
 
-/// One `lookups.jsonl` row: the input value and hash, with the method's `Lookup`
-/// fields flattened alongside (so the row reads `{ value, hash, <lookup fields> }`).
+/// One `lookups.jsonl` row.
 #[derive(Serialize, Deserialize)]
 struct LookupRow<L> {
     value: String,
@@ -173,15 +168,12 @@ struct LookupRow<L> {
     lookup: L,
 }
 
-/// `kind` of a failed lookup row: the service answered and found nothing.
+/// Failed lookup kind: the service answered and found nothing.
 const FAIL_KIND_NO_MATCH: &str = "no_match";
-/// `kind` of a failed lookup row: the input was never resolved (batch error,
-/// timeout). These are data loss and downgrade the run to `partial`.
+/// Failed lookup kind: the input was never resolved.
 const FAIL_KIND_ERROR: &str = "error";
 
-/// One `lookups.failed.jsonl` row. `kind` records the failure category at write
-/// time — the one moment the code knows it exactly — so the report never has to
-/// guess it back from the `error` text.
+/// One `lookups.failed.jsonl` row.
 #[derive(Serialize)]
 struct FailedRow<'a> {
     value: &'a str,
@@ -190,9 +182,7 @@ struct FailedRow<'a> {
     error: &'a str,
 }
 
-/// Extract-stage counters persisted to `extract.stats.json` so the report is
-/// correct on a resume/rerun that skips extract. `in_scope_units` is the coverage
-/// denominator (one per extraction the method produced).
+/// Extract-stage counters persisted for resumed runs.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 struct ExtractStats {
     files_processed: u64,
@@ -203,8 +193,7 @@ struct ExtractStats {
     skipped: BTreeMap<String, u64>,
 }
 
-/// Reconcile-stage counters persisted to `reconcile.stats.json`, so a rerun that
-/// skips reconcile still reports the records it emitted (rather than zero).
+/// Reconcile-stage counters persisted for resumed runs.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 struct ReconcileStats {
     emitted: u64,
@@ -234,25 +223,16 @@ impl ExtractAgg {
     }
 }
 
-/// Run a lookup method through the staged pipeline and return its [`Report`].
+/// Run a lookup method through the staged pipeline.
 ///
-/// `io` supplies the input and output directories (the output dir is the run dir);
-/// the work area is always `<output>/.work`. `cfg` carries the match-service URL,
-/// batch size, concurrency, timeout, the resume flag, and the dedup-hash width;
-/// the width is pinned in the run dir on the first run and a mismatched resume is
-/// refused. `svc` is shared across the query stage's concurrent requests. `task`
-/// is the match-service task name (`"affiliation"` / `"funder"`). When
-/// `only_stage` is set, exactly that stage runs (its predecessors must have
-/// already completed); otherwise the runner resumes from the first incomplete
-/// stage.
+/// With `only_stage`, that stage runs and its predecessors must already be
+/// complete. Otherwise the runner resumes from the first incomplete stage.
 ///
 /// # Errors
 ///
-/// Returns an error if `from_scratch` is combined with `only_stage`, the input
-/// directory holds no `*.jsonl.gz` files (when extract must run), the work area
-/// cannot be created, a hash-width mismatch is detected on resume, a requested
-/// single stage's predecessors are missing, or any stage fails (I/O, a hash
-/// collision, or the match service erroring a whole batch after retries).
+/// Returns an error for invalid stage options, missing input, hash-width
+/// mismatches, missing predecessor stages, I/O errors, hash collisions, or
+/// match-service batch failures.
 #[allow(clippy::too_many_arguments)]
 pub fn run_staged<M>(
     method: &M,
@@ -330,15 +310,11 @@ where
     }
 
     timings.total = Some(elapsed_ms(run_start));
-    // The report is assembled from the persisted per-stage stats (not from what ran
-    // this invocation), so a resume/rerun that skips a stage still reports the truth.
+    // Read sidecars so resumed runs report stages skipped this invocation.
     build_report(work_path, &wd, timings)
 }
 
 /// Whether a staged run directory has completed all stages.
-///
-/// Lets the caller flag a single-stage or otherwise-incomplete run as `partial` in
-/// the manifest even when its counters look clean.
 #[must_use]
 pub fn pipeline_complete(output_dir: &Path) -> bool {
     WorkDir::for_output(output_dir).all_complete()
@@ -366,7 +342,7 @@ fn pin_or_validate_hash_bits(work: &Path, hash_bits: HashBits, from_scratch: boo
     }
 }
 
-/// Require the stages before `stage` to have completed, for an explicit single-stage run.
+/// Require predecessor stages for an explicit single-stage run.
 fn ensure_predecessors_done(wd: &WorkDir, stage: Stage) -> Result<()> {
     let needed: &[Stage] = match stage {
         Stage::Extract => &[],
@@ -386,7 +362,7 @@ fn ensure_predecessors_done(wd: &WorkDir, stage: Stage) -> Result<()> {
     Ok(())
 }
 
-/// Clear the marker and artifacts that become obsolete when `stage` is rerun.
+/// Clear markers and artifacts invalidated by rerunning `stage`.
 fn prepare_stage_rerun(wd: &WorkDir, stage: Stage, work: &Path, output: &Path) -> Result<()> {
     clear_markers_from(wd, stage)?;
     match stage {
@@ -444,8 +420,7 @@ fn elapsed_ms(since: Instant) -> u64 {
 // Extract
 // ---------------------------------------------------------------------------
 
-/// Scan the corpus, serialize one `Extraction` per line to `extractions/`, and
-/// collect the unique lookup inputs into `inputs.jsonl`.
+/// Write extractions and unique lookup inputs.
 fn run_extract<M>(method: &M, io: &RunOptions, work: &Path, hash_bits: HashBits) -> Result<()>
 where
     M: EnrichmentMethod,
@@ -539,8 +514,7 @@ where
             }
             crate::method::Extracted::Items(items) => {
                 for item in items {
-                    // Each extraction is one in-scope unit (a person, a funding
-                    // reference) — the coverage denominator.
+                    // Each extraction is one in-scope unit for coverage.
                     in_scope_units += 1;
                     for input in method.inputs(&item) {
                         dedup.insert(input);
@@ -573,8 +547,7 @@ where
 // Query
 // ---------------------------------------------------------------------------
 
-/// Resolve the unique inputs against the match service, writing `lookups.jsonl`
-/// and `lookups.failed.jsonl`.
+/// Resolve inputs and write lookup result files.
 fn run_query<L>(
     svc: Arc<dyn MatchService>,
     cfg: &LookupConfig,
@@ -602,9 +575,7 @@ where
 {
     let inputs = read_inputs(&work.join(INPUTS_FILE))?;
 
-    // The query stage always runs whole: a crash re-runs the stage from the start
-    // (the `.done` marker, not a checkpoint, is the resume unit), so the result
-    // files are truncated and rewritten rather than appended to.
+    // Query reruns as a whole stage, so previous result files are rewritten.
     let matches_w = Arc::new(AsyncMutex::new(create_line_writer(
         &work.join(LOOKUPS_FILE),
     )?));
@@ -669,8 +640,7 @@ where
                     write_lines(&failed_w, &misses).await?;
                 }
                 Err(e) => {
-                    // Record whole-batch failures as failed lookup rows; the
-                    // manifest marks the run partial.
+                    // Whole-batch failures are lost inputs.
                     let error = format!("batch error: {e}");
                     let lines: Vec<String> = batch
                         .iter()
@@ -707,8 +677,7 @@ fn read_inputs(path: &Path) -> Result<Vec<InputRecord>> {
     Ok(rows)
 }
 
-/// Create a JSONL writer, truncating any prior file. The query stage always runs
-/// whole, so it rewrites its result files rather than appending to them.
+/// Create a JSONL writer, truncating any prior file.
 fn create_line_writer(path: &Path) -> Result<BufWriter<File>> {
     let file = File::create(path).with_context(|| format!("creating {}", path.display()))?;
     Ok(BufWriter::new(file))
@@ -730,9 +699,7 @@ async fn write_lines(writer: &AsyncMutex<BufWriter<File>>, lines: &[String]) -> 
 // Reconcile
 // ---------------------------------------------------------------------------
 
-/// Join matches back onto each extraction, emit enrichment records, and persist the
-/// reconcile counters (records emitted + schema-validation failures) so the report
-/// is correct even on a later rerun that skips this stage.
+/// Join lookups onto extractions and write enrichment records.
 fn run_reconcile<M>(
     method: &M,
     io: &RunOptions,
@@ -841,9 +808,7 @@ where
 // Report
 // ---------------------------------------------------------------------------
 
-/// Assemble the [`Report`] from the persisted per-stage stats, so it is correct
-/// regardless of which stages ran this invocation (a rerun that skips a stage still
-/// reports that stage's persisted counts rather than zero).
+/// Assemble a [`Report`] from persisted stage stats.
 fn build_report(work: &Path, wd: &WorkDir, timings: StageTimings) -> Result<Report> {
     let extract: ExtractStats = read_stats(&work.join(EXTRACT_STATS_FILE), "extract.stats.json")?;
     let reconcile: ReconcileStats =
@@ -867,9 +832,6 @@ fn build_report(work: &Path, wd: &WorkDir, timings: StageTimings) -> Result<Repo
 
     Ok(Report {
         counters,
-        // Coverage is over extraction units (the affiliations/funding-refs the method
-        // produced): one unit yields at most one enrichment record, so the rate is a
-        // true fraction in [0, 1].
         coverage: Coverage::new(extract.in_scope_units, reconcile.emitted),
         match_,
         validation: Validation::new(reconcile.emitted, reconcile.schema_failures),
@@ -893,8 +855,7 @@ struct ConfidenceRow {
     confidence: Option<f64>,
 }
 
-/// One `lookups.failed.jsonl` row, read back for its failure kind and error text
-/// (other fields ignored).
+/// Failed lookup row fields needed for reporting.
 #[derive(Deserialize)]
 struct FailureRow {
     /// Absent on rows written by builds that predate the `kind` field.
@@ -903,8 +864,7 @@ struct FailureRow {
     error: String,
 }
 
-/// Compute the match-quality block from `inputs.jsonl`, `lookups.jsonl`, and
-/// `lookups.failed.jsonl`.
+/// Compute the match-quality block from lookup artifacts.
 #[allow(clippy::cast_precision_loss)]
 fn build_match_summary(work: &Path) -> Result<MatchSummary> {
     let unique_inputs = count_lines(&work.join(INPUTS_FILE))?;
@@ -959,14 +919,9 @@ fn histogram_bucket(c: f64) -> usize {
     0
 }
 
-/// Bin one failed lookup row into the report taxonomy.
+/// Bin one failed lookup row.
 ///
-/// The verdict comes from the row's `kind` (written when the failure happened),
-/// never from the error text. Rows without a `kind` (from a build that predates
-/// it) count as errors: that can wrongly downgrade an old resume to `partial`,
-/// but can never certify a lossy run as `success`. Within the error kind, the
-/// timeout/error split is inferred from the message; it is informational only
-/// and both count as lost inputs.
+/// Missing legacy `kind` values count as errors, never no-matches.
 fn classify_failure(kind: Option<&str>, error: &str, taxonomy: &mut MatchFailureTaxonomy) {
     if kind == Some(FAIL_KIND_NO_MATCH) {
         taxonomy.no_match += 1;
@@ -996,9 +951,7 @@ fn count_lines(path: &Path) -> Result<u64> {
     Ok(n)
 }
 
-/// Deserialize each non-empty JSONL row in `path` into `T` and pass it to `f` (a
-/// no-op if the file is absent). `T` should name only the fields it needs; serde
-/// skips the rest without materializing them.
+/// Read non-empty JSONL rows from an optional file.
 fn for_each_jsonl<T: DeserializeOwned>(path: &Path, mut f: impl FnMut(T)) -> Result<()> {
     if !path.exists() {
         return Ok(());
@@ -1032,8 +985,6 @@ mod tests {
     use std::collections::HashMap;
     use std::path::PathBuf;
 
-    /// A funder-shaped test method: one extraction per record carrying the funder
-    /// name and its hash; `map_back` enriches matched names.
     struct TestMethod {
         hash_bits: HashBits,
     }
@@ -1124,7 +1075,6 @@ mod tests {
         }
     }
 
-    /// Four records: two match, one has no match, one has no funder name (skipped).
     fn sample_records() -> Vec<Value> {
         vec![
             json!({ "id": "10.1/mit", "attributes": { "name": "MIT" } }),
@@ -1145,9 +1095,6 @@ mod tests {
         }
     }
 
-    /// A staged-run test rig: a gz input fixture, the funder-shaped test method,
-    /// the fake match service, and an empty provenance template. Tests override
-    /// fields (e.g. swap `svc` for a failing service) before running.
     struct TestRun {
         _dir: tempfile::TempDir,
         input: PathBuf,
@@ -1158,7 +1105,6 @@ mod tests {
     }
 
     impl TestRun {
-        /// Rig over a one-part input of `sample_records`.
         fn new() -> Self {
             Self::from_fixture(gz_input_fixture(&sample_records()))
         }
@@ -1192,19 +1138,14 @@ mod tests {
             self.output.join(WORK_DIR)
         }
 
-        /// Run the full pipeline with the common test defaults: no validator, the
-        /// `"funder"` task, and all stages.
         fn run(&self, from_scratch: bool) -> Result<Report> {
             self.run_with(&cfg(HashBits::Bits64, from_scratch), None, None)
         }
 
-        /// Run one stage with the common test defaults (a stage run never combines
-        /// with `from_scratch`).
         fn run_stage(&self, stage: Stage) -> Result<Report> {
             self.run_with(&cfg(HashBits::Bits64, false), None, Some(stage))
         }
 
-        /// Fully parameterized run, for tests that vary config, validator, or stage.
         fn run_with(
             &self,
             cfg: &LookupConfig,
@@ -1230,7 +1171,6 @@ mod tests {
 
         let report = t.run(true).unwrap();
 
-        // Match block is filled from the on-disk artifacts.
         let m = report.match_.expect("match block present");
         assert_eq!(m.unique_inputs, 3);
         assert_eq!(m.matched, 2);
@@ -1240,8 +1180,6 @@ mod tests {
         assert_close(top_bucket.max, 1.0);
         assert_eq!(top_bucket.count, 2);
 
-        // Four records scanned; the empty one is skipped, leaving three in-scope
-        // extraction units, two of which match and are enriched.
         assert_eq!(report.counters.records_scanned, 4);
         assert_eq!(report.counters.emitted, 2);
         assert_eq!(report.counters.skipped.get("no_name"), Some(&1));
@@ -1249,12 +1187,10 @@ mod tests {
         assert_eq!(report.coverage.records_enriched, 2);
         assert_close(report.coverage.coverage_rate, 2.0 / 3.0);
 
-        // All stage timings present.
         assert!(report.stage_timings_ms.extract.is_some());
         assert!(report.stage_timings_ms.query.is_some());
         assert!(report.stage_timings_ms.reconcile.is_some());
 
-        // Expected work artifacts are written.
         let work = t.work();
         for f in [
             "extractions/part_0000.jsonl",
@@ -1273,7 +1209,6 @@ mod tests {
             "xxh3-64"
         );
 
-        // The output holds the two enriched records.
         let dois = read_output_dois(&t.output);
         assert_eq!(dois.len(), 2);
         assert!(dois.contains(&"10.1/mit".to_owned()));
@@ -1342,13 +1277,11 @@ mod tests {
 
         t.run(true).unwrap();
 
-        // Drop the reconcile marker and resume: only reconcile should rerun.
         fs::remove_file(t.work().join("reconcile.done")).unwrap();
         let report = t.run(false).unwrap();
 
         assert_eq!(report.counters.emitted, 2);
         assert!(report.stage_timings_ms.reconcile.is_some());
-        // Extract was skipped this run, so its timing is absent.
         assert!(report.stage_timings_ms.extract.is_none());
         assert_eq!(read_output_dois(&t.output).len(), 2);
     }
@@ -1479,13 +1412,10 @@ mod tests {
 
     #[test]
     fn rerun_of_complete_pipeline_keeps_truthful_manifest() {
-        // Rerunning a completed run must preserve the persisted report.
         let t = TestRun::new();
 
         let first = t.run(true).unwrap();
 
-        // Re-run into the same dir without --from-scratch: every stage is complete, so
-        // no stage runs this invocation, but the report is read from the sidecars.
         let again = t.run(false).unwrap();
 
         assert_eq!(again.counters.emitted, first.counters.emitted);
@@ -1501,7 +1431,6 @@ mod tests {
     #[test]
     fn rejecting_validator_surfaces_schema_failures() {
         let t = TestRun::new();
-        // A schema no enrichment record satisfies: every emitted record is diverted.
         let schema =
             crate::schema::compile_str(r#"{"type":"object","required":["nope"]}"#).unwrap();
 
@@ -1509,12 +1438,10 @@ mod tests {
             .run_with(&cfg(HashBits::Bits64, true), Some(&schema), None)
             .unwrap();
 
-        // The two would-be records are diverted, not written: counted, not hidden.
         assert_eq!(report.counters.emitted, 0);
         assert_eq!(report.counters.schema_failures, 2);
         assert_eq!(report.validation.schema_failures, 2);
         assert!(t.output.join(ENRICHMENTS_FAILED_FILE).exists());
-        // A run that lost records to validation is not a full success.
         assert_eq!(
             crate::exit_status(0, report.counters.schema_failures, 0, true),
             "partial"
@@ -1529,12 +1456,10 @@ mod tests {
         let report = t.run(true).unwrap();
 
         let m = report.match_.expect("match block present");
-        // All three inputs failed as errors (not no-match), and nothing matched.
         assert_eq!(m.matched, 0);
         assert_eq!(m.failure_taxonomy.error, 3);
         assert_eq!(m.failure_taxonomy.no_match, 0);
         assert_eq!(report.counters.emitted, 0);
-        // The pipeline completed, but it lost data — so it must read as partial.
         let status = crate::exit_status(
             report.counters.files_failed,
             0,
@@ -1546,8 +1471,6 @@ mod tests {
 
     #[test]
     fn batch_timeout_is_lost_data_not_success() {
-        // A batch lost to a timeout must downgrade the run exactly like any other
-        // batch error; the timeout/error split is informational only.
         let mut t = TestRun::new();
         t.svc = Arc::new(FakeMatchService::erroring("operation timed out"));
 
@@ -1565,15 +1488,11 @@ mod tests {
     #[test]
     fn classify_failure_bins_by_kind_not_message() {
         let mut t = MatchFailureTaxonomy::default();
-        // The kind decides no-match, even if the error text looks alarming.
         classify_failure(Some("no_match"), "no match", &mut t);
         classify_failure(Some("no_match"), "server said: timed out no match", &mut t);
-        // Error rows split timeout/error by message, and both count as lost.
         classify_failure(Some("error"), "batch error: operation timed out", &mut t);
         classify_failure(Some("error"), "batch error: HTTP 500", &mut t);
-        // A batch error whose message happens to contain "no match" is still lost.
         classify_failure(Some("error"), "batch error: no match endpoint", &mut t);
-        // Legacy rows without a kind count as lost, never as a benign no-match.
         classify_failure(None, "no match", &mut t);
 
         assert_eq!(t.no_match, 2);
@@ -1616,15 +1535,12 @@ mod tests {
 
     #[test]
     fn histogram_bucket_clamps_and_includes_top_edge() {
-        // Edges [0.0, 0.5, 0.7, 0.8, 0.9, 1.0] -> five buckets, indexes 0..=4.
         assert_eq!(histogram_bucket(0.0), 0);
         assert_eq!(histogram_bucket(0.49), 0);
         assert_eq!(histogram_bucket(0.5), 1);
         assert_eq!(histogram_bucket(0.85), 3);
         assert_eq!(histogram_bucket(0.9), 4);
-        // The last bucket includes the upper bound, so a perfect 1.0 is counted...
         assert_eq!(histogram_bucket(1.0), 4);
-        // ...and out-of-range confidences clamp to the nearest bucket.
         assert_eq!(histogram_bucket(1.5), 4);
         assert_eq!(histogram_bucket(-0.1), 0);
     }

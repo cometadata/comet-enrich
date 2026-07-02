@@ -1,8 +1,7 @@
 //! Provenance config and record-building helpers.
 //!
-//! A provenance YAML file describes the contributors and resources added to every
-//! enrichment record. The file is loaded once into an [`EnrichmentTemplate`], then
-//! reused while records are written.
+//! Provenance YAML is loaded into an [`EnrichmentTemplate`] and reused while
+//! records are written.
 
 use crate::datacite_enums;
 use crate::method::EnrichmentParts;
@@ -105,8 +104,7 @@ impl EnrichmentTemplate {
     /// Build a reusable template from a provenance config.
     #[must_use]
     pub fn from_config(cfg: &EnrichmentConfig) -> Self {
-        // The config structs already match the output JSON shape through their
-        // serde rename and skip_serializing_if attributes.
+        // The config structs already match the output JSON shape.
         let contributors = Value::Array(
             cfg.contributors
                 .iter()
@@ -127,11 +125,9 @@ impl EnrichmentTemplate {
     }
 }
 
-/// Build one enrichment record from method output and the shared provenance template.
+/// Build one enrichment record.
 ///
-/// The [`EnrichmentParts`] carry the per-record values (doi, action, the enriched
-/// `field`, and the original/enriched JSON); the template supplies the shared
-/// provenance. Key order is fixed and covered by tests.
+/// Key order is fixed and covered by tests.
 #[must_use]
 pub fn build_enrichment_record(template: &EnrichmentTemplate, parts: EnrichmentParts) -> Value {
     let mut m = serde_json::Map::new();
@@ -145,9 +141,7 @@ pub fn build_enrichment_record(template: &EnrichmentTemplate, parts: EnrichmentP
     Value::Object(m)
 }
 
-/// Load provenance YAML and render it for use in emitted records.
-///
-/// This is called before scanning input files so provenance errors fail quickly.
+/// Load provenance YAML for emitted records.
 ///
 /// # Errors
 ///
@@ -194,10 +188,6 @@ fn push_unknown(
 }
 
 /// Validate provenance against the COMET Enrichment Data Model.
-///
-/// Checks DataCite controlled-vocabulary fields and the required COMET provenance
-/// entries. All problems are collected and returned together so the config can be
-/// fixed in one pass.
 ///
 /// # Errors
 ///
@@ -388,7 +378,6 @@ resources:
         );
     }
 
-    /// Minimal config satisfying the full model: COMET Producer plus both required resources.
     const VALID_YAML: &str = r#"
 contributors:
   - name: "COMET"
@@ -415,7 +404,6 @@ resources:
 
     #[test]
     fn validate_enrichment_rejects_unknown_contributor_type() {
-        // Valid base config plus one contributor with a bad contributorType.
         let yaml = r#"
 contributors:
   - name: "COMET"
@@ -479,7 +467,6 @@ resources:
         validate_enrichment(&cfg).unwrap();
         let template = EnrichmentTemplate::from_config(&cfg);
 
-        // The community contributor keeps `lang` and the typed ROR identifier.
         assert_eq!(
             template.contributors[1],
             json!({
@@ -494,7 +481,6 @@ resources:
                 }]
             })
         );
-        // The curator keeps the typed affiliation and ORCID identifier.
         assert_eq!(
             template.contributors[2],
             json!({
@@ -517,7 +503,6 @@ resources:
 
     #[test]
     fn rejects_unknown_field() {
-        // A typo should fail at parse time, not disappear from the output.
         let yaml = r#"
 contributors:
   - name: "COMET"
@@ -555,7 +540,6 @@ resources:
 "#;
         let cfg: EnrichmentConfig = serde_yaml_ng::from_str(yaml).unwrap();
         let err = validate_enrichment(&cfg).unwrap_err().to_string();
-        // Report both invalid controlled-vocabulary values in one error.
         assert!(err.contains("contributors[1]"), "got: {err}");
         assert!(err.contains("Producr"), "got: {err}");
         assert!(err.contains("resources[1]"), "got: {err}");
@@ -564,7 +548,6 @@ resources:
 
     #[test]
     fn validate_enrichment_enforces_required_entries() {
-        // Missing the derived Dataset resource.
         let no_dataset = r#"
 contributors:
   - name: "COMET"
@@ -580,7 +563,6 @@ resources:
         let err = validate_enrichment(&cfg).unwrap_err().to_string();
         assert!(err.contains("IsDerivedFrom / Dataset"), "got: {err}");
 
-        // Missing the Project documentation resource.
         let no_project = r#"
 contributors:
   - name: "COMET"
@@ -596,7 +578,6 @@ resources:
         let err = validate_enrichment(&cfg).unwrap_err().to_string();
         assert!(err.contains("IsDocumentedBy / Project"), "got: {err}");
 
-        // Missing the COMET Producer contributor.
         let no_comet = r#"
 contributors:
   - name: "eLife"

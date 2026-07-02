@@ -44,11 +44,9 @@ RUN curl -fsSL https://raw.githubusercontent.com/cometadata/comet-enrich/main/in
                  --target x86_64-unknown-linux-musl
 ```
 
-Pass `--target x86_64-unknown-linux-musl` (or `aarch64-unknown-linux-musl` for arm64
-images) rather than letting the script detect the CPU: detection runs on the *build* host,
-and an `x86-64-v3` binary baked in there would crash on a runtime host without AVX2. The
-Linux binaries are fully static (musl), so any base image works, including Alpine and
-distroless.
+Pass an explicit Linux target in Docker. CPU detection runs on the build host, which may not match
+the runtime host. The Linux binaries are static musl builds, so they work in Alpine and distroless
+images.
 
 ## Prerequisites
 

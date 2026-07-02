@@ -1,7 +1,4 @@
-//! DataCite funder matching.
-//!
-//! Extracts funder names from DataCite funding references and maps them to ROR
-//! organizations through the configured matching service.
+//! DataCite funder matching stub.
 
 // DataCite, ROR, and COMET are names, not Rust identifiers.
 #![allow(clippy::doc_markdown)]
@@ -15,27 +12,21 @@ use std::path::PathBuf;
 
 /// Configuration for the funder matcher.
 pub struct Config {
-    /// Shared lookup configuration.
+    /// Lookup configuration.
     pub lookup: LookupConfig,
-    /// ROR registry JSON used to build the Crossref Funder ID to ROR crosswalk,
-    /// which excludes already-identified funding references from enrichment.
+    /// ROR registry JSON for the Crossref Funder ID to ROR crosswalk.
     pub ror_file: PathBuf,
 }
 
-/// Matches DataCite funder names to ROR organizations.
-///
-/// The method extracts funder names from DataCite funding references, queries
-/// the configured ROR matching service, and maps accepted matches back into
-/// enrichment parts.
+/// Funder matcher, not yet implemented.
 pub struct Funders;
 
 impl Funders {
-    /// Builds the funder matcher from its configuration.
+    /// Build the funder matcher.
     ///
     /// # Errors
     ///
-    /// Returns an error if the matcher cannot be constructed from the supplied
-    /// configuration.
+    /// Always returns an error until the method is implemented.
     pub fn try_new(config: Config) -> Result<Self> {
         drop(config);
         bail!("funders: not yet implemented")

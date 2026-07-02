@@ -27,9 +27,6 @@ pub const DEFAULT_OUTPUT_WRITER_LANES: usize = 1;
 const ENRICHMENTS_TMP_DIR: &str = ".tmp";
 
 /// Shared sink for records that fail schema validation.
-///
-/// The failures file is shared across workers and opened lazily on the first
-/// diverted record.
 pub struct FailureSink {
     /// Path the failures file is created at on first use.
     failed_path: PathBuf,
@@ -41,9 +38,7 @@ pub struct FailureSink {
 impl FailureSink {
     /// Create a failures sink.
     ///
-    /// The file itself is opened lazily by [`FailureSink::divert`], so a clean run
-    /// creates no failures file. Stale files from a previous run are cleared by
-    /// the run-output lifecycle (`clear_run_outputs`), not here.
+    /// Opens the file lazily so clean runs create no failures file.
     #[must_use]
     pub fn create(failed: &Path) -> Self {
         Self {
@@ -54,9 +49,6 @@ impl FailureSink {
     }
 
     /// Divert a record that failed validation, recording its validator errors.
-    ///
-    /// Writes `{"record": <record>, "errors": [...]}` and opens the failures file
-    /// on first use.
     ///
     /// # Errors
     ///
@@ -97,15 +89,9 @@ fn open_buffered(path: &Path, capacity: usize) -> Result<BufWriter<File>> {
     Ok(BufWriter::with_capacity(capacity, f))
 }
 
-/// Writes enrichment records to a bounded number of rolling gzip parts.
+/// Writes valid enrichment records to rolling gzip parts.
 ///
-/// Records are validated (and failures diverted) before any lane lock is taken, so
-/// validation runs in parallel across workers. Valid records are routed to writer
-/// lanes by a stable hash of their DOI. Each lane writes to a temporary lane/segment
-/// file under `enrichments/.tmp/` and rolls to the next segment after the compressed
-/// byte count reaches the configured target. Once all workers have finished,
-/// [`ParallelRollingWriter::finish`] closes every lane and renames the temporary
-/// files into contiguous public part names.
+/// Temp files are published as `part_NNNN.jsonl.gz` only after all lanes finish.
 pub struct ParallelRollingWriter<'a> {
     validator: Option<&'a jsonschema::Validator>,
     failures: &'a Mutex<FailureSink>,
@@ -173,8 +159,7 @@ impl<'a> ParallelRollingWriter<'a> {
         self.lanes[lane].lock().unwrap().push(record)
     }
 
-    /// Write a batch of enrichment records, validating them and grouping them by
-    /// writer lane before taking lane locks.
+    /// Write a batch of enrichment records.
     ///
     /// # Errors
     ///
@@ -204,8 +189,7 @@ impl<'a> ParallelRollingWriter<'a> {
         Ok(())
     }
 
-    /// Validate a record outside any lane lock, diverting it to the failures sink
-    /// when it fails. Returns whether the record should be written.
+    /// Validate a record and return whether it should be written.
     fn validate(&self, record: &Value) -> Result<bool> {
         let Some(validator) = self.validator else {
             return Ok(true);
@@ -221,10 +205,7 @@ impl<'a> ParallelRollingWriter<'a> {
         Ok(false)
     }
 
-    /// Finish all lane writers and publish contiguous public part names.
-    ///
-    /// No public `part_NNNN.jsonl.gz` names are created until all lane-local temp
-    /// files have closed successfully.
+    /// Finish all lane writers and publish contiguous part names.
     ///
     /// # Errors
     ///
@@ -269,10 +250,7 @@ impl<'a> ParallelRollingWriter<'a> {
     }
 }
 
-/// Accumulates records and flushes them to a [`ParallelRollingWriter`] in batches.
-///
-/// Both runners emit records one at a time while scanning; batching amortizes
-/// lane locking. Call [`RecordBatcher::finish`] to flush the remainder.
+/// Accumulates records and flushes them in batches.
 pub(crate) struct RecordBatcher<'w, 'v> {
     writer: &'w ParallelRollingWriter<'v>,
     batch: Vec<Value>,
@@ -317,8 +295,7 @@ struct TempPart {
     path: PathBuf,
 }
 
-/// One writer lane: a rolling sequence of gzip segments. Records reaching a lane
-/// have already passed validation.
+/// One rolling gzip lane.
 struct RollingLaneWriter {
     lane: usize,
     tmp_dir: PathBuf,
@@ -457,7 +434,6 @@ mod tests {
     use comet_enrich_test_support::read_gz_string;
     use serde_json::json;
 
-    /// Common fixture for writer tests.
     fn writer_fixture() -> (tempfile::TempDir, PathBuf, PathBuf, Mutex<FailureSink>) {
         let dir = tempfile::tempdir().unwrap();
         let enrich_dir = dir.path().join("enrichments");
@@ -483,7 +459,6 @@ mod tests {
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0], r#"{"doi":"10.1/a","a":1}"#);
         assert_eq!(lines[1], r#"{"doi":"10.1/b","b":2}"#);
-        // No failures, so the failures file is never created.
         assert!(!failed.exists());
         assert!(!enrich_dir.join(ENRICHMENTS_TMP_DIR).exists());
     }
@@ -522,7 +497,6 @@ mod tests {
     #[test]
     fn invalid_records_are_diverted() {
         let (_dir, enrich_dir, failed, failures) = writer_fixture();
-        // Minimal schema: an object that requires property "a".
         let schema = crate::schema::compile_str(r#"{"type":"object","required":["a"]}"#).unwrap();
         let records = vec![json!({"doi":"10.3/a","a":1}), json!({"doi":"10.3/b","b":2})];
 
@@ -555,11 +529,8 @@ mod tests {
 
     #[test]
     fn divert_failure_fails_the_push() {
-        // A record that must be diverted but cannot be written is an error, not a
-        // silently dropped record.
         let dir = tempfile::tempdir().unwrap();
         let enrich_dir = dir.path().join("enrichments");
-        // A directory where the failures file should go: divert cannot open it.
         let failed = dir.path().join("blocked");
         std::fs::create_dir_all(&failed).unwrap();
         let failures = Mutex::new(FailureSink::create(&failed));

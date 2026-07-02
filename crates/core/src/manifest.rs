@@ -39,8 +39,7 @@ pub struct MethodInfo {
     pub version: &'static str,
 }
 
-/// The content-addressed dedup hash a lookup run used. A mismatched width across a
-/// resume silently breaks the hash join, so it is pinned and recorded here.
+/// Dedup hash used by a lookup run.
 #[derive(Debug, Clone, Copy, Serialize)]
 pub struct HashInfo {
     pub algorithm: &'static str,
@@ -72,7 +71,7 @@ pub struct ArtifactPaths {
     pub enrichments_failed: String,
 }
 
-/// The standardized stats block: everything quantitative about the run.
+/// Quantitative run summary.
 #[derive(Debug, Serialize)]
 pub struct Report {
     pub counters: RunStats,
@@ -84,13 +83,7 @@ pub struct Report {
     pub stage_timings_ms: StageTimings,
 }
 
-/// How much of the in-scope corpus the method enriched.
-///
-/// "In scope" is record-level on the transform path (records the extractor
-/// selected) and unit-level on the staged path (each extraction — a person, a
-/// funding reference). `records_enriched` is the count of enrichment records
-/// emitted; since each unit yields at most one record, `coverage_rate` stays a true
-/// fraction in `[0, 1]`.
+/// How much of the in-scope input was enriched.
 #[derive(Debug, Serialize)]
 pub struct Coverage {
     pub records_in_scope: u64,
@@ -99,8 +92,7 @@ pub struct Coverage {
 }
 
 impl Coverage {
-    /// Coverage with the enrichment rate derived from the two counts (an empty
-    /// in-scope corpus yields a rate of `0.0` rather than dividing by zero).
+    /// Build coverage counts, using `0.0` for an empty in-scope corpus.
     #[must_use]
     #[allow(clippy::cast_precision_loss)]
     pub fn new(records_in_scope: u64, records_enriched: u64) -> Self {
@@ -134,8 +126,7 @@ impl Validation {
     }
 }
 
-/// Match-service quality block. Populated by the staged runner; defined here so
-/// the report shape is stable across methods.
+/// Match-service quality block.
 #[derive(Debug, Serialize)]
 pub struct MatchSummary {
     pub unique_inputs: u64,
@@ -162,8 +153,7 @@ pub struct MatchFailureTaxonomy {
 }
 
 impl MatchFailureTaxonomy {
-    /// Inputs that were never resolved (timeouts and errors alike). A genuine
-    /// no-match is an answer; these are data loss, so they feed [`exit_status`].
+    /// Inputs that were never resolved.
     #[must_use]
     pub fn lost(&self) -> u64 {
         self.timeout + self.error
@@ -176,13 +166,6 @@ pub const EXIT_SUCCESS: &str = "success";
 pub const EXIT_PARTIAL: &str = "partial";
 
 /// Derive a run's manifest `exit_status`.
-///
-/// A run is [`EXIT_SUCCESS`] only when it made a complete pass with no data-losing
-/// condition. Any input-file read failure, schema-validation failure, unresolved
-/// match-service lookup (a batch error or timeout — see
-/// [`MatchFailureTaxonomy::lost`]), or an incomplete staged pipeline downgrades it
-/// to [`EXIT_PARTIAL`], so the manifest never certifies a lossy run as a full
-/// success.
 #[must_use]
 pub fn exit_status(
     files_failed: u64,
@@ -197,8 +180,7 @@ pub fn exit_status(
     }
 }
 
-/// Wall time per stage, in milliseconds. The transform path sets only `total`;
-/// the staged runner fills the per-stage fields.
+/// Wall time per stage, in milliseconds.
 #[derive(Debug, Default, Clone, Serialize)]
 pub struct StageTimings {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -219,12 +201,7 @@ pub struct RunMeta {
 }
 
 impl Manifest {
-    /// Build the run manifest from the run counters and caller metadata.
-    ///
-    /// `out_of_scope` lists the skip reasons that mean the method's extractor did
-    /// not select a record; those are subtracted from `records_scanned` to get
-    /// `records_in_scope`. `records_enriched` is `emitted` on the transform path
-    /// (one enrichment per record).
+    /// Build the run manifest for a transform method.
     #[must_use]
     pub fn build(
         stats: &RunStats,
@@ -249,10 +226,7 @@ impl Manifest {
         Self::envelope(meta, None, exit_status, report)
     }
 
-    /// Build the run manifest for a lookup method from a [`Report`] the staged
-    /// runner already assembled (coverage, match block, validation, stage timings).
-    ///
-    /// `hash` records the dedup-hash width the run was pinned to.
+    /// Build the run manifest for a lookup method.
     #[must_use]
     pub fn from_report(meta: &RunMeta, exit_status: &str, report: Report, hash: HashInfo) -> Self {
         Self::envelope(meta, Some(hash), exit_status, report)

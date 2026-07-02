@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
 
-/// Classifies a per-file failure so a runner can react appropriately.
+/// Classifies per-file failures.
 pub(crate) enum FileError {
     /// The input file could not be read. Counted as a failed file; the run
     /// continues with the other files.
@@ -17,9 +17,7 @@ pub(crate) enum FileError {
     Fatal(anyhow::Error),
 }
 
-/// Discover the input `*.jsonl.gz` files under `dir`, recursively, in stable
-/// sorted order (so each file's index, and thus its output part name, is stable
-/// across runs for a fixed input set).
+/// Discover input `*.jsonl.gz` files under `dir`, recursively and in sorted order.
 ///
 /// # Errors
 ///
@@ -44,11 +42,7 @@ pub(crate) fn sorted_glob(pattern: &str) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
-/// Own the `&'static str` skip-reason keys collected during a run.
-///
-/// Both run paths count skips under `&'static str` reasons while scanning, but the
-/// shared [`crate::RunStats::skipped`] shape (and the staged path's JSON stats
-/// sidecar) needs owned keys.
+/// Own the skip-reason keys collected during a run.
 pub(crate) fn own_skips(skipped: BTreeMap<&'static str, u64>) -> BTreeMap<String, u64> {
     skipped
         .into_iter()
@@ -65,12 +59,7 @@ pub(crate) struct ScanTally {
     pub malformed: u64,
 }
 
-/// Scan a `.jsonl` reader line by line: skip blank lines, count unreadable or
-/// unparseable lines as malformed, and hand each parsed JSON record to `on_record`.
-///
-/// Both run paths share this preamble so the blank/malformed/scanned policy lives in
-/// one place. The reader's own per-line errors are tallied, never propagated; only an
-/// error returned by `on_record` (a fatal write) stops the scan.
+/// Scan a JSONL reader, skipping blank lines and counting malformed lines.
 ///
 /// # Errors
 ///
@@ -99,8 +88,7 @@ pub(crate) fn scan_jsonl_records<E>(
     Ok(tally)
 }
 
-/// Build the standard progress bar over `len` units, shared by every stage so
-/// all bars render the same way.
+/// Build the standard progress bar.
 pub(crate) fn progress_bar(len: u64) -> Result<indicatif::ProgressBar> {
     let pb = indicatif::ProgressBar::new(len);
     pb.set_style(

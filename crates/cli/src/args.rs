@@ -49,7 +49,7 @@ impl IoArgs {
         }
     }
 
-    /// Build the `sources` map recorded in the run manifest.
+    /// Build the manifest `sources` map.
     ///
     /// # Errors
     ///
@@ -73,7 +73,7 @@ impl IoArgs {
     }
 }
 
-/// Parse a `name=YYYY-MM-DD` source-release-date argument.
+/// Parse `name=YYYY-MM-DD`.
 fn parse_source_release(s: &str) -> Result<(String, String), String> {
     let (name, date) = s
         .split_once('=')
@@ -87,7 +87,7 @@ fn parse_source_release(s: &str) -> Result<(String, String), String> {
     Ok((name.to_owned(), date.to_owned()))
 }
 
-/// Cheap `YYYY-MM-DD` shape check (digits and dashes in the right positions).
+/// Check the `YYYY-MM-DD` shape.
 fn is_iso_date(s: &str) -> bool {
     let b = s.as_bytes();
     b.len() == 10
@@ -97,7 +97,7 @@ fn is_iso_date(s: &str) -> bool {
         })
 }
 
-/// Parse a strictly positive integer CLI value into any `u64`-convertible type.
+/// Parse a positive integer CLI value.
 fn parse_positive<T: TryFrom<u64>>(s: &str) -> Result<T, String> {
     let n = s
         .parse::<u64>()
@@ -170,10 +170,7 @@ pub struct RunArgs {
 }
 
 impl RunArgs {
-    /// Build the output validator for this run.
-    ///
-    /// Returns `None` when `--no-validate` is set. Otherwise uses `--schema`, or the
-    /// built-in schema when no custom schema is provided.
+    /// Build the output validator.
     ///
     /// # Errors
     ///
@@ -229,8 +226,7 @@ pub struct LookupArgs {
     )]
     pub ror_timeout: u64,
 
-    /// Width of the content-addressed dedup hash. Use 128 if a 64-bit collision
-    /// is reported.
+    /// Dedup hash width. Use 128 if a 64-bit collision is reported.
     #[arg(
         long,
         value_enum,
@@ -245,7 +241,7 @@ pub struct LookupArgs {
     pub from_scratch: bool,
 }
 
-/// Dedup-hash width, exposed on the CLI as `--hash-bits {64,128}`.
+/// Dedup hash width.
 #[derive(ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum HashBitsArg {
     /// xxh3-64, 16 hex chars.
