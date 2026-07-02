@@ -10,7 +10,7 @@ mod crosswalk;
 mod identifiers;
 mod parser;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use comet_enrich_core::{
     EnrichmentAction, EnrichmentMethod, EnrichmentParts, Extracted, HashBits, LookupConfig,
     Lookups, RorLookup,
@@ -18,9 +18,7 @@ use comet_enrich_core::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
-use std::fs::File;
 use std::path::PathBuf;
-use std::sync::OnceLock;
 
 /// Configuration for funder matching.
 pub struct Config {
@@ -55,26 +53,21 @@ pub struct FundingExtraction {
 /// Matches DataCite funder names to ROR IDs.
 pub struct Funders {
     hash_bits: HashBits,
-    ror_file: PathBuf,
-    crosswalk: OnceLock<HashMap<String, String>>,
+    /// Bare Crossref Funder ID to ROR ID.
+    crosswalk: HashMap<String, String>,
 }
 
 impl Funders {
-    /// Build the funder matcher and validate the ROR registry path.
+    /// Build the funder matcher, validating the ROR registry up front.
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "matches the other method constructors"
+    )]
     pub fn try_new(config: Config) -> Result<Self> {
-        File::open(&config.ror_file)
-            .with_context(|| format!("opening ROR registry {}", config.ror_file.display()))?;
         Ok(Self {
             hash_bits: config.lookup.hash_bits,
-            ror_file: config.ror_file,
-            crosswalk: OnceLock::new(),
+            crosswalk: crosswalk::load(&config.ror_file)?,
         })
-    }
-
-    /// Crossref Funder ID to ROR map, parsed once.
-    fn crosswalk(&self) -> &HashMap<String, String> {
-        self.crosswalk
-            .get_or_init(|| crosswalk::load(&self.ror_file).unwrap_or_else(|e| panic!("{e:#}")))
     }
 
     fn has_existing_resolution(&self, extraction: &FundingExtraction) -> bool {
@@ -87,7 +80,7 @@ impl Funders {
         if id_type.eq_ignore_ascii_case("ROR") {
             return true;
         }
-        id_type.eq_ignore_ascii_case("Crossref Funder ID") && self.crosswalk().contains_key(id)
+        id_type.eq_ignore_ascii_case("Crossref Funder ID") && self.crosswalk.contains_key(id)
     }
 }
 
@@ -237,6 +230,19 @@ mod tests {
                 ror_file: PathBuf::from("__missing_ror__.json"),
             }),
             "opening ROR registry",
+        );
+    }
+
+    #[test]
+    fn try_new_errors_on_malformed_registry() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(b"not json").unwrap();
+        assert_err_contains(
+            Funders::try_new(Config {
+                lookup: lookup_config(),
+                ror_file: file.path().to_path_buf(),
+            }),
+            "parsing ROR registry",
         );
     }
 
