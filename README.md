@@ -12,6 +12,17 @@ It currently provides three enrichment methods:
 - **affiliations**: match creator affiliation strings to ROR IDs.
 - **funders**: match funder names to ROR IDs.
 
+## Install
+
+Install the latest release binary and shell completions with:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/cometadata/comet-enrich/main/install.sh | sh
+```
+
+See [Installation](docs/installation.md) for pinning a version, supported platforms, Docker
+usage, and building from source.
+
 ## Requirements
 
 - **Rust 1.85+ (edition 2024)**: install via [rustup](https://rustup.rs/)

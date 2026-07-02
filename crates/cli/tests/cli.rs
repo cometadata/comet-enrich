@@ -34,6 +34,44 @@ fn cli_help_lists_every_method() {
 }
 
 #[test]
+fn cli_completions_emit_shell_scripts() {
+    // Bash defines and registers a completion function.
+    cli()
+        .args(["completions", "bash"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("_comet-enrich"))
+        .stdout(predicate::str::contains("complete"));
+    // Zsh scripts start with the compdef header.
+    cli()
+        .args(["completions", "zsh"])
+        .assert()
+        .success()
+        .stdout(predicate::str::starts_with("#compdef comet-enrich"));
+    // Fish registers per-command completions, including the subcommands.
+    cli()
+        .args(["completions", "fish"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("complete -c comet-enrich"))
+        .stdout(predicate::str::contains("affiliations"));
+}
+
+#[test]
+fn cli_completions_help_shows_install_instructions() {
+    cli()
+        .args(["completions", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "source <(comet-enrich completions bash)",
+        ))
+        .stdout(predicate::str::contains(
+            "~/.config/fish/completions/comet-enrich.fish",
+        ));
+}
+
+#[test]
 fn cli_stage_help_displays() {
     cli()
         .args(["affiliations", "query", "--help"])

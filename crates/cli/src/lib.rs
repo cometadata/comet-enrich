@@ -10,7 +10,7 @@ pub mod args;
 
 use anyhow::Result;
 use args::{IoArgs, LookupArgs, RunArgs, StageArg, init_logging};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use comet_enrichment_core::{
     EnrichmentMethod, EnrichmentTemplate, HashInfo, LookupConfig, Manifest, MarpleClient, MatchHit,
     MatchService, RunMeta, RunStats, Stage, StageTimings, exit_status, pipeline_complete,
@@ -32,6 +32,19 @@ pub struct Cli {
     pub method: Method,
 }
 
+/// Installation instructions shown by `comet-enrich completions --help`.
+const COMPLETIONS_HELP: &str = "\
+Installation:
+  Load at shell startup (always matches the installed binary):
+    bash:  add to ~/.bashrc:                  source <(comet-enrich completions bash)
+    zsh:   add to ~/.zshrc (after compinit):  source <(comet-enrich completions zsh)
+    fish:  add to ~/.config/fish/config.fish: comet-enrich completions fish | source
+
+  Or install once (regenerate after upgrading):
+    bash:  comet-enrich completions bash > ~/.local/share/bash-completion/completions/comet-enrich
+    zsh:   comet-enrich completions zsh > <dir on $fpath>/_comet-enrich
+    fish:  comet-enrich completions fish > ~/.config/fish/completions/comet-enrich.fish";
+
 /// Enrichment method to run.
 #[derive(Subcommand, Debug)]
 pub enum Method {
@@ -51,6 +64,10 @@ pub enum Method {
     /// pipeline. Intermediate files are written to a `.work` directory inside the output
     /// directory, and existing stage outputs there are reused unless `--from-scratch` is used.
     Funders(RorLookupArgs),
+
+    /// Generate a shell completion script on stdout.
+    #[command(after_long_help = COMPLETIONS_HELP)]
+    Completions(CompletionsArgs),
 }
 
 /// Reclassify resource types from `types.resourceType`.
@@ -65,6 +82,14 @@ pub struct ResourceTypeGeneralArgs {
 
     #[command(flatten)]
     pub run: RunArgs,
+}
+
+/// Arguments for the completions subcommand.
+#[derive(clap::Args, Debug)]
+pub struct CompletionsArgs {
+    /// Shell to generate completions for.
+    #[arg(value_enum)]
+    pub shell: clap_complete::Shell,
 }
 
 /// Arguments shared by the ROR lookup methods.
@@ -90,6 +115,7 @@ impl Method {
         match self {
             Method::ResourceTypeGeneral(a) => &a.run,
             Method::Affiliations(a) | Method::Funders(a) => &a.run,
+            Method::Completions(_) => unreachable!("completions returns before run args are read"),
         }
     }
 
@@ -98,12 +124,23 @@ impl Method {
         match self {
             Method::ResourceTypeGeneral(a) => &a.io,
             Method::Affiliations(a) | Method::Funders(a) => &a.io,
+            Method::Completions(_) => unreachable!("completions returns before io args are read"),
         }
     }
 }
 
 /// Run the selected enrichment method.
 pub fn run(cli: Cli) -> Result<()> {
+    // Completions write the script to stdout and skip logging and provenance setup.
+    if let Method::Completions(a) = &cli.method {
+        clap_complete::generate(
+            a.shell,
+            &mut Cli::command(),
+            "comet-enrich",
+            &mut std::io::stdout(),
+        );
+        return Ok(());
+    }
     init_logging(cli.method.run_args().log_level)?;
     // Validate provenance before scanning the corpus or calling the ROR service.
     let template = comet_enrichment_core::load_template(&cli.method.io().provenance)?;
@@ -141,6 +178,7 @@ pub fn run(cli: Cli) -> Result<()> {
                 "funders", &method, &a.io, &a.lookup, &a.run, &template, "funder", a.stage,
             )
         }
+        Method::Completions(_) => unreachable!("handled above"),
     }
 }
 
@@ -464,6 +502,16 @@ mod tests {
         ];
         args.extend_from_slice(extra);
         parse(&args)
+    }
+
+    #[test]
+    fn completions_parses_each_shell_and_rejects_unknown() {
+        for shell in ["bash", "zsh", "fish", "powershell", "elvish"] {
+            let cli = parse(&["comet-enrich", "completions", shell]).unwrap();
+            assert!(matches!(cli.method, Method::Completions(_)));
+        }
+        assert!(parse(&["comet-enrich", "completions", "tcsh"]).is_err());
+        assert!(parse(&["comet-enrich", "completions"]).is_err());
     }
 
     #[test]
