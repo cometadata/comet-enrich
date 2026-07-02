@@ -75,7 +75,7 @@ fn cli_stage_help_displays() {
 }
 
 #[test]
-fn cli_funders_reports_unimplemented() {
+fn cli_funders_validates_ror_file() {
     cli()
         .args([
             "funders",
@@ -90,7 +90,8 @@ fn cli_funders_reports_unimplemented() {
         ])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("funders: not yet implemented"));
+        .stderr(predicate::str::contains("ror.json"))
+        .stderr(predicate::str::contains("not yet implemented").not());
 }
 
 #[test]

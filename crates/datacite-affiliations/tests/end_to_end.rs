@@ -14,7 +14,7 @@ use comet_enrich_test_support::{
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 const MIT_ROR: &str = "https://ror.org/042nb2s44";
@@ -122,7 +122,7 @@ fn run_pipeline() -> (tempfile::TempDir, PathBuf, Report) {
     (dir, output, report)
 }
 
-fn records_by_doi(output: &PathBuf) -> HashMap<String, Value> {
+fn records_by_doi(output: &Path) -> HashMap<String, Value> {
     read_enrichment_parts(output)
         .into_iter()
         .map(|rec| (rec["doi"].as_str().unwrap().to_owned(), rec))

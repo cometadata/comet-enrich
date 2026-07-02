@@ -8,9 +8,8 @@ The method runs as a three-stage pipeline:
 
 1. **extract**: scan the corpus and collect the unique funder names to look up.
 2. **query**: resolve those names with the match service, using Marple's `funder` task.
-3. **reconcile**: join the matches back to the records, look up matched ROR IDs in the ROR registry
-   dataset, and emit enrichment records. This also uses Crossref Funder ID–to–ROR crosswalks from
-   the registry data.
+3. **reconcile**: join the matches back to the records and emit enrichment records, skipping
+   references that already resolve to a ROR.
 
 Running `funders` without a stage runs the whole pipeline. Intermediate files are written to a
 `.work` directory inside `--output`. A later run resumes from completed stages there unless
@@ -21,7 +20,7 @@ Running `funders` without a stage runs the whole pipeline. Intermediate files ar
 - A running **Marple** match service, loaded with ROR data, that matches funder names to
   ROR IDs (see the [Requirements](../../README.md#requirements)).
 - The **ROR registry dataset** (`--ror-file`): the JSON extracted from the ROR data dump, used at
-  the reconcile stage to resolve matched ROR IDs.
+  reconcile to skip references already identified by their Crossref Funder ID.
 
 ## Synopsis
 
@@ -39,11 +38,11 @@ In addition to the [global options](../usage.md#global-options):
 | Option                    | Default                 | Description                                                                                |
 |---------------------------|-------------------------|--------------------------------------------------------------------------------------------|
 | `--ror-service-url <URL>` | `http://localhost:8000` | Base URL of the ROR match service / Marple                                                 |
-| `--ror-file <FILE>`       | _required_              | ROR registry dataset used to reconcile matched ROR IDs                                        |
+| `--ror-file <FILE>`       | _required_              | ROR registry JSON for Crossref Funder ID checks                                             |
 | `--ror-batch-size <N>`    | `50`                    | Inputs per ROR match-service bulk request                                                  |
 | `--ror-concurrency <N>`   | `50`                    | Concurrent ROR match-service requests                                                      |
 | `--ror-timeout <SECS>`    | `30`                    | ROR match-service request timeout in seconds                                               |
-| `--hash-bits <N>`         | `64`                    | Width of the dedup hash (`64` or `128`); fixed for a whole run                             |
+| `--hash-bits <N>`         | `64`                    | Dedup hash width (`64` or `128`)                                                          |
 | `--from-scratch`          | off                     | Ignore existing stage outputs in `.work` and rerun all stages                             |
 
 ## Stages
