@@ -1,7 +1,7 @@
 //! DataCite funder matching.
 //!
-//! Matches funding reference names to ROR IDs. References that already resolve
-//! to ROR are skipped.
+//! Matches funder names to ROR IDs. References with a valid existing ROR ID are
+//! skipped.
 
 // DataCite, ROR, and COMET are names, not Rust identifiers.
 #![allow(clippy::doc_markdown)]
@@ -78,7 +78,8 @@ impl Funders {
             return false;
         };
         if id_type.eq_ignore_ascii_case("ROR") {
-            return true;
+            // Malformed ROR-labelled values still go through name matching.
+            return identifiers::normalize_ror(id).is_some();
         }
         id_type.eq_ignore_ascii_case("Crossref Funder ID") && self.crosswalk.contains_key(id)
     }
@@ -351,6 +352,26 @@ mod tests {
             let parts = method(&dump).map_back(x, &lookups(&[("NSF", NSF_ROR, 0.99)]));
             assert_eq!(parts.len(), 0, "type {id_type}");
         }
+    }
+
+    #[test]
+    fn map_back_enriches_reference_with_invalid_asserted_ror() {
+        // The record claims its identifier is a ROR, but the value is junk.
+        // Trusting the label would skip the reference and leave the junk in
+        // place; instead the name match is applied.
+        let dump = ror_dump_file();
+        let x = extraction(
+            "NSF",
+            Some(("not a valid id", "ROR")),
+            json!({"funderName": "NSF", "funderIdentifier": "not a valid id",
+                   "funderIdentifierType": "ROR"}),
+        );
+
+        let parts = method(&dump).map_back(x, &lookups(&[("NSF", NSF_ROR, 0.99)]));
+
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].enriched["funderIdentifier"], NSF_ROR);
+        assert_eq!(parts[0].original["funderIdentifier"], "not a valid id");
     }
 
     #[test]

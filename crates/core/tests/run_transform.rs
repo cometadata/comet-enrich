@@ -152,6 +152,26 @@ fn run_drives_transform_end_to_end() {
 }
 
 #[test]
+fn corrupt_input_file_is_counted_failed_not_malformed() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input/updated_2024-01");
+    write_gz_lines(
+        &input.join("part_0000.jsonl.gz"),
+        &[r#"{"id":"10.1/a","attributes":{"types":{"resourceType":"Spreadsheet"}}}"#],
+    );
+    fs::create_dir_all(&input).unwrap();
+    fs::write(input.join("part_0001.jsonl.gz"), b"not gzip").unwrap();
+
+    let (template, opts) = transform_setup(&dir);
+    let stats = run(&DatasetTagger, &opts, &template, None).unwrap();
+
+    assert_eq!(stats.files_failed, 1);
+    assert_eq!(stats.files_processed, 1);
+    assert_eq!(stats.lines_malformed, 0);
+    assert_eq!(stats.emitted, 1);
+}
+
+#[test]
 fn many_input_files_with_small_output_write_one_part_by_default() {
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("input/updated_2024-01");

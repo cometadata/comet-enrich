@@ -8,6 +8,7 @@ use std::io::BufRead;
 use std::path::{Path, PathBuf};
 
 /// Classifies per-file failures.
+#[derive(Debug)]
 pub(crate) enum FileError {
     /// The input file could not be read. Counted as a failed file; the run
     /// continues with the other files.
@@ -55,7 +56,7 @@ pub(crate) fn own_skips(skipped: BTreeMap<&'static str, u64>) -> BTreeMap<String
 pub(crate) struct ScanTally {
     /// Lines that parsed into a JSON record.
     pub scanned: u64,
-    /// Lines that could not be read or parsed (blank lines are ignored, not counted).
+    /// Lines that could not be parsed as JSON (blank lines are ignored, not counted).
     pub malformed: u64,
 }
 
@@ -63,20 +64,18 @@ pub(crate) struct ScanTally {
 ///
 /// # Errors
 ///
-/// Returns the error from `on_record` if it fails on any record.
-pub(crate) fn scan_jsonl_records<E>(
+/// Returns [`FileError::Read`] for I/O or decompression errors, and propagates
+/// failures from `on_record`.
+pub(crate) fn scan_jsonl_records(
     reader: impl BufRead,
-    mut on_record: impl FnMut(&Value) -> std::result::Result<(), E>,
-) -> std::result::Result<ScanTally, E> {
+    mut on_record: impl FnMut(&Value) -> Result<(), FileError>,
+) -> Result<ScanTally, FileError> {
     let mut tally = ScanTally::default();
     for line in reader.lines() {
         let line = match line {
             Ok(l) if !l.trim().is_empty() => l,
             Ok(_) => continue,
-            Err(_) => {
-                tally.malformed += 1;
-                continue;
-            }
+            Err(e) => return Err(FileError::Read(e.into())),
         };
         let Ok(rec) = serde_json::from_str::<Value>(&line) else {
             tally.malformed += 1;
@@ -112,4 +111,60 @@ pub(crate) fn make_pool(threads: usize) -> Result<rayon::ThreadPool> {
         .num_threads(n)
         .build()
         .context("building thread pool")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{BufReader, Cursor, Read};
+
+    /// Reader that fails after its buffered prefix.
+    struct FailAfter {
+        data: Cursor<Vec<u8>>,
+    }
+
+    impl Read for FailAfter {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            match self.data.read(buf)? {
+                0 => Err(std::io::Error::other("simulated corrupt stream")),
+                n => Ok(n),
+            }
+        }
+    }
+
+    #[test]
+    fn scan_counts_parse_failures_as_malformed_and_continues() {
+        let input = "{bad json\n{\"a\":1}\n\n";
+        let mut records = 0;
+        let tally = scan_jsonl_records(Cursor::new(input), |_| {
+            records += 1;
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(tally.scanned, 1);
+        assert_eq!(tally.malformed, 1);
+        assert_eq!(records, 1);
+    }
+
+    #[test]
+    fn scan_fails_the_file_on_read_error() {
+        let reader = BufReader::new(FailAfter {
+            data: Cursor::new(b"{\"a\":1}\n".to_vec()),
+        });
+        let mut records = 0;
+        let result = scan_jsonl_records(reader, |_| {
+            records += 1;
+            Ok(())
+        });
+
+        assert_eq!(records, 1, "the good prefix is still scanned");
+        match result {
+            Err(FileError::Read(e)) => {
+                assert!(e.to_string().contains("simulated corrupt stream"));
+            }
+            Err(FileError::Fatal(_)) => panic!("read error must not be fatal"),
+            Ok(_) => panic!("read error must fail the file"),
+        }
+    }
 }

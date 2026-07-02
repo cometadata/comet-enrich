@@ -26,13 +26,13 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::io::{BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
-use tokio::sync::{Mutex as AsyncMutex, Semaphore};
+use tokio::sync::Mutex as AsyncMutex;
 
 // ---------------------------------------------------------------------------
 // Stage planning
@@ -146,6 +146,7 @@ const INPUTS_FILE: &str = "inputs.jsonl";
 const LOOKUPS_FILE: &str = "lookups.jsonl";
 const LOOKUPS_FAILED_FILE: &str = "lookups.failed.jsonl";
 const HASH_BITS_FILE: &str = "hash.bits";
+const INPUTS_FINGERPRINT_FILE: &str = "inputs.fingerprint.json";
 const EXTRACT_STATS_FILE: &str = "extract.stats.json";
 const RECONCILE_STATS_FILE: &str = "reconcile.stats.json";
 
@@ -153,7 +154,7 @@ const RECONCILE_STATS_FILE: &str = "reconcile.stats.json";
 const HISTOGRAM_EDGES: [f64; 6] = [0.0, 0.5, 0.7, 0.8, 0.9, 1.0];
 
 /// One `inputs.jsonl` row.
-#[derive(Clone, Deserialize)]
+#[derive(Deserialize)]
 struct InputRecord {
     hash: String,
     value: String,
@@ -271,6 +272,10 @@ where
     // input path cannot destroy a previous run's outputs.
     if stages.contains(&Stage::Extract) {
         input_files(&io.input)?;
+    } else if only_stage.is_none() {
+        // When extract is skipped, verify the input still matches the saved
+        // fingerprint. Single-stage runs only use existing work artifacts.
+        validate_input_fingerprint(work_path, &io.input)?;
     }
 
     if cfg.from_scratch {
@@ -342,6 +347,160 @@ fn pin_or_validate_hash_bits(work: &Path, hash_bits: HashBits, from_scratch: boo
     }
 }
 
+/// Input fingerprint entry: relative path, compressed size, and gzip trailer CRC32.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct FingerprintFile {
+    path: String,
+    size: u64,
+    gzip_crc32: u32,
+}
+
+/// Identity of the input corpus a work dir was built from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct InputFingerprint {
+    version: u32,
+    files: Vec<FingerprintFile>,
+}
+
+const FINGERPRINT_VERSION: u32 = 2;
+
+fn compute_input_fingerprint(input: &Path, files: &[PathBuf]) -> Result<InputFingerprint> {
+    let mut out = Vec::with_capacity(files.len());
+    for path in files {
+        let meta = fs::metadata(path)
+            .with_context(|| format!("reading metadata for {}", path.display()))?;
+        let rel = path.strip_prefix(input).unwrap_or(path);
+        out.push(FingerprintFile {
+            path: rel.to_string_lossy().into_owned(),
+            size: meta.len(),
+            gzip_crc32: read_gzip_crc32(path, meta.len())?,
+        });
+    }
+    Ok(InputFingerprint {
+        version: FINGERPRINT_VERSION,
+        files: out,
+    })
+}
+
+fn read_gzip_crc32(path: &Path, size: u64) -> Result<u32> {
+    if size < 8 {
+        bail!(
+            "gzip file {} is too small to contain a trailer",
+            path.display()
+        );
+    }
+    let mut file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
+    file.seek(SeekFrom::End(-8))
+        .with_context(|| format!("seeking gzip trailer in {}", path.display()))?;
+    let mut trailer = [0_u8; 8];
+    file.read_exact(&mut trailer)
+        .with_context(|| format!("reading gzip trailer from {}", path.display()))?;
+    Ok(u32::from_le_bytes([
+        trailer[0], trailer[1], trailer[2], trailer[3],
+    ]))
+}
+
+fn write_input_fingerprint(work: &Path, fingerprint: &InputFingerprint) -> Result<()> {
+    let json = serde_json::to_string(fingerprint).context("serializing input fingerprint")?;
+    fs::write(work.join(INPUTS_FINGERPRINT_FILE), json)
+        .with_context(|| format!("writing {INPUTS_FINGERPRINT_FILE}"))
+}
+
+/// Validate the current input against the fingerprint written by extract.
+fn validate_input_fingerprint(work: &Path, input: &Path) -> Result<()> {
+    let files = input_files(input)?;
+    let current = compute_input_fingerprint(input, &files)?;
+    let path = work.join(INPUTS_FINGERPRINT_FILE);
+    if !path.exists() {
+        bail!(
+            "missing {INPUTS_FINGERPRINT_FILE} in {}; resuming would report stale outputs as current \
+             (use --from-scratch to rerun everything)",
+            work.display()
+        );
+    }
+    let body = fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let pinned: InputFingerprint = serde_json::from_str(&body)
+        .with_context(|| format!("parsing {INPUTS_FINGERPRINT_FILE}"))?;
+    if pinned != current {
+        bail!(
+            "input corpus does not match the one this run dir was built from ({}); \
+             resuming would report stale outputs as current \
+             (use --from-scratch to rerun everything, or run a single stage subcommand \
+             such as `reconcile` to reuse the existing work artifacts)",
+            fingerprint_diff(&pinned, &current),
+        );
+    }
+    Ok(())
+}
+
+/// Summarize how the current corpus differs from the pinned fingerprint.
+fn fingerprint_diff(pinned: &InputFingerprint, current: &InputFingerprint) -> String {
+    if pinned.version != current.version {
+        return "fingerprint format changed".to_owned();
+    }
+
+    let pinned_map: BTreeMap<&str, &FingerprintFile> =
+        pinned.files.iter().map(|f| (f.path.as_str(), f)).collect();
+    let current_map: BTreeMap<&str, &FingerprintFile> =
+        current.files.iter().map(|f| (f.path.as_str(), f)).collect();
+
+    let added: Vec<&str> = current
+        .files
+        .iter()
+        .map(|f| f.path.as_str())
+        .filter(|p| !pinned_map.contains_key(p))
+        .collect();
+    let removed: Vec<&str> = pinned
+        .files
+        .iter()
+        .map(|f| f.path.as_str())
+        .filter(|p| !current_map.contains_key(p))
+        .collect();
+    let changed: Vec<&str> = pinned
+        .files
+        .iter()
+        .filter(|f| {
+            current_map
+                .get(f.path.as_str())
+                .is_some_and(|current| current.size != f.size)
+        })
+        .map(|f| f.path.as_str())
+        .collect();
+    let crc_changed: Vec<&str> = pinned
+        .files
+        .iter()
+        .filter(|f| {
+            current_map
+                .get(f.path.as_str())
+                .is_some_and(|current| current.size == f.size && current.gzip_crc32 != f.gzip_crc32)
+        })
+        .map(|f| f.path.as_str())
+        .collect();
+
+    let mut parts = Vec::new();
+    for (what, paths) in [
+        ("added", &added),
+        ("removed", &removed),
+        ("size-changed", &changed),
+        ("crc-changed", &crc_changed),
+    ] {
+        if !paths.is_empty() {
+            let examples: Vec<&str> = paths.iter().take(3).copied().collect();
+            parts.push(format!(
+                "{} {what}, e.g. {}",
+                paths.len(),
+                examples.join(", ")
+            ));
+        }
+    }
+    if parts.is_empty() {
+        // Same paths and sizes, so the serialized form itself differs.
+        "fingerprint format changed".to_owned()
+    } else {
+        parts.join("; ")
+    }
+}
+
 /// Require predecessor stages for an explicit single-stage run.
 fn ensure_predecessors_done(wd: &WorkDir, stage: Stage) -> Result<()> {
     let needed: &[Stage] = match stage {
@@ -397,6 +556,7 @@ fn clear_markers_from(wd: &WorkDir, stage: Stage) -> Result<()> {
 fn clear_extract_artifacts(work: &Path) -> Result<()> {
     lifecycle::recreate_dir(&work.join(EXTRACTIONS_DIR))?;
     lifecycle::remove_file_if_exists(&work.join(INPUTS_FILE))?;
+    lifecycle::remove_file_if_exists(&work.join(INPUTS_FINGERPRINT_FILE))?;
     lifecycle::remove_file_if_exists(&work.join(EXTRACT_STATS_FILE))?;
     Ok(())
 }
@@ -428,6 +588,7 @@ where
 {
     let files = input_files(&io.input)?;
     log::info!("extract: {} input files", files.len());
+    let fingerprint = compute_input_fingerprint(&io.input, &files)?;
 
     let extractions_dir = work.join(EXTRACTIONS_DIR);
     fs::create_dir_all(&extractions_dir)
@@ -445,7 +606,7 @@ where
                     "extract: {}",
                     path.file_name().unwrap().to_string_lossy()
                 ));
-                let agg = match extract_one_file(idx, path, &extractions_dir, method) {
+                let agg = match stream_extract_file(idx, path, &extractions_dir, method) {
                     Ok(agg) => Ok(agg),
                     Err(FileError::Read(e)) => {
                         log::error!("file error {}: {e}", path.display());
@@ -476,6 +637,7 @@ where
     };
     let json = serde_json::to_string(&stats).context("serializing extract stats")?;
     fs::write(work.join(EXTRACT_STATS_FILE), json).context("writing extract.stats.json")?;
+    write_input_fingerprint(work, &fingerprint)?;
     log::info!(
         "extract: {} records scanned, {} unique inputs",
         stats.records_scanned,
@@ -484,7 +646,8 @@ where
     Ok(())
 }
 
-fn extract_one_file<M>(
+/// Stream one corpus file through the method, writing its extractions part.
+fn stream_extract_file<M>(
     idx: usize,
     path: &Path,
     extractions_dir: &Path,
@@ -507,7 +670,7 @@ where
     let mut in_scope_units: u64 = 0;
     let mut skipped: BTreeMap<&'static str, u64> = BTreeMap::new();
 
-    let tally = scan_jsonl_records(reader, |rec| {
+    let scanned = scan_jsonl_records(reader, |rec| {
         match method.extract(rec) {
             crate::method::Extracted::Skip(reason) => {
                 *skipped.entry(reason).or_default() += 1;
@@ -529,7 +692,16 @@ where
             }
         }
         Ok(())
-    })?;
+    });
+    let tally = match scanned {
+        Ok(tally) => tally,
+        Err(e) => {
+            // Remove the partial extraction part before counting this file as failed.
+            drop(part);
+            lifecycle::remove_file_if_exists(&part_path).map_err(FileError::Fatal)?;
+            return Err(e);
+        }
+    };
 
     part.flush()
         .with_context(|| format!("flushing {}", part_path.display()))
@@ -593,70 +765,80 @@ where
     let pb = progress_bar(inputs.len() as u64)?;
     pb.set_message("query");
 
-    let semaphore = Arc::new(Semaphore::new(cfg.ror_concurrency.max(1)));
     let task = task.to_owned();
 
-    let batches: Vec<Vec<InputRecord>> = inputs
-        .chunks(cfg.ror_batch_size.max(1))
-        .map(<[InputRecord]>::to_vec)
-        .collect();
+    // Use bounded workers; each worker claims the next batch from the shared input list.
+    let inputs = Arc::new(inputs);
+    let batch_size = cfg.ror_batch_size.max(1);
+    let n_batches = inputs.len().div_ceil(batch_size);
+    let workers = cfg.ror_concurrency.max(1).min(n_batches);
+    let next_batch = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
-    let mut handles = Vec::with_capacity(batches.len());
-    for batch in batches {
+    let mut handles = Vec::with_capacity(workers);
+    for _ in 0..workers {
         let svc = Arc::clone(&svc);
         let matches_w = Arc::clone(&matches_w);
         let failed_w = Arc::clone(&failed_w);
-        let semaphore = Arc::clone(&semaphore);
+        let inputs = Arc::clone(&inputs);
+        let next_batch = Arc::clone(&next_batch);
         let task = task.clone();
         let pb = pb.clone();
 
         handles.push(tokio::spawn(async move {
-            let _permit = semaphore.acquire().await.expect("semaphore not closed");
-            let values: Vec<String> = batch.iter().map(|r| r.value.clone()).collect();
+            loop {
+                let start = next_batch
+                    .fetch_add(1, Ordering::Relaxed)
+                    .saturating_mul(batch_size);
+                if start >= inputs.len() {
+                    break;
+                }
+                let batch = &inputs[start..(start + batch_size).min(inputs.len())];
+                let values: Vec<String> = batch.iter().map(|r| r.value.clone()).collect();
 
-            match svc.match_bulk(&values, &task).await {
-                Ok(results) => {
-                    let mut hits: Vec<String> = Vec::new();
-                    let mut misses: Vec<String> = Vec::new();
-                    for (rec, res) in batch.iter().zip(results) {
-                        match res {
-                            Some((id, confidence)) => {
-                                let row = LookupRow {
-                                    value: rec.value.clone(),
-                                    hash: rec.hash.clone(),
-                                    lookup: L::from(MatchHit { id, confidence }),
-                                };
-                                hits.push(serde_json::to_string(&row)?);
+                match svc.match_bulk(&values, &task).await {
+                    Ok(results) => {
+                        let mut hits: Vec<String> = Vec::new();
+                        let mut misses: Vec<String> = Vec::new();
+                        for (rec, res) in batch.iter().zip(results) {
+                            match res {
+                                Some((id, confidence)) => {
+                                    let row = LookupRow {
+                                        value: rec.value.clone(),
+                                        hash: rec.hash.clone(),
+                                        lookup: L::from(MatchHit { id, confidence }),
+                                    };
+                                    hits.push(serde_json::to_string(&row)?);
+                                }
+                                None => misses.push(serde_json::to_string(&FailedRow {
+                                    value: &rec.value,
+                                    hash: &rec.hash,
+                                    kind: FAIL_KIND_NO_MATCH,
+                                    error: "no match",
+                                })?),
                             }
-                            None => misses.push(serde_json::to_string(&FailedRow {
-                                value: &rec.value,
-                                hash: &rec.hash,
-                                kind: FAIL_KIND_NO_MATCH,
-                                error: "no match",
-                            })?),
                         }
+                        write_lines(&matches_w, &hits).await?;
+                        write_lines(&failed_w, &misses).await?;
                     }
-                    write_lines(&matches_w, &hits).await?;
-                    write_lines(&failed_w, &misses).await?;
-                }
-                Err(e) => {
-                    // Whole-batch failures are lost inputs.
-                    let error = format!("batch error: {e}");
-                    let lines: Vec<String> = batch
-                        .iter()
-                        .map(|rec| {
-                            serde_json::to_string(&FailedRow {
-                                value: &rec.value,
-                                hash: &rec.hash,
-                                kind: FAIL_KIND_ERROR,
-                                error: &error,
+                    Err(e) => {
+                        // Whole-batch failures are lost inputs.
+                        let error = format!("batch error: {e}");
+                        let lines: Vec<String> = batch
+                            .iter()
+                            .map(|rec| {
+                                serde_json::to_string(&FailedRow {
+                                    value: &rec.value,
+                                    hash: &rec.hash,
+                                    kind: FAIL_KIND_ERROR,
+                                    error: &error,
+                                })
                             })
-                        })
-                        .collect::<Result<_, _>>()?;
-                    write_lines(&failed_w, &lines).await?;
+                            .collect::<Result<_, _>>()?;
+                        write_lines(&failed_w, &lines).await?;
+                    }
                 }
+                pb.inc(batch.len() as u64);
             }
-            pb.inc(batch.len() as u64);
             Ok::<(), anyhow::Error>(())
         }));
     }
@@ -810,9 +992,16 @@ where
 
 /// Assemble a [`Report`] from persisted stage stats.
 fn build_report(work: &Path, wd: &WorkDir, timings: StageTimings) -> Result<Report> {
-    let extract: ExtractStats = read_stats(&work.join(EXTRACT_STATS_FILE), "extract.stats.json")?;
-    let reconcile: ReconcileStats =
-        read_stats(&work.join(RECONCILE_STATS_FILE), "reconcile.stats.json")?;
+    let extract: ExtractStats = read_stats(
+        &work.join(EXTRACT_STATS_FILE),
+        "extract.stats.json",
+        wd.is_complete(Stage::Extract),
+    )?;
+    let reconcile: ReconcileStats = read_stats(
+        &work.join(RECONCILE_STATS_FILE),
+        "reconcile.stats.json",
+        wd.is_complete(Stage::Reconcile),
+    )?;
 
     let counters = RunStats {
         files_processed: extract.files_processed,
@@ -840,8 +1029,14 @@ fn build_report(work: &Path, wd: &WorkDir, timings: StageTimings) -> Result<Repo
 }
 
 /// Read a persisted stats sidecar, defaulting to empty when the stage hasn't run.
-fn read_stats<T: DeserializeOwned + Default>(path: &Path, what: &str) -> Result<T> {
+fn read_stats<T: DeserializeOwned + Default>(path: &Path, what: &str, required: bool) -> Result<T> {
     if !path.exists() {
+        if required {
+            bail!(
+                "{what} is missing even though its stage is marked complete ({})",
+                path.display()
+            );
+        }
         return Ok(T::default());
     }
     let body = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
@@ -983,6 +1178,7 @@ mod tests {
     };
     use serde_json::{Value, json};
     use std::collections::HashMap;
+    use std::io::{Read, Seek, SeekFrom, Write};
     use std::path::PathBuf;
 
     struct TestMethod {
@@ -1195,6 +1391,7 @@ mod tests {
         for f in [
             "extractions/part_0000.jsonl",
             INPUTS_FILE,
+            INPUTS_FINGERPRINT_FILE,
             LOOKUPS_FILE,
             LOOKUPS_FAILED_FILE,
             HASH_BITS_FILE,
@@ -1303,6 +1500,34 @@ mod tests {
     }
 
     #[test]
+    fn corrupt_input_file_is_counted_failed_not_hung() {
+        let first = [json!({ "id": "10.1/mit", "attributes": { "name": "MIT" } })];
+        let second = [json!({ "id": "10.1/nsf", "attributes": { "name": "NSF" } })];
+        let t = TestRun::from_fixture(gz_parts_fixture(&[&first, &second]));
+
+        // Corrupt gzip should fail the file, not hang the scan.
+        fs::write(
+            t.input.join("updated_2024-01/part_0001.jsonl.gz"),
+            b"not gzip",
+        )
+        .unwrap();
+        let report = t.run(true).unwrap();
+
+        assert_eq!(report.counters.files_failed, 1);
+        assert_eq!(report.counters.files_processed, 1);
+        assert!(t.work().join("extractions/part_0000.jsonl").exists());
+        assert!(
+            !t.work().join("extractions/part_0001.jsonl").exists(),
+            "partial extraction part must be removed"
+        );
+        assert_eq!(read_output_dois(&t.output), vec!["10.1/mit".to_owned()]);
+        assert_eq!(
+            crate::exit_status(report.counters.files_failed, 0, 0, true),
+            "partial"
+        );
+    }
+
+    #[test]
     fn from_scratch_with_fewer_inputs_removes_obsolete_extraction_parts() {
         let first = [json!({ "id": "10.1/mit", "attributes": { "name": "MIT" } })];
         let second = [json!({ "id": "10.1/nsf", "attributes": { "name": "NSF" } })];
@@ -1398,6 +1623,122 @@ mod tests {
         assert!(dois.contains(&"10.1/nsf".to_owned()));
     }
 
+    fn copy_tree(src: &Path, dst: &Path) {
+        fs::create_dir_all(dst).unwrap();
+        for entry in fs::read_dir(src).unwrap() {
+            let entry = entry.unwrap();
+            let to = dst.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                copy_tree(&entry.path(), &to);
+            } else {
+                fs::copy(entry.path(), &to).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn rerun_of_complete_pipeline_with_changed_input_errors() {
+        let t = TestRun::new();
+
+        t.run(true).unwrap();
+
+        // Completed markers must not hide a changed input corpus.
+        write_gz_lines(
+            &t.input.join("updated_2024-01/part_0001.jsonl.gz"),
+            &[r#"{"id":"10.1/new","attributes":{"name":"MIT"}}"#],
+        );
+
+        assert_err_contains(t.run(false), "--from-scratch");
+        // The previous outputs are left untouched.
+        assert_eq!(read_output_dois(&t.output).len(), 2);
+    }
+
+    #[test]
+    fn resume_with_size_changed_input_errors() {
+        let t = TestRun::new();
+
+        t.run(true).unwrap();
+        fs::remove_file(t.work().join("reconcile.done")).unwrap();
+
+        // Same file name, different content (and so compressed size).
+        write_gz_lines(
+            &t.input.join("updated_2024-01/part_0000.jsonl.gz"),
+            &[r#"{"id":"10.1/mit","attributes":{"name":"MIT"}}"#],
+        );
+
+        assert_err_contains(t.run(false), "size-changed");
+    }
+
+    #[test]
+    fn resume_with_same_size_crc_changed_input_errors() {
+        let t = TestRun::new();
+
+        t.run(true).unwrap();
+        fs::remove_file(t.work().join("reconcile.done")).unwrap();
+
+        let path = t.input.join("updated_2024-01/part_0000.jsonl.gz");
+        let original_size = fs::metadata(&path).unwrap().len();
+        let mut file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        file.seek(SeekFrom::End(-8)).unwrap();
+        let mut crc = [0_u8; 4];
+        file.read_exact(&mut crc).unwrap();
+        let changed = u32::from_le_bytes(crc) ^ 1;
+        file.seek(SeekFrom::End(-8)).unwrap();
+        file.write_all(&changed.to_le_bytes()).unwrap();
+        drop(file);
+        assert_eq!(fs::metadata(&path).unwrap().len(), original_size);
+
+        assert_err_contains(t.run(false), "crc-changed");
+    }
+
+    #[test]
+    fn resume_with_relocated_corpus_succeeds() {
+        let mut t = TestRun::new();
+
+        t.run(true).unwrap();
+
+        // The fingerprint is independent of the input root path.
+        let moved = t.input.parent().unwrap().join("input_moved");
+        copy_tree(&t.input, &moved);
+        t.input = moved;
+        fs::remove_file(t.work().join("reconcile.done")).unwrap();
+
+        let report = t.run(false).unwrap();
+
+        assert_eq!(report.counters.emitted, 2);
+    }
+
+    #[test]
+    fn resume_without_fingerprint_errors() {
+        let t = TestRun::new();
+
+        t.run(true).unwrap();
+        fs::remove_file(t.work().join(INPUTS_FINGERPRINT_FILE)).unwrap();
+
+        assert_err_contains(t.run(false), "missing inputs.fingerprint.json");
+    }
+
+    #[test]
+    fn single_stage_reconcile_ignores_input_change() {
+        let t = TestRun::new();
+
+        t.run(true).unwrap();
+
+        // Single-stage reconcile uses the existing work dir artifacts.
+        write_gz_lines(
+            &t.input.join("updated_2024-01/part_0001.jsonl.gz"),
+            &[r#"{"id":"10.1/new","attributes":{"name":"MIT"}}"#],
+        );
+
+        let report = t.run_stage(Stage::Reconcile).unwrap();
+
+        assert_eq!(report.counters.emitted, 2);
+    }
+
     #[test]
     fn resume_with_mismatched_hash_width_errors() {
         let t = TestRun::new();
@@ -1426,6 +1767,26 @@ mod tests {
         );
         assert_eq!(again.coverage.records_enriched, 2);
         assert_eq!(again.match_.unwrap().matched, 2);
+    }
+
+    #[test]
+    fn completed_extract_requires_stats_sidecar() {
+        let t = TestRun::new();
+
+        t.run(true).unwrap();
+        fs::remove_file(t.work().join(EXTRACT_STATS_FILE)).unwrap();
+
+        assert_err_contains(t.run(false), "extract.stats.json is missing");
+    }
+
+    #[test]
+    fn completed_reconcile_requires_stats_sidecar() {
+        let t = TestRun::new();
+
+        t.run(true).unwrap();
+        fs::remove_file(t.work().join(RECONCILE_STATS_FILE)).unwrap();
+
+        assert_err_contains(t.run(false), "reconcile.stats.json is missing");
     }
 
     #[test]
@@ -1483,6 +1844,46 @@ mod tests {
         assert_eq!(m.failure_taxonomy.lost(), 3);
         let status = crate::exit_status(0, 0, m.failure_taxonomy.lost(), true);
         assert_eq!(status, "partial");
+    }
+
+    #[test]
+    fn query_covers_every_input_exactly_once_with_more_batches_than_workers() {
+        let records: Vec<Value> = (0..6)
+            .map(|i| json!({ "id": format!("10.1/{i}"), "attributes": { "name": format!("Org {i}") } }))
+            .collect();
+        let t = TestRun::from_fixture(gz_input_fixture(&records));
+
+        let mut c = cfg(HashBits::Bits64, true);
+        c.ror_batch_size = 1;
+        c.ror_concurrency = 2;
+        let report = t.run_with(&c, None, None).unwrap();
+
+        assert_eq!(report.match_.unwrap().unique_inputs, 6);
+
+        // Every unique input is claimed by exactly one worker batch.
+        let mut hashes = Vec::new();
+        for file in [LOOKUPS_FILE, LOOKUPS_FAILED_FILE] {
+            for line in fs::read_to_string(t.work().join(file)).unwrap().lines() {
+                let row: Value = serde_json::from_str(line).unwrap();
+                hashes.push(row["hash"].as_str().unwrap().to_owned());
+            }
+        }
+        assert_eq!(hashes.len(), 6, "no input may be dropped or claimed twice");
+        hashes.sort();
+        hashes.dedup();
+        assert_eq!(hashes.len(), 6);
+    }
+
+    #[test]
+    fn query_with_more_workers_than_batches_completes() {
+        let t = TestRun::new();
+
+        let mut c = cfg(HashBits::Bits64, true);
+        c.ror_batch_size = 100; // all three inputs fit in one batch
+        c.ror_concurrency = 50;
+        let report = t.run_with(&c, None, None).unwrap();
+
+        assert_eq!(report.match_.unwrap().matched, 2);
     }
 
     #[test]

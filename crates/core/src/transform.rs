@@ -44,9 +44,10 @@ struct Counters {
 ///
 /// Returns an error if input files cannot be discovered (including when none are
 /// found), the output directory or files cannot be created, the progress bar
-/// template is invalid, or the rayon pool cannot be built. A write or flush failure also aborts the run, since the
-/// output would be incomplete. Individual file read failures are counted in
-/// [`RunStats::files_failed`] and do not stop the run.
+/// template is invalid, or the rayon pool cannot be built. A write or flush
+/// failure also aborts the run, since the output would be incomplete. File read
+/// failures are counted in [`RunStats::files_failed`]; records already written
+/// are not rolled back.
 pub fn run<M: EnrichmentMethod>(
     method: &M,
     opts: &RunOptions,
