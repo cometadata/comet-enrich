@@ -4,7 +4,7 @@
 #![allow(clippy::module_name_repetitions)]
 
 use crate::dedup::HashBits;
-use crate::run::RunStats;
+use crate::options::RunStats;
 use crate::writer::{ENRICHMENTS_DIR, ENRICHMENTS_FAILED_FILE};
 
 use anyhow::{Context, Result};
@@ -50,7 +50,7 @@ pub struct HashInfo {
 impl From<HashBits> for HashInfo {
     fn from(bits: HashBits) -> Self {
         HashInfo {
-            algorithm: bits.as_str(),
+            algorithm: "xxh3",
             bits: match bits {
                 HashBits::Bits64 => 64,
                 HashBits::Bits128 => 128,
@@ -122,17 +122,14 @@ impl Coverage {
 pub struct Validation {
     pub emitted: u64,
     pub schema_failures: u64,
-    pub schema_failure_taxonomy: BTreeMap<String, u64>,
 }
 
 impl Validation {
-    /// Validation counts with an empty failure taxonomy.
     #[must_use]
     pub fn new(emitted: u64, schema_failures: u64) -> Self {
         Validation {
             emitted,
             schema_failures,
-            schema_failure_taxonomy: BTreeMap::new(),
         }
     }
 }
@@ -164,6 +161,15 @@ pub struct MatchFailureTaxonomy {
     pub error: u64,
 }
 
+impl MatchFailureTaxonomy {
+    /// Inputs that were never resolved (timeouts and errors alike). A genuine
+    /// no-match is an answer; these are data loss, so they feed [`exit_status`].
+    #[must_use]
+    pub fn lost(&self) -> u64 {
+        self.timeout + self.error
+    }
+}
+
 /// Manifest `exit_status` for a run that made a complete pass with no data loss.
 pub const EXIT_SUCCESS: &str = "success";
 /// Manifest `exit_status` for a run that lost data or did not complete all stages.
@@ -172,9 +178,11 @@ pub const EXIT_PARTIAL: &str = "partial";
 /// Derive a run's manifest `exit_status`.
 ///
 /// A run is [`EXIT_SUCCESS`] only when it made a complete pass with no data-losing
-/// condition. Any input-file read failure, schema-validation failure, match-service
-/// batch error, or an incomplete staged pipeline downgrades it to [`EXIT_PARTIAL`],
-/// so the manifest never certifies a lossy run as a full success.
+/// condition. Any input-file read failure, schema-validation failure, unresolved
+/// match-service lookup (a batch error or timeout — see
+/// [`MatchFailureTaxonomy::lost`]), or an incomplete staged pipeline downgrades it
+/// to [`EXIT_PARTIAL`], so the manifest never certifies a lossy run as a full
+/// success.
 #[must_use]
 pub fn exit_status(
     files_failed: u64,
@@ -286,14 +294,14 @@ impl Manifest {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use comet_test_support::assert_close;
+    use comet_enrich_test_support::assert_close;
     use serde_json::json;
 
     #[test]
     fn hash_info_from_hash_bits_records_width() {
         let hash = HashInfo::from(HashBits::Bits128);
 
-        assert_eq!(hash.algorithm, "xxh3-128");
+        assert_eq!(hash.algorithm, "xxh3");
         assert_eq!(hash.bits, 128);
     }
 
@@ -349,7 +357,7 @@ mod tests {
             json!("2024-01-01")
         );
         assert_eq!(value["exit_status"], json!("success"));
-        assert_eq!(value["hash"]["algorithm"], json!("xxh3-128"));
+        assert_eq!(value["hash"]["algorithm"], json!("xxh3"));
         assert_eq!(value["hash"]["bits"], json!(128));
         assert_eq!(
             value["artifact_paths"]["enrichments"],

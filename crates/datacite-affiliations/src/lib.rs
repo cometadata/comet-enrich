@@ -8,7 +8,7 @@
 #![allow(clippy::doc_markdown)]
 
 use anyhow::{Result, bail};
-use comet_enrichment_core::{
+use comet_enrich_core::{
     EnrichmentMethod, EnrichmentParts, Extracted, LookupConfig, Lookups, RorLookup,
 };
 use serde_json::Value;

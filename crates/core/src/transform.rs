@@ -7,16 +7,18 @@
 //! validated at the write boundary when a schema validator is provided.
 
 use crate::artifact_lifecycle as lifecycle;
-use crate::fanout::{FileError, input_files, make_pool, own_skips, scan_jsonl_records};
-use crate::manifest::MANIFEST_FILE;
+use crate::fanout::{
+    FileError, input_files, make_pool, own_skips, progress_bar, scan_jsonl_records,
+};
 use crate::method::{EnrichmentMethod, Extracted, Lookups};
+use crate::options::{RunOptions, RunStats};
 use crate::provenance::{EnrichmentTemplate, build_enrichment_record};
-use crate::run::{RunOptions, RunStats};
-use crate::writer::{ENRICHMENTS_DIR, ENRICHMENTS_FAILED_FILE, FailureSink, ParallelRollingWriter};
+use crate::writer::{
+    ENRICHMENTS_DIR, ENRICHMENTS_FAILED_FILE, FailureSink, ParallelRollingWriter, RecordBatcher,
+};
 
 use anyhow::Result;
 use flate2::read::GzDecoder;
-use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
@@ -40,29 +42,25 @@ struct Counters {
 ///
 /// # Errors
 ///
-/// Returns an error if input files cannot be discovered, the output directory or
-/// files cannot be created, the progress bar template is invalid, or the rayon
-/// pool cannot be built. A write or flush failure also aborts the run, since the
+/// Returns an error if input files cannot be discovered (including when none are
+/// found), the output directory or files cannot be created, the progress bar
+/// template is invalid, or the rayon pool cannot be built. A write or flush failure also aborts the run, since the
 /// output would be incomplete. Individual file read failures are counted in
 /// [`RunStats::files_failed`] and do not stop the run.
 pub fn run<M: EnrichmentMethod>(
     method: &M,
     opts: &RunOptions,
     template: &EnrichmentTemplate,
-    validator: Option<&jsonschema::JSONSchema>,
+    validator: Option<&jsonschema::Validator>,
 ) -> Result<RunStats> {
     let files = input_files(&opts.input)?;
     log::info!("found {} input files", files.len());
 
     let enrich_dir = opts.output.join(ENRICHMENTS_DIR);
-    clear_transform_artifacts(&opts.output)?;
+    lifecycle::clear_run_outputs(&opts.output)?;
     let failed_path = opts.output.join(ENRICHMENTS_FAILED_FILE);
-    // Shared sink for schema-validation failures; creating it clears stale failures.
-    let failures = Mutex::new(FailureSink::create(&failed_path)?);
-
-    if files.is_empty() {
-        return Ok(RunStats::default());
-    }
+    // Shared sink for schema-validation failures.
+    let failures = Mutex::new(FailureSink::create(&failed_path));
 
     let writer = ParallelRollingWriter::create(
         &enrich_dir,
@@ -72,12 +70,7 @@ pub fn run<M: EnrichmentMethod>(
         opts.output_writer_lanes,
     )?;
 
-    let pb = ProgressBar::new(files.len() as u64);
-    pb.set_style(
-        ProgressStyle::default_bar()
-            .template("[{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta}) {msg}")?
-            .progress_chars("#>-"),
-    );
+    let pb = progress_bar(files.len() as u64)?;
 
     let counters = Counters::default();
     let skipped: Mutex<BTreeMap<&'static str, u64>> = Mutex::new(BTreeMap::new());
@@ -87,34 +80,30 @@ pub fn run<M: EnrichmentMethod>(
     // output writer. A read failure is counted and the run continues; a write/flush
     // failure is fatal, so `try_for_each` short-circuits and the error propagates.
     pool.install(|| {
-        files
-            .par_iter()
-            .enumerate()
-            .try_for_each(|(idx, path)| -> Result<()> {
-                pb.set_message(format!(
-                    "processing {}",
-                    path.file_name().unwrap().to_string_lossy()
-                ));
-                match process_file(
-                    idx,
-                    path,
-                    &writer,
-                    opts.batch_size,
-                    method,
-                    template,
-                    &counters,
-                    &skipped,
-                ) {
-                    Ok(()) => {}
-                    Err(FileError::Read(e)) => {
-                        log::error!("file error {}: {e}", path.display());
-                        counters.files_failed.fetch_add(1, Ordering::Relaxed);
-                    }
-                    Err(FileError::Fatal(e)) => return Err(e),
+        files.par_iter().try_for_each(|path| -> Result<()> {
+            pb.set_message(format!(
+                "processing {}",
+                path.file_name().unwrap().to_string_lossy()
+            ));
+            match process_file(
+                path,
+                &writer,
+                opts.batch_size,
+                method,
+                template,
+                &counters,
+                &skipped,
+            ) {
+                Ok(()) => {}
+                Err(FileError::Read(e)) => {
+                    log::error!("file error {}: {e}", path.display());
+                    counters.files_failed.fetch_add(1, Ordering::Relaxed);
                 }
-                pb.inc(1);
-                Ok(())
-            })
+                Err(FileError::Fatal(e)) => return Err(e),
+            }
+            pb.inc(1);
+            Ok(())
+        })
     })?;
 
     let emitted = writer.finish()?;
@@ -134,9 +123,7 @@ pub fn run<M: EnrichmentMethod>(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
 fn process_file<M: EnrichmentMethod>(
-    _file_index: usize,
     path: &Path,
     writer: &ParallelRollingWriter<'_>,
     batch_size: usize,
@@ -152,7 +139,7 @@ fn process_file<M: EnrichmentMethod>(
 
     // This runner handles the transform path, so there are no external lookups.
     let lookups: Lookups<M::Lookup> = HashMap::new();
-    let mut output_batch = Vec::with_capacity(batch_size.max(1));
+    let mut batcher = RecordBatcher::new(writer, batch_size);
 
     let tally = scan_jsonl_records(reader, |rec| {
         match method.extract(rec) {
@@ -162,11 +149,9 @@ fn process_file<M: EnrichmentMethod>(
             Extracted::Items(items) => {
                 for item in items {
                     for parts in method.map_back(item, &lookups) {
-                        output_batch.push(build_enrichment_record(template, parts));
-                        if output_batch.len() >= batch_size.max(1) {
-                            writer.push_batch(&output_batch).map_err(FileError::Fatal)?;
-                            output_batch.clear();
-                        }
+                        batcher
+                            .push(build_enrichment_record(template, parts))
+                            .map_err(FileError::Fatal)?;
                     }
                 }
             }
@@ -174,7 +159,7 @@ fn process_file<M: EnrichmentMethod>(
         Ok(())
     })?;
 
-    writer.push_batch(&output_batch).map_err(FileError::Fatal)?;
+    batcher.finish().map_err(FileError::Fatal)?;
     counters
         .records_scanned
         .fetch_add(tally.scanned, Ordering::Relaxed);
@@ -182,13 +167,6 @@ fn process_file<M: EnrichmentMethod>(
         .lines_malformed
         .fetch_add(tally.malformed, Ordering::Relaxed);
     merge_skips(skipped, local_skips);
-    Ok(())
-}
-
-fn clear_transform_artifacts(output: &Path) -> Result<()> {
-    lifecycle::remove_file_if_exists(&output.join(MANIFEST_FILE))?;
-    lifecycle::recreate_dir(&output.join(ENRICHMENTS_DIR))?;
-    lifecycle::remove_file_if_exists(&output.join(ENRICHMENTS_FAILED_FILE))?;
     Ok(())
 }
 

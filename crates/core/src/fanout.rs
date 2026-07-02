@@ -1,6 +1,6 @@
 //! Shared input-file scanning helpers for the transform and staged runners.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use glob::glob;
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -20,11 +20,21 @@ pub(crate) enum FileError {
 /// Discover the input `*.jsonl.gz` files under `dir`, recursively, in stable
 /// sorted order (so each file's index, and thus its output part name, is stable
 /// across runs for a fixed input set).
+///
+/// # Errors
+///
+/// Returns an error when no input files are found: an empty corpus is
+/// indistinguishable from a mistyped `--input` path, and must not become a
+/// clean-looking empty run.
 pub(crate) fn input_files(dir: &Path) -> Result<Vec<PathBuf>> {
-    sorted_glob(&format!(
+    let files = sorted_glob(&format!(
         "{}/**/*.jsonl.gz",
         dir.to_string_lossy().trim_end_matches('/')
-    ))
+    ))?;
+    if files.is_empty() {
+        bail!("no *.jsonl.gz input files found under {}", dir.display());
+    }
+    Ok(files)
 }
 
 /// Glob `pattern` and return the matches in stable sorted order.
@@ -87,6 +97,18 @@ pub(crate) fn scan_jsonl_records<E>(
         on_record(&rec)?;
     }
     Ok(tally)
+}
+
+/// Build the standard progress bar over `len` units, shared by every stage so
+/// all bars render the same way.
+pub(crate) fn progress_bar(len: u64) -> Result<indicatif::ProgressBar> {
+    let pb = indicatif::ProgressBar::new(len);
+    pb.set_style(
+        indicatif::ProgressStyle::default_bar()
+            .template("[{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta}) {msg}")?
+            .progress_chars("#>-"),
+    );
+    Ok(pb)
 }
 
 /// Build a rayon pool with `threads` workers, or all available CPUs when

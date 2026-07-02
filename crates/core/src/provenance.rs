@@ -165,7 +165,7 @@ pub fn load_template<P: AsRef<Path>>(path: P) -> Result<EnrichmentTemplate> {
 pub fn load_enrichment<P: AsRef<Path>>(path: P) -> Result<EnrichmentConfig> {
     let text = std::fs::read_to_string(path.as_ref())
         .with_context(|| format!("reading {}", path.as_ref().display()))?;
-    let cfg: EnrichmentConfig = serde_yaml::from_str(&text)
+    let cfg: EnrichmentConfig = serde_yaml_ng::from_str(&text)
         .with_context(|| format!("parsing {}", path.as_ref().display()))?;
     validate_enrichment(&cfg)
         .with_context(|| format!("invalid provenance in {}", path.as_ref().display()))?;
@@ -318,7 +318,7 @@ resources:
     relatedIdentifierType: DOI
     relationType: IsDocumentedBy
 "#;
-        let cfg: EnrichmentConfig = serde_yaml::from_str(yaml).unwrap();
+        let cfg: EnrichmentConfig = serde_yaml_ng::from_str(yaml).unwrap();
         EnrichmentTemplate::from_config(&cfg)
     }
 
@@ -407,7 +407,7 @@ resources:
 
     #[test]
     fn load_enrichment_parses_sample_yaml() {
-        let cfg: EnrichmentConfig = serde_yaml::from_str(VALID_YAML).unwrap();
+        let cfg: EnrichmentConfig = serde_yaml_ng::from_str(VALID_YAML).unwrap();
         assert_eq!(cfg.contributors[0].name, "COMET");
         assert_eq!(cfg.resources[0].related_identifier, "10.82461/bpzr-jd55");
         validate_enrichment(&cfg).unwrap();
@@ -433,7 +433,7 @@ resources:
     relationType: "IsDerivedFrom"
     resourceTypeGeneral: "Dataset"
 "#;
-        let cfg: EnrichmentConfig = serde_yaml::from_str(yaml).unwrap();
+        let cfg: EnrichmentConfig = serde_yaml_ng::from_str(yaml).unwrap();
         let err = validate_enrichment(&cfg).unwrap_err().to_string();
         assert!(err.contains("BadType"), "got: {err}");
         assert!(err.contains("contributors[1]"), "got: {err}");
@@ -475,7 +475,7 @@ resources:
     relationType: "IsDerivedFrom"
     resourceTypeGeneral: "Dataset"
 "#;
-        let cfg: EnrichmentConfig = serde_yaml::from_str(yaml).unwrap();
+        let cfg: EnrichmentConfig = serde_yaml_ng::from_str(yaml).unwrap();
         validate_enrichment(&cfg).unwrap();
         let template = EnrichmentTemplate::from_config(&cfg);
 
@@ -529,7 +529,7 @@ resources:
     relationType: "IsDocumentedBy"
     resourceTypeGeneral: "Project"
 "#;
-        let err = serde_yaml::from_str::<EnrichmentConfig>(yaml).unwrap_err();
+        let err = serde_yaml_ng::from_str::<EnrichmentConfig>(yaml).unwrap_err();
         assert!(err.to_string().contains("unknown field"), "got: {err}");
     }
 
@@ -553,7 +553,7 @@ resources:
     relationType: "IsDervedFrom"
     resourceTypeGeneral: "Dataset"
 "#;
-        let cfg: EnrichmentConfig = serde_yaml::from_str(yaml).unwrap();
+        let cfg: EnrichmentConfig = serde_yaml_ng::from_str(yaml).unwrap();
         let err = validate_enrichment(&cfg).unwrap_err().to_string();
         // Report both invalid controlled-vocabulary values in one error.
         assert!(err.contains("contributors[1]"), "got: {err}");
@@ -576,7 +576,7 @@ resources:
     relationType: "IsDocumentedBy"
     resourceTypeGeneral: "Project"
 "#;
-        let cfg: EnrichmentConfig = serde_yaml::from_str(no_dataset).unwrap();
+        let cfg: EnrichmentConfig = serde_yaml_ng::from_str(no_dataset).unwrap();
         let err = validate_enrichment(&cfg).unwrap_err().to_string();
         assert!(err.contains("IsDerivedFrom / Dataset"), "got: {err}");
 
@@ -592,7 +592,7 @@ resources:
     relationType: "IsDerivedFrom"
     resourceTypeGeneral: "Dataset"
 "#;
-        let cfg: EnrichmentConfig = serde_yaml::from_str(no_project).unwrap();
+        let cfg: EnrichmentConfig = serde_yaml_ng::from_str(no_project).unwrap();
         let err = validate_enrichment(&cfg).unwrap_err().to_string();
         assert!(err.contains("IsDocumentedBy / Project"), "got: {err}");
 
@@ -612,7 +612,7 @@ resources:
     relationType: "IsDerivedFrom"
     resourceTypeGeneral: "Dataset"
 "#;
-        let cfg: EnrichmentConfig = serde_yaml::from_str(no_comet).unwrap();
+        let cfg: EnrichmentConfig = serde_yaml_ng::from_str(no_comet).unwrap();
         let err = validate_enrichment(&cfg).unwrap_err().to_string();
         assert!(
             err.contains("COMET / Organizational / Producer"),

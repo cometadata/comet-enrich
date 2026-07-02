@@ -59,14 +59,29 @@ fn create_parent(path: &Path) {
 /// of the test (bind it, e.g. `let (_dir, input, output) = gz_input_fixture(..)`).
 #[must_use]
 pub fn gz_input_fixture(records: &[Value]) -> (TempDir, PathBuf, PathBuf) {
+    gz_parts_fixture(&[records])
+}
+
+/// Lay out a gzip input tree with one part file per record slice and return the
+/// temp dir plus the input and output roots.
+///
+/// Parts are named `part_0000.jsonl.gz`, `part_0001.jsonl.gz`, … under the
+/// snapshot subdirectory. The returned [`TempDir`] must be kept alive for the
+/// duration of the test.
+#[must_use]
+pub fn gz_parts_fixture(parts: &[&[Value]]) -> (TempDir, PathBuf, PathBuf) {
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("input");
     let output = dir.path().join("output");
     fs::create_dir_all(&output).unwrap();
-    write_gz_part(
-        &input.join(INPUT_SUBDIR).join("part_0000.jsonl.gz"),
-        records,
-    );
+    for (idx, records) in parts.iter().enumerate() {
+        write_gz_part(
+            &input
+                .join(INPUT_SUBDIR)
+                .join(format!("part_{idx:04}.jsonl.gz")),
+            records,
+        );
+    }
     (dir, input, output)
 }
 

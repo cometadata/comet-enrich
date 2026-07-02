@@ -1,5 +1,5 @@
 use assert_cmd::Command;
-use comet_test_support::{config_path, gz_input_fixture, read_enrichment_parts};
+use comet_enrich_test_support::{config_path, gz_input_fixture, read_enrichment_parts};
 use predicates::prelude::*;
 use serde_json::{Value, json};
 use std::fs;
@@ -83,7 +83,7 @@ fn cli_stage_help_displays() {
 fn cli_lookup_methods_report_unimplemented() {
     // Lookup methods parse successfully before failing in their constructors.
     let cases: [(&str, &[&str]); 2] = [
-        ("affiliations", &["--ror-file", "ror.json"]),
+        ("affiliations", &[]),
         ("funders", &["--ror-file", "ror.json"]),
     ];
     for (method, extra) in cases {

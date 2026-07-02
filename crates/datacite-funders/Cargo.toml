@@ -8,7 +8,7 @@ rust-version.workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
-comet-enrichment-core = { workspace = true }
+comet-enrich-core = { workspace = true }
 serde_json = { workspace = true }
 
 [lints]

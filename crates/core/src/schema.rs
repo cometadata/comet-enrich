@@ -16,7 +16,7 @@ pub const SCHEMA: &str = include_str!("../../../configs/schema/enrichment_input_
 /// # Errors
 ///
 /// Returns an error if the file cannot be read, parsed, or compiled.
-pub fn compile(path: &Path) -> Result<jsonschema::JSONSchema> {
+pub fn compile(path: &Path) -> Result<jsonschema::Validator> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("reading schema {}", path.display()))?;
     compile_str(&text)
@@ -27,15 +27,15 @@ pub fn compile(path: &Path) -> Result<jsonschema::JSONSchema> {
 /// # Errors
 ///
 /// Returns an error if the text cannot be parsed or compiled.
-pub fn compile_str(text: &str) -> Result<jsonschema::JSONSchema> {
+pub fn compile_str(text: &str) -> Result<jsonschema::Validator> {
     let schema_val: Value = serde_json::from_str(text).context("parsing schema")?;
-    jsonschema::JSONSchema::compile(&schema_val).map_err(|e| anyhow::anyhow!("schema compile: {e}"))
+    jsonschema::validator_for(&schema_val).map_err(|e| anyhow::anyhow!("schema compile: {e}"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use comet_test_support::assert_err_contains;
+    use comet_enrich_test_support::assert_err_contains;
 
     #[test]
     fn compile_str_invalid_json_reports_schema_parse_context() {

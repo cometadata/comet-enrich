@@ -28,12 +28,13 @@ Reference designs:
 
 These already exist in this repo and the plan keeps them:
 
-- Parallel reader for `*.jsonl.gz` data-file inputs (rayon fan-out, glob) in
-  `crates/core/src/reader.rs`.
-- The `EnrichmentMethod` trait with `extract` / `lookup` / `map_back`, where `lookup` has a default
-  no-op so pure transforms ignore it (`crates/core/src/method.rs`). We keep the single-trait shape;
-  we are not splitting it into a separate `LookupMethod` extension. Two small, backward-compatible
-  additions are described in 4a.3.
+- Parallel reader for `*.jsonl.gz` data-file inputs (rayon fan-out, glob), now split across
+  `crates/core/src/fanout.rs` (shared scanning helpers) and `crates/core/src/transform.rs` (the
+  transform runner).
+- The `EnrichmentMethod` trait with `extract` / `map_back` (`crates/core/src/method.rs`). We keep
+  the single-trait shape; we are not splitting it into a separate `LookupMethod` extension. Two
+  small, backward-compatible additions are described in 4a.3. (An early default `lookup` method was
+  removed in the cleanup pass — the runners resolve lookups through `MatchService` directly.)
 - The enrichment-record builder and static provenance template handling
   (`crates/core/src/provenance.rs`: `build_enrichment_record`, `load_template`,
   `EnrichmentTemplate`).
@@ -44,8 +45,8 @@ These already exist in this repo and the plan keeps them:
 - The resource-type-general method, fully ported, including its end-to-end test
   (`crates/datacite-resource-type-general/`).
 - Structured logging and run counters (`RunStats`), extended into `report.json` in Stage 3.
-- Stage-planning scaffolding (`crates/core/src/staged.rs`: `Stage`, `WorkDir`, `stages_to_run`,
-  `LookupConfig`), which is currently unused and gets driven by the staged runner in Stage 6.
+- Stage-planning scaffolding (`Stage`, `WorkDir`, `stages_to_run`, `LookupConfig`), driven by the
+  staged runner in Stage 6 and now living alongside it in `crates/core/src/staged_run.rs`.
 
 ## 2. Comparisons
 
@@ -57,7 +58,7 @@ These already exist in this repo and the plan keeps them:
 | dedup input list | `unique_funder_names.json` / `unique_affiliations.json` | Standardise to `inputs.jsonl`, one row per unique input keyed by hash, in the work area. |
 | `lookups.jsonl` | `ror_matches.jsonl` | Rename. |
 | `lookups.failed.jsonl` | `ror_matches.failed.jsonl` | Rename. |
-| `lookups.checkpoint` | `ror_matches.checkpoint` | Rename. |
+| `lookups.checkpoint` | `ror_matches.checkpoint` | Dropped: no within-stage resume (see 4a.3); `.done` markers are the resume unit. |
 | `enrichments.jsonl` | `enrichments.jsonl` (enrichment format) / `enriched_records.jsonl` (default) | Always the enrichment format, schema valid. Becomes a directory of compressed parts (Stage 2). |
 | `enrichments.failed.jsonl` | none | New. Schema-validation failures diverted here with the validator error (Stage 1). |
 | not in spec contract | `existing_assignments.jsonl`, `existing_assignments_aggregated.jsonl`, `disagreements.jsonl` | Dropped. We follow the spec and do not produce these. The exclusion logic that affects the enrichment output is still kept (see 4a.7 and 4a.8). |
@@ -102,7 +103,6 @@ the S3 upload with an s5cmd exclude rule (for example `--exclude ".work/*"`).
     inputs.jsonl                  unique inputs keyed by hash
     lookups.jsonl
     lookups.failed.jsonl
-    lookups.checkpoint
     extract.done query.done reconcile.done   stage markers
 ```
 
@@ -182,13 +182,9 @@ dependency. Lift the client almost verbatim from
 - `FakeMatchService` behind a `test-support` feature: holds a
   `HashMap<String, (String, f64)>` and returns matches per input. Used to unit-test the staged
   runner without HTTP. The real client's HTTP resilience is tested with wiremock.
-- `Checkpoint` (in `checkpoint.rs`, lifted from the prototype): a set of processed hashes with
-  `save`, `is_processed`, `mark_processed`, persisted to `lookups.checkpoint`. Constructed via
-  `Checkpoint::open(path, from_scratch)` (one constructor; resume on `!from_scratch`, empty +
-  overwrite on `from_scratch`) — Stage 6 passes `cfg.from_scratch`. Lines are trimmed on load.
-  `save` is atomic (writes a sibling `.tmp`, then renames over the file), so a crash mid-write keeps
-  the prior checkpoint. `fsync` and the save *cadence* (per-batch vs once-at-end — a full O(N)
-  rewrite each call) remain Stage-6 decisions (see also §5b).
+- ~~`Checkpoint`~~ — a within-stage resume ledger (`lookups.checkpoint`) was built in Stage 5 and
+  then **deleted** by the post-Stage-6 soundness pass (see 4a.3): the query stage re-runs whole,
+  and the `.done` markers are the only resume unit.
 
 Stage-5 implementation notes (as built):
 - The trait/client deliberately differ from the spec above: the trait is `Send + Sync` (the runner
@@ -312,12 +308,31 @@ lossy run as `success`). Supersedes the within-stage-resume parts of 4a.2 above:
   reports the truth instead of `emitted: 0`. The staged path no longer hardcodes `schema_failures: 0`
   or drops skip reasons.
 - **Honest, shared `exit_status`** (`manifest::exit_status`): `partial` on any of `files_failed`,
-  `schema_failures`, match `failure_taxonomy.error`, or an incomplete pipeline; used by both run
-  paths. A whole-batch lookup error is non-fatal (recorded as `failure_taxonomy.error` → `partial`),
-  not an abort.
+  `schema_failures`, unresolved lookups (`failure_taxonomy.lost()` — batch errors *and* timeouts),
+  or an incomplete pipeline; used by both run paths. A whole-batch lookup error is non-fatal
+  (recorded on each failed row with a structured `kind` → `partial`), not an abort. The
+  timeout/error split within the taxonomy is informational only and cannot affect the verdict.
 - **Coverage is extraction-unit** (decision D3): `records_in_scope` = extraction units the method
   produced, `records_enriched` = `emitted`; since each unit yields ≤1 record, `coverage_rate ∈ [0,1]`.
   This keeps `emitted` identical to the prototypes' "Enriched records" count.
+
+Post-review cleanup pass (July 2026), before the Stage 7/8 ports:
+
+- **Failure rows carry a structured `kind`** (`no_match` / `error`), written by the query stage at
+  the moment the failure happens; the report taxonomy no longer classifies by error-message text,
+  and `exit_status` counts *all* unresolved lookups (timeouts included) toward `partial`.
+- **Guards:** an input directory with no `*.jsonl.gz` files is an error (checked before any
+  artifacts are cleared), and `--from-scratch` combined with a single stage is rejected instead of
+  silently ignored.
+- **Trait slimmed:** `EnrichmentMethod::lookup` was removed (neither runner called it; the ports
+  resolve lookups through `MatchService` directly). The trait is `extract` / `inputs` / `map_back`.
+- **Modules:** `staged.rs` (stage planning) merged into `staged_run.rs`; `run.rs` renamed to
+  `options.rs`. Crates renamed to a single prefix: `comet-enrich-core`,
+  `comet-enrich-test-support`.
+- **UX:** all three staged stages report progress with the same indicatif bar as the transform
+  path; schema validation happens before the writer-lane lock so it parallelizes.
+- **Dependencies:** `serde_yaml` (archived upstream) replaced by `serde_yaml_ng`; `jsonschema`
+  upgraded from 0.18 to the current release (`Validator` / `validator_for` API).
 
 #### 4a.4 On-disk stage contract files
 
@@ -331,16 +346,18 @@ Concrete shapes (all JSONL unless noted), written under `<output>/.work` except 
 - `inputs.jsonl`: `{ hash, value }` per unique input.
 - `lookups.jsonl`: serialized `M::Lookup` keyed by hash. Suggested shape `{ value, hash, ror_id,
   confidence }`.
-- `lookups.failed.jsonl`: `{ value, hash, error }`.
-- `lookups.checkpoint`: processed hashes (one per line).
+- `lookups.failed.jsonl`: `{ value, hash, kind, error }`, where `kind` is `no_match` (the service
+  answered and found nothing) or `error` (the input was never resolved; downgrades the run to
+  `partial`).
 - `enrichments/part_*.jsonl.gz`: schema-valid enrichment records (the final output).
 - `enrichments.failed.jsonl`: `{ record, errors }` for records that failed schema validation.
 - Markers: `extract.done`, `query.done`, `reconcile.done`.
 
 #### 4a.5 report.json
 
-New module `crates/core/src/report.rs`. A `Report` struct serialized to `<output>/report.json`,
-matching the spec shape and built from counters accumulated across stages:
+As built, there is no separate `report.json`: the `Report` struct lives in
+`crates/core/src/manifest.rs` and ships as the `report` block inside `manifest.json` (4a.6). The
+shape below is otherwise as planned:
 
 ```
 {
@@ -353,9 +370,9 @@ matching the spec shape and built from counters accumulated across stages:
 }
 ```
 
-The transform path (reader::run) emits a report with no `match` block; the staged path fills it
-from `lookups.jsonl` / `lookups.failed.jsonl`. Counters come from the existing `RunStats` plus the
-new stage timings.
+The transform path (`transform::run`) emits a report with no `match` block; the staged path fills
+it from `lookups.jsonl` / `lookups.failed.jsonl`. Counters come from the existing `RunStats` plus
+the new stage timings.
 
 #### 4a.6 manifest.json
 
@@ -386,8 +403,8 @@ Crate `crates/datacite-affiliations`. Port the parser from
 
 - `Affiliations::try_new(LookupConfig)` builds the method. Note: after dropping the diagnostic
   files, affiliations does not need the ROR registry for the enrichment output (the matched ROR id
-  comes straight from the match service), so `--ror-file` is effectively unused here (see open
-  items).
+  comes straight from the match service), so the affiliations command has no `--ror-file` flag
+  (decision 8.3, implemented).
 - `type Extraction` = one person (creator or contributor) carrying `doi`, the source person object
   with `affiliation` removed, the record field, and the list of affiliations with their hashes,
   raw values, and any existing ROR id.
@@ -500,9 +517,9 @@ at run end (4a.6), since orchestration lives in Airflow. This also gives DIFF.md
   is read back only behind `.done` stage markers, and the final outputs are not re-read within a run.
   If we want write atomicity it should be one cross-cutting pass (temp file + rename across *all*
   writers), not a one-off on a single file. (Surfaced by the Stage 4 adversarial review of
-  `inputs.jsonl`, but it is a pre-existing property of the Stage 1–2 writer.) Exception:
-  `checkpoint.rs` already writes atomically (temp + rename), since it is the run's resume ledger; the
-  remaining writers and `fsync` are still deferred here.
+  `inputs.jsonl`, but it is a pre-existing property of the Stage 1–2 writer.) Exception: the stage
+  `.done` markers publish atomically (temp + rename), since they are the resume unit; the remaining
+  writers and `fsync` are still deferred here.
 
 ## 6. Implementation order
 
@@ -611,32 +628,24 @@ enrichment record.
 
 Recommendation: Option A for clarity, or Option B if you want resource-type-general untouched.
 
-### 8.3 `--ror-file` requirement for affiliations (gates Stage 7)
+### 8.3 `--ror-file` requirement for affiliations (gates Stage 7) — DECIDED
 
 After dropping the diagnostic files, affiliations' enrichment output uses only the match-service
 result, so it no longer needs the ROR registry. Funders still needs `--ror-file` for the Crossref
 Funder ID to ROR crosswalk exclusion.
 
-- Option A (recommended): make `--ror-file` optional in the shared `LookupArgs`, and have funders
-  validate its presence in `try_new`. Avoids a misleading required-but-unused flag for affiliations.
-- Option B: keep `--ror-file` required for both (already wired); affiliations ignores it. Less
-  churn, but the flag is misleading for affiliations.
+**Decided and implemented** (July 2026 cleanup pass): `--ror-file` moved out of the shared
+`LookupArgs` and `LookupConfig` entirely. Funders has its own required `--ror-file` flag (clap
+enforces it, carried in a funders-local `Config`); the affiliations command has no such flag.
 
-Recommendation: Option A.
-
-### 8.4 Data-file vintage source for `manifest.json` (gates Stage 3)
+### 8.4 Data-file vintage source for `manifest.json` (gates Stage 3) — RESOLVED
 
 `manifest.json` records the data-file vintage; the Airflow run path encodes a trigger timestamp,
 not the vintage.
 
-- Option A (recommended): add an explicit `--vintage` argument that Airflow passes. Unambiguous,
-  since Airflow knows the vintage it triggered on.
-- Option B: derive it from the input path (the DataCite input directory usually encodes it, for
-  example `.../DataCite_Public_Data_File_2024/` or `updated_2024-01`). No new flag, but brittle to
-  path naming.
-- Option C: both, with `--vintage` overriding the derived value.
-
-Recommendation: Option A.
+**Resolved by `--source-release-date`** (a generalisation of Option A): the CLI takes repeatable
+`--source-release-date name=YYYY-MM-DD` arguments, recorded in the manifest's `sources` map (e.g.
+`datacite`, `ror`), so every consumed source carries its release date rather than a single vintage.
 
 ### 8.5 `enrichments.failed.jsonl` location (gates Stage 1)
 

@@ -14,7 +14,7 @@ use tokio::time::sleep;
 
 /// Maximum attempts per batch (one initial request plus retries). Enough to ride
 /// out a brief service blip (e.g. a rolling deploy) without retrying forever.
-const MAX_RETRIES: u32 = 4;
+const MAX_ATTEMPTS: u32 = 4;
 /// Upper bound on a single retry wait, so a hostile or misconfigured `Retry-After`
 /// cannot stall a worker for hours.
 const MAX_RETRY_WAIT: Duration = Duration::from_secs(120);
@@ -166,7 +166,7 @@ impl MatchService for MarpleClient {
             .extend(["match", "bulk"]);
         let body = BulkRequest { inputs };
 
-        for attempt in 0..MAX_RETRIES {
+        for attempt in 0..MAX_ATTEMPTS {
             match self
                 .client
                 .post(url.clone())
@@ -207,7 +207,7 @@ impl MatchService for MarpleClient {
                             inputs.len()
                         ));
                     } else if is_retryable(status) {
-                        if attempt < MAX_RETRIES - 1 {
+                        if attempt < MAX_ATTEMPTS - 1 {
                             // Honour a numeric `Retry-After` (still capped); otherwise
                             // fall back to exponential backoff.
                             let wait = match retry_after_secs(&response) {
@@ -219,7 +219,7 @@ impl MatchService for MarpleClient {
                             continue;
                         }
                         return Err(anyhow!(
-                            "match service returned HTTP {status} after {MAX_RETRIES} attempts"
+                            "match service returned HTTP {status} after {MAX_ATTEMPTS} attempts"
                         ));
                     }
                     // Permanent non-success status: surface the body for diagnostics.
@@ -227,7 +227,7 @@ impl MatchService for MarpleClient {
                     return Err(anyhow!("HTTP {status}: {body}"));
                 }
                 Err(e) => {
-                    if attempt < MAX_RETRIES - 1 {
+                    if attempt < MAX_ATTEMPTS - 1 {
                         let wait = backoff(attempt);
                         log::warn!("request error, retrying in {}s: {e}", wait.as_secs());
                         sleep(wait).await;
@@ -238,7 +238,7 @@ impl MatchService for MarpleClient {
             }
         }
 
-        Err(anyhow!("max retries exceeded"))
+        Err(anyhow!("max attempts exceeded"))
     }
 }
 
@@ -264,12 +264,13 @@ impl FakeMatchService {
         }
     }
 
-    /// Build a fake whose every batch fails, simulating a sustained service outage.
+    /// Build a fake whose every batch fails with `message`, simulating a sustained
+    /// service outage.
     #[must_use]
-    pub(crate) fn erroring() -> Self {
+    pub(crate) fn erroring(message: &str) -> Self {
         Self {
             matches: std::collections::HashMap::new(),
-            error: Some("simulated marple outage".to_owned()),
+            error: Some(message.to_owned()),
         }
     }
 }
@@ -295,7 +296,7 @@ impl MatchService for FakeMatchService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use comet_test_support::assert_err_contains;
+    use comet_enrich_test_support::assert_err_contains;
     use std::collections::HashMap;
 
     #[tokio::test]
@@ -322,7 +323,7 @@ mod tests {
 
     #[tokio::test]
     async fn erroring_fake_fails_every_batch() {
-        let out = FakeMatchService::erroring()
+        let out = FakeMatchService::erroring("simulated marple outage")
             .match_bulk(&["MIT".to_owned()], "affiliation")
             .await;
         assert!(out.is_err());
@@ -334,5 +335,15 @@ mod tests {
             MarpleClient::new("not a url", Duration::from_secs(1)),
             "invalid match-service URL",
         );
+    }
+
+    #[test]
+    fn backoff_grows_exponentially_and_clamps() {
+        assert_eq!(backoff(0), Duration::from_secs(1));
+        assert_eq!(backoff(1), Duration::from_secs(2));
+        assert_eq!(backoff(2), Duration::from_secs(4));
+        // Large attempts clamp to the cap instead of growing into hour-long waits.
+        assert_eq!(backoff(10), MAX_RETRY_WAIT);
+        assert_eq!(backoff(31), MAX_RETRY_WAIT);
     }
 }

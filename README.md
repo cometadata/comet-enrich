@@ -35,9 +35,10 @@ usage, and building from source.
   ```
 
   then follow that repository's README to build and run it.
-- **ROR registry dataset**: for `affiliations` and `funders` only. This is used during
-  reconciliation. Download the ROR data dump from [its DOI](https://doi.org/10.5281/zenodo.6347574),
-  extract the zip, and point `--ror-file` at the JSON file inside.
+- **ROR registry dataset**: for `funders` only, where it supplies the Crossref Funder ID
+  to ROR crosswalk. Download the ROR data dump from
+  [its DOI](https://doi.org/10.5281/zenodo.6347574), extract the zip, and point
+  `--ror-file` at the JSON file inside.
 
 ## Data sources
 

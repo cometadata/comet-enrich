@@ -1,6 +1,6 @@
 //! Wiremock tests for `MarpleClient`.
 
-use comet_enrichment_core::{MarpleClient, MatchService};
+use comet_enrich_core::{MarpleClient, MatchService};
 use std::time::Duration;
 use wiremock::matchers::{body_json, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -186,6 +186,40 @@ async fn match_bulk_retries_after_429() {
     assert_eq!(
         out,
         vec![Some(("https://ror.org/052gg0110".to_owned(), 0.88))]
+    );
+}
+
+#[tokio::test]
+async fn match_bulk_waits_for_numeric_retry_after() {
+    let server = MockServer::start().await;
+    // First call: 429 asking for a one-second wait, consumed after one hit.
+    Mock::given(method("POST"))
+        .and(path("/match/bulk"))
+        .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "1"))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/match/bulk"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "message": { "items": [ { "items": [] } ] }
+        })))
+        .mount(&server)
+        .await;
+
+    let started = std::time::Instant::now();
+    let out = client(server.uri())
+        .match_bulk(&["x".to_owned()], "affiliation")
+        .await
+        .unwrap();
+
+    assert_eq!(out, vec![None]);
+    // The client must wait at least the server-requested second before retrying.
+    assert!(
+        started.elapsed() >= Duration::from_secs(1),
+        "retried after only {:?}",
+        started.elapsed()
     );
 }
 

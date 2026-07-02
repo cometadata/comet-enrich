@@ -2,7 +2,7 @@
 
 use anyhow::{Result, bail};
 use clap::{Args, Subcommand, ValueEnum};
-use comet_enrichment_core::{
+use comet_enrich_core::{
     DEFAULT_OUTPUT_PART_SIZE_MIB, DEFAULT_OUTPUT_WRITER_LANES, HashBits, LookupConfig, RunOptions,
     SCHEMA, SourceRelease, Stage, schema,
 };
@@ -97,26 +97,15 @@ fn is_iso_date(s: &str) -> bool {
         })
 }
 
-fn parse_positive_u64(s: &str) -> Result<u64, String> {
+/// Parse a strictly positive integer CLI value into any `u64`-convertible type.
+fn parse_positive<T: TryFrom<u64>>(s: &str) -> Result<T, String> {
     let n = s
         .parse::<u64>()
         .map_err(|e| format!("expected positive integer, got `{s}`: {e}"))?;
     if n == 0 {
-        Err(format!("expected positive integer, got `{s}`"))
-    } else {
-        Ok(n)
+        return Err(format!("expected positive integer, got `{s}`"));
     }
-}
-
-fn parse_positive_usize(s: &str) -> Result<usize, String> {
-    let n = s
-        .parse::<usize>()
-        .map_err(|e| format!("expected positive integer, got `{s}`: {e}"))?;
-    if n == 0 {
-        Err(format!("expected positive integer, got `{s}`"))
-    } else {
-        Ok(n)
-    }
+    T::try_from(n).map_err(|_| format!("value out of range: `{s}`"))
 }
 
 /// Run and validation options used by every method.
@@ -147,7 +136,7 @@ pub struct RunArgs {
         long,
         default_value_t = DEFAULT_OUTPUT_PART_SIZE_MIB,
         value_name = "MIB",
-        value_parser = parse_positive_u64,
+        value_parser = parse_positive::<u64>,
         help_heading = "Options"
     )]
     pub output_part_size_mib: u64,
@@ -157,7 +146,7 @@ pub struct RunArgs {
         long,
         default_value_t = DEFAULT_OUTPUT_WRITER_LANES,
         value_name = "N",
-        value_parser = parse_positive_usize,
+        value_parser = parse_positive::<usize>,
         help_heading = "Options"
     )]
     pub output_writer_lanes: usize,
@@ -189,7 +178,7 @@ impl RunArgs {
     /// # Errors
     ///
     /// Returns an error if the selected schema cannot be read or compiled.
-    pub fn validator(&self) -> Result<Option<jsonschema::JSONSchema>> {
+    pub fn validator(&self) -> Result<Option<jsonschema::Validator>> {
         if self.no_validate {
             return Ok(None);
         }
@@ -212,10 +201,6 @@ pub struct LookupArgs {
         help_heading = "ROR matching"
     )]
     pub ror_service_url: String,
-
-    /// ROR registry JSON used to reconcile matched IDs.
-    #[arg(long, value_name = "FILE", help_heading = "ROR matching")]
-    pub ror_file: PathBuf,
 
     /// Inputs per ROR match-service request.
     #[arg(
@@ -306,7 +291,6 @@ impl From<&LookupArgs> for LookupConfig {
     fn from(lookup: &LookupArgs) -> Self {
         LookupConfig {
             ror_service_url: lookup.ror_service_url.clone(),
-            ror_file: lookup.ror_file.clone(),
             ror_batch_size: lookup.ror_batch_size,
             ror_concurrency: lookup.ror_concurrency,
             ror_timeout: lookup.ror_timeout,
@@ -331,7 +315,7 @@ pub fn init_logging(level: LevelFilter) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use comet_test_support::assert_err_contains;
+    use comet_enrich_test_support::assert_err_contains;
 
     fn run_args(no_validate: bool, schema: Option<PathBuf>) -> RunArgs {
         RunArgs {

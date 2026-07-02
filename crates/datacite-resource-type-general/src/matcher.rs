@@ -43,8 +43,6 @@ pub struct Matcher {
     pub threshold: f64,
     pub typo_corrections: HashMap<String, String>,
     pub normalized_to_original: HashMap<String, String>,
-    #[allow(dead_code)]
-    pub normalized_values: HashSet<String>,
     pub normalized_values_sorted: Vec<String>,
     pub redundancy_exclusions: Vec<RedundancyRule>,
 }
@@ -64,11 +62,9 @@ pub enum MatchOutcome {
 impl Matcher {
     pub fn from_config(cfg: &crate::config::RulesConfig) -> Self {
         let typo_corrections = cfg.typo_corrections.clone();
-        let mut normalized_values = HashSet::new();
         let mut normalized_to_original = HashMap::new();
         for original in &cfg.reference_values {
             let n = smart_normalize(original, &typo_corrections);
-            normalized_values.insert(n.clone());
             normalized_to_original.insert(n, original.clone());
         }
         let redundancy_exclusions = cfg
@@ -79,13 +75,13 @@ impl Matcher {
                 matches: r.matches.iter().cloned().collect(),
             })
             .collect();
-        let mut normalized_values_sorted: Vec<String> = normalized_values.iter().cloned().collect();
+        let mut normalized_values_sorted: Vec<String> =
+            normalized_to_original.keys().cloned().collect();
         normalized_values_sorted.sort();
         Matcher {
             threshold: cfg.threshold,
             typo_corrections,
             normalized_to_original,
-            normalized_values,
             normalized_values_sorted,
             redundancy_exclusions,
         }
@@ -93,32 +89,23 @@ impl Matcher {
 
     pub fn fuzzy_match(&self, text: &str) -> MatchOutcome {
         let normalized = smart_normalize(text, &self.typo_corrections);
-        if let Some(orig) = self.normalized_to_original.get(&normalized) {
-            if self.is_redundant(&normalized, orig) {
-                return MatchOutcome::Redundant;
-            }
-            return MatchOutcome::Matched(orig.clone());
+        if let Some(outcome) = self.resolve(&normalized, &normalized) {
+            return outcome;
         }
         let tokens: Vec<&str> = text.split_whitespace().collect();
         if tokens.len() > 1 {
             let concat: String = tokens.iter().map(|t| t.trim().to_lowercase()).collect();
-            let n = smart_normalize(&concat, &self.typo_corrections);
-            if let Some(orig) = self.normalized_to_original.get(&n) {
-                if self.is_redundant(&normalized, orig) {
-                    return MatchOutcome::Redundant;
-                }
-                return MatchOutcome::Matched(orig.clone());
+            let key = smart_normalize(&concat, &self.typo_corrections);
+            if let Some(outcome) = self.resolve(&key, &normalized) {
+                return outcome;
             }
         }
         let camel = tokenize_camelcase(text);
         if camel.len() > 1 {
             let concat: String = camel.iter().map(String::as_str).collect();
-            let n = smart_normalize(&concat, &self.typo_corrections);
-            if let Some(orig) = self.normalized_to_original.get(&n) {
-                if self.is_redundant(&normalized, orig) {
-                    return MatchOutcome::Redundant;
-                }
-                return MatchOutcome::Matched(orig.clone());
+            let key = smart_normalize(&concat, &self.typo_corrections);
+            if let Some(outcome) = self.resolve(&key, &normalized) {
+                return outcome;
             }
         }
         let mut best_ratio = 0.0;
@@ -131,14 +118,25 @@ impl Matcher {
             }
         }
         if let Some(n_ref) = best_ref {
-            if let Some(orig) = self.normalized_to_original.get(n_ref) {
-                if self.is_redundant(&normalized, orig) {
-                    return MatchOutcome::Redundant;
-                }
-                return MatchOutcome::Matched(orig.clone());
+            if let Some(outcome) = self.resolve(n_ref, &normalized) {
+                return outcome;
             }
         }
         MatchOutcome::NoMatch
+    }
+
+    /// Resolve a normalized vocabulary key against the reference table:
+    /// `Matched` with the original reference value, `Redundant` when a redundancy
+    /// rule covers the (input, match) pair, or `None` when the key is unknown.
+    /// Redundancy is always judged on the normalized *input*, not the key variant
+    /// that happened to hit the table.
+    fn resolve(&self, key: &str, normalized_input: &str) -> Option<MatchOutcome> {
+        let orig = self.normalized_to_original.get(key)?;
+        if self.is_redundant(normalized_input, orig) {
+            Some(MatchOutcome::Redundant)
+        } else {
+            Some(MatchOutcome::Matched(orig.clone()))
+        }
     }
 
     fn is_redundant(&self, normalized_input: &str, matched: &str) -> bool {
@@ -225,8 +223,10 @@ mod tests {
         // the original DataCite type names for output.
         let cfg = rules(&["JournalArticle", "Dataset"], 0.85, vec![]);
         let m = Matcher::from_config(&cfg);
-        assert!(m.normalized_values.contains("journalarticle"));
-        assert!(m.normalized_values.contains("dataset"));
+        assert_eq!(
+            m.normalized_values_sorted,
+            vec!["dataset".to_string(), "journalarticle".to_string()]
+        );
         assert_eq!(
             m.normalized_to_original.get("journalarticle"),
             Some(&"JournalArticle".to_string())

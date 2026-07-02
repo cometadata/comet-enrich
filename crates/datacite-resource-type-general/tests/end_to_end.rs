@@ -8,11 +8,11 @@
 // Brand names such as DataCite are prose, not Rust identifiers.
 #![allow(clippy::doc_markdown)]
 
-use comet_enrich_datacite_resource_type_general::{Config, ResourceTypeGeneral};
-use comet_enrichment_core::{
+use comet_enrich_core::{
     Manifest, RunMeta, RunOptions, RunStats, SourceRelease, StageTimings, run,
 };
-use comet_test_support::{assert_close, config_path, read_enrichment_parts, write_gz_lines};
+use comet_enrich_datacite_resource_type_general::{Config, ResourceTypeGeneral};
+use comet_enrich_test_support::{assert_close, config_path, read_enrichment_parts, write_gz_lines};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
@@ -76,14 +76,14 @@ fn run_reclassifier() -> (tempfile::TempDir, PathBuf, RunStats) {
     };
 
     let template =
-        comet_enrichment_core::load_template(config_path("provenance/resource_type_general.yaml"))
+        comet_enrich_core::load_template(config_path("provenance/resource_type_general.yaml"))
             .unwrap();
     let method = ResourceTypeGeneral::try_new(Config {
         rules: config_path("reclassification_rules.yaml"),
     })
     .unwrap();
     let validator =
-        comet_enrichment_core::schema::compile(&config_path("schema/enrichment_input_schema.json"))
+        comet_enrich_core::schema::compile(&config_path("schema/enrichment_input_schema.json"))
             .unwrap();
     let stats = run(&method, &opts, &template, Some(&validator)).unwrap();
     (dir, output, stats)

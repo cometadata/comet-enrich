@@ -15,9 +15,7 @@ mod config;
 mod matcher;
 
 use anyhow::Result;
-use comet_enrichment_core::{
-    EnrichmentAction, EnrichmentMethod, EnrichmentParts, Extracted, Lookups,
-};
+use comet_enrich_core::{EnrichmentAction, EnrichmentMethod, EnrichmentParts, Extracted, Lookups};
 use matcher::{MatchOutcome, Matcher};
 use serde_json::{Value, json};
 use std::collections::HashSet;

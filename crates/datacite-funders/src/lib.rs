@@ -7,10 +7,20 @@
 #![allow(clippy::doc_markdown)]
 
 use anyhow::{Result, bail};
-use comet_enrichment_core::{
+use comet_enrich_core::{
     EnrichmentMethod, EnrichmentParts, Extracted, LookupConfig, Lookups, RorLookup,
 };
 use serde_json::Value;
+use std::path::PathBuf;
+
+/// Configuration for the funder matcher.
+pub struct Config {
+    /// Shared lookup configuration.
+    pub lookup: LookupConfig,
+    /// ROR registry JSON used to build the Crossref Funder ID to ROR crosswalk,
+    /// which excludes already-identified funding references from enrichment.
+    pub ror_file: PathBuf,
+}
 
 /// Matches DataCite funder names to ROR organizations.
 ///
@@ -20,13 +30,13 @@ use serde_json::Value;
 pub struct Funders;
 
 impl Funders {
-    /// Builds the funder matcher from its lookup configuration.
+    /// Builds the funder matcher from its configuration.
     ///
     /// # Errors
     ///
     /// Returns an error if the matcher cannot be constructed from the supplied
     /// configuration.
-    pub fn try_new(config: LookupConfig) -> Result<Self> {
+    pub fn try_new(config: Config) -> Result<Self> {
         drop(config);
         bail!("funders: not yet implemented")
     }

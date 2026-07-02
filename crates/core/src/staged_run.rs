@@ -1,23 +1,24 @@
-//! Staged runner for lookup methods.
+//! Staged pipeline for lookup methods: stage planning plus the runner.
 //!
-//! Runs extract, query, and reconcile under `<output>/.work`, using `.done`
-//! markers to resume interrupted runs.
+//! Lookup methods run as extract, query, and reconcile stages under
+//! `<output>/.work`. Each completed stage writes a `.done` marker there, so a
+//! later run can resume from the first incomplete stage.
 
 use crate::artifact_lifecycle as lifecycle;
 use crate::dedup::{DedupStore, HashBits};
 use crate::fanout::{
-    FileError, input_files, make_pool, own_skips, scan_jsonl_records, sorted_glob,
+    FileError, input_files, make_pool, own_skips, progress_bar, scan_jsonl_records, sorted_glob,
 };
 use crate::manifest::{
-    Coverage, HistogramBucket, MANIFEST_FILE, MatchFailureTaxonomy, MatchSummary, Report,
-    StageTimings, Validation,
+    Coverage, HistogramBucket, MatchFailureTaxonomy, MatchSummary, Report, StageTimings, Validation,
 };
 use crate::match_service::{MatchHit, MatchService};
 use crate::method::EnrichmentMethod;
+use crate::options::{RunOptions, RunStats};
 use crate::provenance::{EnrichmentTemplate, build_enrichment_record};
-use crate::run::{RunOptions, RunStats};
-use crate::staged::{Stage, WorkDir, stages_to_run};
-use crate::writer::{ENRICHMENTS_DIR, ENRICHMENTS_FAILED_FILE, FailureSink, ParallelRollingWriter};
+use crate::writer::{
+    ENRICHMENTS_DIR, ENRICHMENTS_FAILED_FILE, FailureSink, ParallelRollingWriter, RecordBatcher,
+};
 
 use anyhow::{Context, Result, bail};
 use flate2::read::GzDecoder;
@@ -27,12 +28,121 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, BufWriter, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 use tokio::sync::{Mutex as AsyncMutex, Semaphore};
+
+// ---------------------------------------------------------------------------
+// Stage planning
+// ---------------------------------------------------------------------------
+
+/// One stage of a lookup pipeline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stage {
+    /// Scan the corpus and collect the unique inputs to look up.
+    Extract,
+    /// Resolve the unique inputs against the match service.
+    Query,
+    /// Join matches back onto records and emit enrichment records.
+    Reconcile,
+}
+
+impl Stage {
+    /// Stages in execution order.
+    pub const ALL: [Stage; 3] = [Stage::Extract, Stage::Query, Stage::Reconcile];
+
+    /// Marker file written when this stage completes.
+    #[must_use]
+    pub fn marker(self) -> &'static str {
+        match self {
+            Stage::Extract => "extract.done",
+            Stage::Query => "query.done",
+            Stage::Reconcile => "reconcile.done",
+        }
+    }
+}
+
+/// Match-service configuration for a lookup method.
+pub struct LookupConfig {
+    /// Base URL of the ROR match service.
+    pub ror_service_url: String,
+    /// Inputs per match-service request.
+    pub ror_batch_size: usize,
+    /// Concurrent match-service requests.
+    pub ror_concurrency: usize,
+    /// Match-service request timeout in seconds.
+    pub ror_timeout: u64,
+    /// Width of the content-addressed dedup hash. Fixed for a whole run: the runner
+    /// keys `inputs.jsonl`/`lookups.jsonl` at this width and a method's `extract`
+    /// hashes occurrences at the same width so `map_back` can index the results.
+    pub hash_bits: HashBits,
+    /// Ignore existing stage outputs and rerun from the start.
+    pub from_scratch: bool,
+}
+
+/// Scratch subdirectory inside a run's output directory, holding the staged
+/// pipeline's intermediate files. Excluded from the S3 upload by the orchestrator.
+pub const WORK_DIR: &str = ".work";
+
+/// Work directory for a staged lookup run.
+pub struct WorkDir {
+    pub path: PathBuf,
+}
+
+impl WorkDir {
+    #[must_use]
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        Self { path: path.into() }
+    }
+
+    /// The work directory for a run whose output directory is `output_dir`
+    /// (always `<output_dir>/.work`).
+    #[must_use]
+    pub fn for_output(output_dir: &Path) -> Self {
+        Self::new(output_dir.join(WORK_DIR))
+    }
+
+    #[must_use]
+    pub fn marker_path(&self, stage: Stage) -> PathBuf {
+        self.path.join(stage.marker())
+    }
+
+    /// Return whether the stage marker exists.
+    #[must_use]
+    pub fn is_complete(&self, stage: Stage) -> bool {
+        self.marker_path(stage).exists()
+    }
+
+    /// Return whether every stage of the pipeline has completed.
+    #[must_use]
+    pub fn all_complete(&self) -> bool {
+        Stage::ALL.iter().all(|&s| self.is_complete(s))
+    }
+}
+
+/// Return the stages that should run.
+///
+/// Completed leading stages are skipped. Once a stage needs to run, all later
+/// stages run too, because rerunning an earlier stage invalidates later outputs.
+#[must_use]
+pub fn stages_to_run(work_dir: &Path, from_scratch: bool) -> Vec<Stage> {
+    if from_scratch {
+        return Stage::ALL.to_vec();
+    }
+    let wd = WorkDir::new(work_dir);
+    Stage::ALL
+        .iter()
+        .skip_while(|&&s| wd.is_complete(s))
+        .copied()
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// On-disk contract
+// ---------------------------------------------------------------------------
 
 const EXTRACTIONS_DIR: &str = "extractions";
 const INPUTS_FILE: &str = "inputs.jsonl";
@@ -63,11 +173,20 @@ struct LookupRow<L> {
     lookup: L,
 }
 
-/// One `lookups.failed.jsonl` row.
+/// `kind` of a failed lookup row: the service answered and found nothing.
+const FAIL_KIND_NO_MATCH: &str = "no_match";
+/// `kind` of a failed lookup row: the input was never resolved (batch error,
+/// timeout). These are data loss and downgrade the run to `partial`.
+const FAIL_KIND_ERROR: &str = "error";
+
+/// One `lookups.failed.jsonl` row. `kind` records the failure category at write
+/// time — the one moment the code knows it exactly — so the report never has to
+/// guess it back from the `error` text.
 #[derive(Serialize)]
 struct FailedRow<'a> {
     value: &'a str,
     hash: &'a str,
+    kind: &'static str,
     error: &'a str,
 }
 
@@ -119,28 +238,29 @@ impl ExtractAgg {
 ///
 /// `io` supplies the input and output directories (the output dir is the run dir);
 /// the work area is always `<output>/.work`. `cfg` carries the match-service URL,
-/// batch size, concurrency, timeout, and the resume flag. `svc` is shared across the
-/// query stage's concurrent requests. `hash_bits` selects the dedup-hash width; it
-/// is pinned in the run dir on the first run and a mismatched resume is refused.
-/// `task` is the match-service task name (`"affiliation"` / `"funder"`). When
-/// `only_stage` is set, exactly that stage runs (its predecessors must have already
-/// completed); otherwise the runner resumes from the first incomplete stage. The
-/// dedup-hash width is taken from `cfg.hash_bits`.
+/// batch size, concurrency, timeout, the resume flag, and the dedup-hash width;
+/// the width is pinned in the run dir on the first run and a mismatched resume is
+/// refused. `svc` is shared across the query stage's concurrent requests. `task`
+/// is the match-service task name (`"affiliation"` / `"funder"`). When
+/// `only_stage` is set, exactly that stage runs (its predecessors must have
+/// already completed); otherwise the runner resumes from the first incomplete
+/// stage.
 ///
 /// # Errors
 ///
-/// Returns an error if the work area cannot be created, a hash-width mismatch is
-/// detected on resume, a requested single stage's predecessors are missing, or any
-/// stage fails (I/O, a hash collision, or the match service erroring a whole batch
-/// after retries).
+/// Returns an error if `from_scratch` is combined with `only_stage`, the input
+/// directory holds no `*.jsonl.gz` files (when extract must run), the work area
+/// cannot be created, a hash-width mismatch is detected on resume, a requested
+/// single stage's predecessors are missing, or any stage fails (I/O, a hash
+/// collision, or the match service erroring a whole batch after retries).
 #[allow(clippy::too_many_arguments)]
 pub fn run_staged<M>(
     method: &M,
     io: &RunOptions,
-    cfg: &crate::LookupConfig,
+    cfg: &LookupConfig,
     svc: &Arc<dyn MatchService>,
     template: &EnrichmentTemplate,
-    validator: Option<&jsonschema::JSONSchema>,
+    validator: Option<&jsonschema::Validator>,
     task: &str,
     only_stage: Option<Stage>,
 ) -> Result<Report>
@@ -149,29 +269,41 @@ where
     M::Extraction: Serialize + DeserializeOwned,
     M::Lookup: Serialize + DeserializeOwned + From<MatchHit> + Send + Sync + 'static,
 {
+    if cfg.from_scratch && only_stage.is_some() {
+        bail!(
+            "--from-scratch cannot be combined with a single stage; \
+             run the full pipeline with --from-scratch, or rerun the stage without it"
+        );
+    }
+
     let wd = WorkDir::for_output(&io.output);
     let work_path = wd.path.as_path();
-    let full_from_scratch = cfg.from_scratch && only_stage.is_none();
 
-    if full_from_scratch {
-        clear_public_run_artifacts(&io.output)?;
+    // Plan the stages before touching anything on disk.
+    let stages = if let Some(stage) = only_stage {
+        ensure_predecessors_done(&wd, stage)?;
+        vec![stage]
+    } else {
+        stages_to_run(work_path, cfg.from_scratch)
+    };
+
+    // Validate the input corpus before clearing any artifacts, so a mistyped
+    // input path cannot destroy a previous run's outputs.
+    if stages.contains(&Stage::Extract) {
+        input_files(&io.input)?;
+    }
+
+    if cfg.from_scratch {
+        lifecycle::clear_run_outputs(&io.output)?;
         lifecycle::remove_dir_if_exists(work_path)?;
     }
 
     fs::create_dir_all(work_path)
         .with_context(|| format!("creating work dir {}", work_path.display()))?;
 
-    let stages = if let Some(stage) = only_stage {
-        ensure_predecessors_done(&wd, stage)?;
-        let repin_hash = stage == Stage::Extract && cfg.from_scratch;
-        pin_or_validate_hash_bits(work_path, cfg.hash_bits, repin_hash)?;
-        vec![stage]
-    } else {
-        // Pin the hash width on the first run, or refuse a resume that asks for a
-        // different one (a width mismatch silently breaks the hash join).
-        pin_or_validate_hash_bits(work_path, cfg.hash_bits, full_from_scratch)?;
-        stages_to_run(work_path, full_from_scratch)
-    };
+    // Pin the hash width on the first run, or refuse a resume that asks for a
+    // different one (a width mismatch silently breaks the hash join).
+    pin_or_validate_hash_bits(work_path, cfg.hash_bits, cfg.from_scratch)?;
 
     let mut timings = StageTimings::default();
     let run_start = Instant::now();
@@ -301,14 +433,7 @@ fn clear_query_artifacts(work: &Path) -> Result<()> {
 
 fn clear_reconcile_artifacts(work: &Path, output: &Path) -> Result<()> {
     lifecycle::remove_file_if_exists(&work.join(RECONCILE_STATS_FILE))?;
-    clear_public_run_artifacts(output)
-}
-
-fn clear_public_run_artifacts(output: &Path) -> Result<()> {
-    lifecycle::remove_file_if_exists(&output.join(MANIFEST_FILE))?;
-    lifecycle::recreate_dir(&output.join(ENRICHMENTS_DIR))?;
-    lifecycle::remove_file_if_exists(&output.join(ENRICHMENTS_FAILED_FILE))?;
-    Ok(())
+    lifecycle::clear_run_outputs(output)
 }
 
 fn elapsed_ms(since: Instant) -> u64 {
@@ -334,13 +459,18 @@ where
         .with_context(|| format!("creating {}", extractions_dir.display()))?;
 
     let files_failed = AtomicU64::new(0);
+    let pb = progress_bar(files.len() as u64)?;
     let pool = make_pool(io.threads)?;
     let agg = pool.install(|| {
         files
             .par_iter()
             .enumerate()
-            .map(
-                |(idx, path)| match extract_one_file(idx, path, &extractions_dir, method) {
+            .map(|(idx, path)| {
+                pb.set_message(format!(
+                    "extract: {}",
+                    path.file_name().unwrap().to_string_lossy()
+                ));
+                let agg = match extract_one_file(idx, path, &extractions_dir, method) {
                     Ok(agg) => Ok(agg),
                     Err(FileError::Read(e)) => {
                         log::error!("file error {}: {e}", path.display());
@@ -348,10 +478,13 @@ where
                         Ok(ExtractAgg::default())
                     }
                     Err(FileError::Fatal(e)) => Err(e),
-                },
-            )
+                };
+                pb.inc(1);
+                agg
+            })
             .try_reduce(ExtractAgg::default, |a, b| Ok(a.merge(b)))
     })?;
+    pb.finish_with_message("extract: done");
 
     agg.dedup
         .write_jsonl(&work.join(INPUTS_FILE), hash_bits)
@@ -444,7 +577,7 @@ where
 /// and `lookups.failed.jsonl`.
 fn run_query<L>(
     svc: Arc<dyn MatchService>,
-    cfg: &crate::LookupConfig,
+    cfg: &LookupConfig,
     work: &Path,
     task: &str,
 ) -> Result<()>
@@ -460,7 +593,7 @@ where
 
 async fn query_async<L>(
     svc: Arc<dyn MatchService>,
-    cfg: &crate::LookupConfig,
+    cfg: &LookupConfig,
     work: &Path,
     task: &str,
 ) -> Result<()>
@@ -486,6 +619,8 @@ where
         return Ok(());
     }
     log::info!("query: {} inputs to resolve", inputs.len());
+    let pb = progress_bar(inputs.len() as u64)?;
+    pb.set_message("query");
 
     let semaphore = Arc::new(Semaphore::new(cfg.ror_concurrency.max(1)));
     let task = task.to_owned();
@@ -502,6 +637,7 @@ where
         let failed_w = Arc::clone(&failed_w);
         let semaphore = Arc::clone(&semaphore);
         let task = task.clone();
+        let pb = pb.clone();
 
         handles.push(tokio::spawn(async move {
             let _permit = semaphore.acquire().await.expect("semaphore not closed");
@@ -524,6 +660,7 @@ where
                             None => misses.push(serde_json::to_string(&FailedRow {
                                 value: &rec.value,
                                 hash: &rec.hash,
+                                kind: FAIL_KIND_NO_MATCH,
                                 error: "no match",
                             })?),
                         }
@@ -541,6 +678,7 @@ where
                             serde_json::to_string(&FailedRow {
                                 value: &rec.value,
                                 hash: &rec.hash,
+                                kind: FAIL_KIND_ERROR,
                                 error: &error,
                             })
                         })
@@ -548,6 +686,7 @@ where
                     write_lines(&failed_w, &lines).await?;
                 }
             }
+            pb.inc(batch.len() as u64);
             Ok::<(), anyhow::Error>(())
         }));
     }
@@ -555,6 +694,7 @@ where
     for handle in handles {
         handle.await.context("query task panicked")??;
     }
+    pb.finish_with_message("query: done");
 
     matches_w.lock().await.flush()?;
     failed_w.lock().await.flush()?;
@@ -598,7 +738,7 @@ fn run_reconcile<M>(
     io: &RunOptions,
     work: &Path,
     template: &EnrichmentTemplate,
-    validator: Option<&jsonschema::JSONSchema>,
+    validator: Option<&jsonschema::Validator>,
 ) -> Result<()>
 where
     M: EnrichmentMethod,
@@ -618,7 +758,7 @@ where
         .with_context(|| format!("creating {}", enrich_dir.display()))?;
     let failures = Mutex::new(FailureSink::create(
         &io.output.join(ENRICHMENTS_FAILED_FILE),
-    )?);
+    ));
     let writer = ParallelRollingWriter::create(
         &enrich_dir,
         validator,
@@ -627,21 +767,20 @@ where
         io.output_writer_lanes,
     )?;
 
+    let pb = progress_bar(parts.len() as u64)?;
     let pool = make_pool(io.threads)?;
     pool.install(|| {
-        parts.par_iter().enumerate().try_for_each(|(idx, path)| {
-            reconcile_one_part(
-                idx,
-                path,
-                &lookups,
-                method,
-                template,
-                &writer,
-                io.batch_size,
-            )?;
+        parts.par_iter().try_for_each(|path| {
+            pb.set_message(format!(
+                "reconcile: {}",
+                path.file_name().unwrap().to_string_lossy()
+            ));
+            reconcile_one_part(path, &lookups, method, template, &writer, io.batch_size)?;
+            pb.inc(1);
             Ok::<(), anyhow::Error>(())
         })
     })?;
+    pb.finish_with_message("reconcile: done");
 
     let emitted = writer.finish()?;
     let mut failures = failures.lock().unwrap();
@@ -668,9 +807,7 @@ fn load_lookups<L: DeserializeOwned>(path: &Path) -> Result<crate::method::Looku
     Ok(map)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn reconcile_one_part<M>(
-    _idx: usize,
     path: &Path,
     lookups: &crate::method::Lookups<M::Lookup>,
     method: &M,
@@ -684,7 +821,7 @@ where
 {
     let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
     let reader = BufReader::new(file);
-    let mut output_batch = Vec::with_capacity(batch_size.max(1));
+    let mut batcher = RecordBatcher::new(writer, batch_size);
 
     for line in reader.lines() {
         let line = line.with_context(|| format!("reading {}", path.display()))?;
@@ -694,15 +831,10 @@ where
         let extraction: M::Extraction =
             serde_json::from_str(&line).context("parsing extraction row")?;
         for parts in method.map_back(extraction, lookups) {
-            output_batch.push(build_enrichment_record(template, parts));
-            if output_batch.len() >= batch_size.max(1) {
-                writer.push_batch(&output_batch)?;
-                output_batch.clear();
-            }
+            batcher.push(build_enrichment_record(template, parts))?;
         }
     }
-    writer.push_batch(&output_batch)?;
-    Ok(())
+    batcher.finish()
 }
 
 // ---------------------------------------------------------------------------
@@ -761,9 +893,13 @@ struct ConfidenceRow {
     confidence: Option<f64>,
 }
 
-/// One `lookups.failed.jsonl` row, read back only for its error (other fields ignored).
+/// One `lookups.failed.jsonl` row, read back for its failure kind and error text
+/// (other fields ignored).
 #[derive(Deserialize)]
-struct ErrorRow {
+struct FailureRow {
+    /// Absent on rows written by builds that predate the `kind` field.
+    #[serde(default)]
+    kind: Option<String>,
     error: String,
 }
 
@@ -783,8 +919,8 @@ fn build_match_summary(work: &Path) -> Result<MatchSummary> {
     })?;
 
     let mut taxonomy = MatchFailureTaxonomy::default();
-    for_each_jsonl(&work.join(LOOKUPS_FAILED_FILE), |row: ErrorRow| {
-        classify_failure(&row.error, &mut taxonomy);
+    for_each_jsonl(&work.join(LOOKUPS_FAILED_FILE), |row: FailureRow| {
+        classify_failure(row.kind.as_deref(), &row.error, &mut taxonomy);
     })?;
 
     let confidence_histogram = HISTOGRAM_EDGES
@@ -823,12 +959,21 @@ fn histogram_bucket(c: f64) -> usize {
     0
 }
 
-/// Bin a failure error string into the report taxonomy.
-fn classify_failure(error: &str, taxonomy: &mut MatchFailureTaxonomy) {
-    let lower = error.to_ascii_lowercase();
-    if lower.contains("no match") {
+/// Bin one failed lookup row into the report taxonomy.
+///
+/// The verdict comes from the row's `kind` (written when the failure happened),
+/// never from the error text. Rows without a `kind` (from a build that predates
+/// it) count as errors: that can wrongly downgrade an old resume to `partial`,
+/// but can never certify a lossy run as `success`. Within the error kind, the
+/// timeout/error split is inferred from the message; it is informational only
+/// and both count as lost inputs.
+fn classify_failure(kind: Option<&str>, error: &str, taxonomy: &mut MatchFailureTaxonomy) {
+    if kind == Some(FAIL_KIND_NO_MATCH) {
         taxonomy.no_match += 1;
-    } else if lower.contains("timeout") || lower.contains("timed out") {
+        return;
+    }
+    let lower = error.to_ascii_lowercase();
+    if lower.contains("timeout") || lower.contains("timed out") {
         taxonomy.timeout += 1;
     } else {
         taxonomy.error += 1;
@@ -873,14 +1018,15 @@ fn for_each_jsonl<T: DeserializeOwned>(path: &Path, mut f: impl FnMut(T)) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::manifest::MANIFEST_FILE;
     use crate::match_service::{FakeMatchService, RorLookup};
     use crate::method::{EnrichmentAction, EnrichmentParts, Extracted, Lookups};
     use crate::provenance::EnrichmentTemplate;
-    use crate::staged::WORK_DIR;
+
     use async_trait::async_trait;
-    use comet_test_support::{
-        assert_close, assert_err_contains, gz_input_fixture, read_enrichment_parts, write_gz_lines,
-        write_gz_part,
+    use comet_enrich_test_support::{
+        assert_close, assert_err_contains, gz_input_fixture, gz_parts_fixture,
+        read_enrichment_parts, write_gz_lines,
     };
     use serde_json::{Value, json};
     use std::collections::HashMap;
@@ -988,10 +1134,9 @@ mod tests {
         ]
     }
 
-    fn cfg(hash_bits: HashBits, from_scratch: bool) -> crate::LookupConfig {
-        crate::LookupConfig {
+    fn cfg(hash_bits: HashBits, from_scratch: bool) -> LookupConfig {
+        LookupConfig {
             ror_service_url: "http://unused".to_owned(),
-            ror_file: PathBuf::from("unused"),
             ror_batch_size: 2,
             ror_concurrency: 2,
             ror_timeout: 30,
@@ -1000,71 +1145,90 @@ mod tests {
         }
     }
 
-    /// Lay out an input dir with one gz part of `sample_records` and return the temp
-    /// roots.
-    fn fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
-        gz_input_fixture(&sample_records())
+    /// A staged-run test rig: a gz input fixture, the funder-shaped test method,
+    /// the fake match service, and an empty provenance template. Tests override
+    /// fields (e.g. swap `svc` for a failing service) before running.
+    struct TestRun {
+        _dir: tempfile::TempDir,
+        input: PathBuf,
+        output: PathBuf,
+        method: TestMethod,
+        svc: Arc<dyn MatchService>,
+        tmpl: EnrichmentTemplate,
     }
 
-    fn two_part_fixture(
-        first: &[Value],
-        second: &[Value],
-    ) -> (tempfile::TempDir, PathBuf, PathBuf) {
-        let dir = tempfile::tempdir().unwrap();
-        let input = dir.path().join("input");
-        let output = dir.path().join("output");
-        fs::create_dir_all(&output).unwrap();
-        write_gz_part(
-            &input.join("updated_2024-01").join("part_0000.jsonl.gz"),
-            first,
-        );
-        write_gz_part(
-            &input.join("updated_2024-01").join("part_0001.jsonl.gz"),
-            second,
-        );
-        (dir, input, output)
-    }
-
-    fn run_opts(input: &Path, output: &Path) -> RunOptions {
-        RunOptions {
-            input: input.to_path_buf(),
-            output: output.to_path_buf(),
-            threads: 1,
-            batch_size: 100,
-            output_part_size_bytes: 256 * 1024 * 1024,
-            output_writer_lanes: 1,
+    impl TestRun {
+        /// Rig over a one-part input of `sample_records`.
+        fn new() -> Self {
+            Self::from_fixture(gz_input_fixture(&sample_records()))
         }
-    }
 
-    /// Run the full staged pipeline with the common test defaults: no validator, the
-    /// `"funder"` task, and all stages. Tests that vary those call `run_staged`.
-    fn run_staged_default(
-        method: &TestMethod,
-        io: &RunOptions,
-        cfg: &crate::LookupConfig,
-        svc: &Arc<dyn MatchService>,
-        template: &EnrichmentTemplate,
-    ) -> Result<Report> {
-        run_staged(method, io, cfg, svc, template, None, "funder", None)
+        fn from_fixture(fixture: (tempfile::TempDir, PathBuf, PathBuf)) -> Self {
+            let (dir, input, output) = fixture;
+            TestRun {
+                _dir: dir,
+                input,
+                output,
+                method: TestMethod {
+                    hash_bits: HashBits::Bits64,
+                },
+                svc: fake_service(),
+                tmpl: template(),
+            }
+        }
+
+        fn opts(&self) -> RunOptions {
+            RunOptions {
+                input: self.input.clone(),
+                output: self.output.clone(),
+                threads: 1,
+                batch_size: 100,
+                output_part_size_bytes: 256 * 1024 * 1024,
+                output_writer_lanes: 1,
+            }
+        }
+
+        fn work(&self) -> PathBuf {
+            self.output.join(WORK_DIR)
+        }
+
+        /// Run the full pipeline with the common test defaults: no validator, the
+        /// `"funder"` task, and all stages.
+        fn run(&self, from_scratch: bool) -> Result<Report> {
+            self.run_with(&cfg(HashBits::Bits64, from_scratch), None, None)
+        }
+
+        /// Run one stage with the common test defaults (a stage run never combines
+        /// with `from_scratch`).
+        fn run_stage(&self, stage: Stage) -> Result<Report> {
+            self.run_with(&cfg(HashBits::Bits64, false), None, Some(stage))
+        }
+
+        /// Fully parameterized run, for tests that vary config, validator, or stage.
+        fn run_with(
+            &self,
+            cfg: &LookupConfig,
+            validator: Option<&jsonschema::Validator>,
+            only_stage: Option<Stage>,
+        ) -> Result<Report> {
+            run_staged(
+                &self.method,
+                &self.opts(),
+                cfg,
+                &self.svc,
+                &self.tmpl,
+                validator,
+                "funder",
+                only_stage,
+            )
+        }
     }
 
     #[test]
     fn full_pipeline_produces_contract_and_match_block() {
-        let (_dir, input, output) = fixture();
-        let method = TestMethod {
-            hash_bits: HashBits::Bits64,
-        };
-        let svc = fake_service();
-        let tmpl = template();
+        let t = TestRun::new();
 
-        let report = run_staged_default(
-            &method,
-            &run_opts(&input, &output),
-            &cfg(HashBits::Bits64, true),
-            &svc,
-            &tmpl,
-        )
-        .unwrap();
+        let report = t.run(true).unwrap();
 
         // Match block is filled from the on-disk artifacts.
         let m = report.match_.expect("match block present");
@@ -1091,7 +1255,7 @@ mod tests {
         assert!(report.stage_timings_ms.reconcile.is_some());
 
         // Expected work artifacts are written.
-        let work = output.join(WORK_DIR);
+        let work = t.work();
         for f in [
             "extractions/part_0000.jsonl",
             INPUTS_FILE,
@@ -1110,7 +1274,7 @@ mod tests {
         );
 
         // The output holds the two enriched records.
-        let dois = read_output_dois(&output);
+        let dois = read_output_dois(&t.output);
         assert_eq!(dois.len(), 2);
         assert!(dois.contains(&"10.1/mit".to_owned()));
         assert!(dois.contains(&"10.1/nsf".to_owned()));
@@ -1129,267 +1293,173 @@ mod tests {
 
     #[test]
     fn only_stage_extract_runs_just_extract() {
-        let (_dir, input, output) = fixture();
-        let method = TestMethod {
-            hash_bits: HashBits::Bits64,
-        };
-        let svc = fake_service();
-        let tmpl = template();
+        let t = TestRun::new();
 
-        run_staged(
-            &method,
-            &run_opts(&input, &output),
-            &cfg(HashBits::Bits64, true),
-            &svc,
-            &tmpl,
-            None,
-            "funder",
-            Some(Stage::Extract),
-        )
-        .unwrap();
+        t.run_stage(Stage::Extract).unwrap();
 
-        let work = output.join(WORK_DIR);
+        let work = t.work();
         assert!(work.join("extract.done").exists());
         assert!(work.join(INPUTS_FILE).exists());
         assert!(!work.join("query.done").exists());
         assert!(!work.join("reconcile.done").exists());
-        assert_eq!(read_output_dois(&output), Vec::<String>::new());
+        assert_eq!(read_output_dois(&t.output), Vec::<String>::new());
     }
 
     #[test]
-    fn only_stage_query_without_extract_errors() {
-        let (_dir, input, output) = fixture();
-        let method = TestMethod {
-            hash_bits: HashBits::Bits64,
-        };
-        let svc = fake_service();
-        let tmpl = template();
+    fn from_scratch_with_single_stage_errors() {
+        let t = TestRun::new();
 
         assert_err_contains(
-            run_staged(
-                &method,
-                &run_opts(&input, &output),
-                &cfg(HashBits::Bits64, true),
-                &svc,
-                &tmpl,
-                None,
-                "funder",
-                Some(Stage::Query),
-            ),
-            "extract",
+            t.run_with(&cfg(HashBits::Bits64, true), None, Some(Stage::Extract)),
+            "cannot be combined with a single stage",
         );
     }
 
     #[test]
-    fn resume_after_deleting_reconcile_marker_reproduces_output() {
-        let (_dir, input, output) = fixture();
-        let method = TestMethod {
-            hash_bits: HashBits::Bits64,
-        };
-        let svc = fake_service();
-        let tmpl = template();
-        let opts = run_opts(&input, &output);
+    fn empty_input_errors_before_clearing_outputs() {
+        let t = TestRun::new();
 
-        run_staged_default(&method, &opts, &cfg(HashBits::Bits64, true), &svc, &tmpl).unwrap();
+        t.run(true).unwrap();
+        assert_eq!(read_output_dois(&t.output).len(), 2);
+
+        // Emptying the input (as a mistyped --input would) must error before any
+        // prior outputs are cleared, even with --from-scratch.
+        fs::remove_file(t.input.join("updated_2024-01/part_0000.jsonl.gz")).unwrap();
+        assert_err_contains(t.run(true), "no *.jsonl.gz input files found");
+        assert_eq!(read_output_dois(&t.output).len(), 2);
+    }
+
+    #[test]
+    fn only_stage_query_without_extract_errors() {
+        let t = TestRun::new();
+
+        assert_err_contains(t.run_stage(Stage::Query), "extract");
+    }
+
+    #[test]
+    fn resume_after_deleting_reconcile_marker_reproduces_output() {
+        let t = TestRun::new();
+
+        t.run(true).unwrap();
 
         // Drop the reconcile marker and resume: only reconcile should rerun.
-        fs::remove_file(output.join(WORK_DIR).join("reconcile.done")).unwrap();
-        let report =
-            run_staged_default(&method, &opts, &cfg(HashBits::Bits64, false), &svc, &tmpl).unwrap();
+        fs::remove_file(t.work().join("reconcile.done")).unwrap();
+        let report = t.run(false).unwrap();
 
         assert_eq!(report.counters.emitted, 2);
         assert!(report.stage_timings_ms.reconcile.is_some());
         // Extract was skipped this run, so its timing is absent.
         assert!(report.stage_timings_ms.extract.is_none());
-        assert_eq!(read_output_dois(&output).len(), 2);
+        assert_eq!(read_output_dois(&t.output).len(), 2);
     }
 
     #[test]
     fn from_scratch_failure_invalidates_old_downstream_markers() {
-        let (_dir, input, output) = fixture();
-        let method = TestMethod {
-            hash_bits: HashBits::Bits64,
-        };
-        let svc = fake_service();
-        let tmpl = template();
-        let opts = run_opts(&input, &output);
+        let mut t = TestRun::new();
 
-        run_staged_default(&method, &opts, &cfg(HashBits::Bits64, true), &svc, &tmpl).unwrap();
+        t.run(true).unwrap();
 
-        let failing: Arc<dyn MatchService> = Arc::new(PanickingMatchService);
-        assert_err_contains(
-            run_staged_default(
-                &method,
-                &opts,
-                &cfg(HashBits::Bits64, true),
-                &failing,
-                &tmpl,
-            ),
-            "query task panicked",
-        );
+        t.svc = Arc::new(PanickingMatchService);
+        assert_err_contains(t.run(true), "query task panicked");
 
-        let work = output.join(WORK_DIR);
+        let work = t.work();
         assert!(work.join("extract.done").exists());
         assert!(!work.join("query.done").exists());
         assert!(!work.join("reconcile.done").exists());
-        assert_eq!(read_output_dois(&output), Vec::<String>::new());
+        assert_eq!(read_output_dois(&t.output), Vec::<String>::new());
     }
 
     #[test]
     fn from_scratch_with_fewer_inputs_removes_obsolete_extraction_parts() {
         let first = [json!({ "id": "10.1/mit", "attributes": { "name": "MIT" } })];
         let second = [json!({ "id": "10.1/nsf", "attributes": { "name": "NSF" } })];
-        let (_dir, input, output) = two_part_fixture(&first, &second);
-        let method = TestMethod {
-            hash_bits: HashBits::Bits64,
-        };
-        let svc = fake_service();
-        let tmpl = template();
-        let opts = run_opts(&input, &output);
+        let t = TestRun::from_fixture(gz_parts_fixture(&[&first, &second]));
 
-        run_staged_default(&method, &opts, &cfg(HashBits::Bits64, true), &svc, &tmpl).unwrap();
-        assert!(
-            output
-                .join(WORK_DIR)
-                .join("extractions/part_0001.jsonl")
-                .exists()
-        );
+        t.run(true).unwrap();
+        assert!(t.work().join("extractions/part_0001.jsonl").exists());
         write_gz_lines(
-            &output.join(ENRICHMENTS_DIR).join("part_9999.jsonl.gz"),
+            &t.output.join(ENRICHMENTS_DIR).join("part_9999.jsonl.gz"),
             &[r#"{"doi":"stale"}"#],
         );
         assert!(
-            output
+            t.output
                 .join(ENRICHMENTS_DIR)
                 .join("part_9999.jsonl.gz")
                 .exists()
         );
 
-        fs::remove_file(input.join("updated_2024-01/part_0001.jsonl.gz")).unwrap();
-        run_staged_default(&method, &opts, &cfg(HashBits::Bits64, true), &svc, &tmpl).unwrap();
+        fs::remove_file(t.input.join("updated_2024-01/part_0001.jsonl.gz")).unwrap();
+        t.run(true).unwrap();
 
+        assert!(!t.work().join("extractions/part_0001.jsonl").exists());
         assert!(
-            !output
-                .join(WORK_DIR)
-                .join("extractions/part_0001.jsonl")
-                .exists()
-        );
-        assert!(
-            !output
+            !t.output
                 .join(ENRICHMENTS_DIR)
                 .join("part_9999.jsonl.gz")
                 .exists()
         );
-        assert_eq!(read_output_dois(&output), vec!["10.1/mit".to_owned()]);
+        assert_eq!(read_output_dois(&t.output), vec!["10.1/mit".to_owned()]);
     }
 
     #[test]
     fn single_stage_extract_invalidates_downstream_artifacts() {
-        let (_dir, input, output) = fixture();
-        let method = TestMethod {
-            hash_bits: HashBits::Bits64,
-        };
-        let svc = fake_service();
-        let tmpl = template();
-        let opts = run_opts(&input, &output);
+        let t = TestRun::new();
 
-        run_staged_default(&method, &opts, &cfg(HashBits::Bits64, true), &svc, &tmpl).unwrap();
-        fs::write(output.join(MANIFEST_FILE), "stale").unwrap();
+        t.run(true).unwrap();
+        fs::write(t.output.join(MANIFEST_FILE), "stale").unwrap();
 
-        run_staged(
-            &method,
-            &opts,
-            &cfg(HashBits::Bits64, false),
-            &svc,
-            &tmpl,
-            None,
-            "funder",
-            Some(Stage::Extract),
-        )
-        .unwrap();
+        t.run_stage(Stage::Extract).unwrap();
 
-        let work = output.join(WORK_DIR);
+        let work = t.work();
         assert!(work.join("extract.done").exists());
         assert!(!work.join("query.done").exists());
         assert!(!work.join("reconcile.done").exists());
         assert!(!work.join(LOOKUPS_FILE).exists());
         assert!(!work.join(RECONCILE_STATS_FILE).exists());
-        assert!(!output.join(MANIFEST_FILE).exists());
-        assert_eq!(read_output_dois(&output), Vec::<String>::new());
+        assert!(!t.output.join(MANIFEST_FILE).exists());
+        assert_eq!(read_output_dois(&t.output), Vec::<String>::new());
     }
 
     #[test]
     fn single_stage_query_invalidates_reconcile_artifacts() {
-        let (_dir, input, output) = fixture();
-        let method = TestMethod {
-            hash_bits: HashBits::Bits64,
-        };
-        let svc = fake_service();
-        let tmpl = template();
-        let opts = run_opts(&input, &output);
+        let t = TestRun::new();
 
-        run_staged_default(&method, &opts, &cfg(HashBits::Bits64, true), &svc, &tmpl).unwrap();
-        fs::write(output.join(MANIFEST_FILE), "stale").unwrap();
+        t.run(true).unwrap();
+        fs::write(t.output.join(MANIFEST_FILE), "stale").unwrap();
 
-        run_staged(
-            &method,
-            &opts,
-            &cfg(HashBits::Bits64, false),
-            &svc,
-            &tmpl,
-            None,
-            "funder",
-            Some(Stage::Query),
-        )
-        .unwrap();
+        t.run_stage(Stage::Query).unwrap();
 
-        let work = output.join(WORK_DIR);
+        let work = t.work();
         assert!(work.join("extract.done").exists());
         assert!(work.join("query.done").exists());
         assert!(!work.join("reconcile.done").exists());
         assert!(!work.join(RECONCILE_STATS_FILE).exists());
-        assert!(!output.join(MANIFEST_FILE).exists());
-        assert_eq!(read_output_dois(&output), Vec::<String>::new());
+        assert!(!t.output.join(MANIFEST_FILE).exists());
+        assert_eq!(read_output_dois(&t.output), Vec::<String>::new());
     }
 
     #[test]
     fn single_stage_reconcile_replaces_stale_public_outputs() {
-        let (_dir, input, output) = fixture();
-        let method = TestMethod {
-            hash_bits: HashBits::Bits64,
-        };
-        let svc = fake_service();
-        let tmpl = template();
-        let opts = run_opts(&input, &output);
+        let t = TestRun::new();
 
-        run_staged_default(&method, &opts, &cfg(HashBits::Bits64, true), &svc, &tmpl).unwrap();
+        t.run(true).unwrap();
         write_gz_lines(
-            &output.join(ENRICHMENTS_DIR).join("part_9999.jsonl.gz"),
+            &t.output.join(ENRICHMENTS_DIR).join("part_9999.jsonl.gz"),
             &[r#"{"doi":"stale"}"#],
         );
-        fs::write(output.join(ENRICHMENTS_FAILED_FILE), "stale\n").unwrap();
+        fs::write(t.output.join(ENRICHMENTS_FAILED_FILE), "stale\n").unwrap();
 
-        run_staged(
-            &method,
-            &opts,
-            &cfg(HashBits::Bits64, false),
-            &svc,
-            &tmpl,
-            None,
-            "funder",
-            Some(Stage::Reconcile),
-        )
-        .unwrap();
+        t.run_stage(Stage::Reconcile).unwrap();
 
-        assert!(output.join(WORK_DIR).join("reconcile.done").exists());
+        assert!(t.work().join("reconcile.done").exists());
         assert!(
-            !output
+            !t.output
                 .join(ENRICHMENTS_DIR)
                 .join("part_9999.jsonl.gz")
                 .exists()
         );
-        assert!(!output.join(ENRICHMENTS_FAILED_FILE).exists());
-        let dois = read_output_dois(&output);
+        assert!(!t.output.join(ENRICHMENTS_FAILED_FILE).exists());
+        let dois = read_output_dois(&t.output);
         assert_eq!(dois.len(), 2);
         assert!(dois.contains(&"10.1/mit".to_owned()));
         assert!(dois.contains(&"10.1/nsf".to_owned()));
@@ -1397,18 +1467,12 @@ mod tests {
 
     #[test]
     fn resume_with_mismatched_hash_width_errors() {
-        let (_dir, input, output) = fixture();
-        let method = TestMethod {
-            hash_bits: HashBits::Bits64,
-        };
-        let svc = fake_service();
-        let tmpl = template();
-        let opts = run_opts(&input, &output);
+        let t = TestRun::new();
 
-        run_staged_default(&method, &opts, &cfg(HashBits::Bits64, true), &svc, &tmpl).unwrap();
+        t.run(true).unwrap();
 
         assert_err_contains(
-            run_staged_default(&method, &opts, &cfg(HashBits::Bits128, false), &svc, &tmpl),
+            t.run_with(&cfg(HashBits::Bits128, false), None, None),
             "hash-width mismatch",
         );
     }
@@ -1416,21 +1480,13 @@ mod tests {
     #[test]
     fn rerun_of_complete_pipeline_keeps_truthful_manifest() {
         // Rerunning a completed run must preserve the persisted report.
-        let (_dir, input, output) = fixture();
-        let method = TestMethod {
-            hash_bits: HashBits::Bits64,
-        };
-        let svc = fake_service();
-        let tmpl = template();
-        let opts = run_opts(&input, &output);
+        let t = TestRun::new();
 
-        let first =
-            run_staged_default(&method, &opts, &cfg(HashBits::Bits64, true), &svc, &tmpl).unwrap();
+        let first = t.run(true).unwrap();
 
         // Re-run into the same dir without --from-scratch: every stage is complete, so
         // no stage runs this invocation, but the report is read from the sidecars.
-        let again =
-            run_staged_default(&method, &opts, &cfg(HashBits::Bits64, false), &svc, &tmpl).unwrap();
+        let again = t.run(false).unwrap();
 
         assert_eq!(again.counters.emitted, first.counters.emitted);
         assert_eq!(again.counters.emitted, 2);
@@ -1444,33 +1500,20 @@ mod tests {
 
     #[test]
     fn rejecting_validator_surfaces_schema_failures() {
-        let (_dir, input, output) = fixture();
-        let method = TestMethod {
-            hash_bits: HashBits::Bits64,
-        };
-        let svc = fake_service();
-        let tmpl = template();
+        let t = TestRun::new();
         // A schema no enrichment record satisfies: every emitted record is diverted.
         let schema =
             crate::schema::compile_str(r#"{"type":"object","required":["nope"]}"#).unwrap();
 
-        let report = run_staged(
-            &method,
-            &run_opts(&input, &output),
-            &cfg(HashBits::Bits64, true),
-            &svc,
-            &tmpl,
-            Some(&schema),
-            "funder",
-            None,
-        )
-        .unwrap();
+        let report = t
+            .run_with(&cfg(HashBits::Bits64, true), Some(&schema), None)
+            .unwrap();
 
         // The two would-be records are diverted, not written: counted, not hidden.
         assert_eq!(report.counters.emitted, 0);
         assert_eq!(report.counters.schema_failures, 2);
         assert_eq!(report.validation.schema_failures, 2);
-        assert!(output.join(ENRICHMENTS_FAILED_FILE).exists());
+        assert!(t.output.join(ENRICHMENTS_FAILED_FILE).exists());
         // A run that lost records to validation is not a full success.
         assert_eq!(
             crate::exit_status(0, report.counters.schema_failures, 0, true),
@@ -1480,21 +1523,10 @@ mod tests {
 
     #[test]
     fn batch_error_is_recorded_not_certified_as_success() {
-        let (_dir, input, output) = fixture();
-        let method = TestMethod {
-            hash_bits: HashBits::Bits64,
-        };
-        let svc: Arc<dyn MatchService> = Arc::new(FakeMatchService::erroring());
-        let tmpl = template();
+        let mut t = TestRun::new();
+        t.svc = Arc::new(FakeMatchService::erroring("marple outage"));
 
-        let report = run_staged_default(
-            &method,
-            &run_opts(&input, &output),
-            &cfg(HashBits::Bits64, true),
-            &svc,
-            &tmpl,
-        )
-        .unwrap();
+        let report = t.run(true).unwrap();
 
         let m = report.match_.expect("match block present");
         // All three inputs failed as errors (not no-match), and nothing matched.
@@ -1506,10 +1538,48 @@ mod tests {
         let status = crate::exit_status(
             report.counters.files_failed,
             0,
-            m.failure_taxonomy.error,
+            m.failure_taxonomy.lost(),
             true,
         );
         assert_eq!(status, "partial");
+    }
+
+    #[test]
+    fn batch_timeout_is_lost_data_not_success() {
+        // A batch lost to a timeout must downgrade the run exactly like any other
+        // batch error; the timeout/error split is informational only.
+        let mut t = TestRun::new();
+        t.svc = Arc::new(FakeMatchService::erroring("operation timed out"));
+
+        let report = t.run(true).unwrap();
+
+        let m = report.match_.expect("match block present");
+        assert_eq!(m.matched, 0);
+        assert_eq!(m.failure_taxonomy.timeout, 3);
+        assert_eq!(m.failure_taxonomy.error, 0);
+        assert_eq!(m.failure_taxonomy.lost(), 3);
+        let status = crate::exit_status(0, 0, m.failure_taxonomy.lost(), true);
+        assert_eq!(status, "partial");
+    }
+
+    #[test]
+    fn classify_failure_bins_by_kind_not_message() {
+        let mut t = MatchFailureTaxonomy::default();
+        // The kind decides no-match, even if the error text looks alarming.
+        classify_failure(Some("no_match"), "no match", &mut t);
+        classify_failure(Some("no_match"), "server said: timed out no match", &mut t);
+        // Error rows split timeout/error by message, and both count as lost.
+        classify_failure(Some("error"), "batch error: operation timed out", &mut t);
+        classify_failure(Some("error"), "batch error: HTTP 500", &mut t);
+        // A batch error whose message happens to contain "no match" is still lost.
+        classify_failure(Some("error"), "batch error: no match endpoint", &mut t);
+        // Legacy rows without a kind count as lost, never as a benign no-match.
+        classify_failure(None, "no match", &mut t);
+
+        assert_eq!(t.no_match, 2);
+        assert_eq!(t.timeout, 1);
+        assert_eq!(t.error, 3);
+        assert_eq!(t.lost(), 4);
     }
 
     #[test]
@@ -1519,5 +1589,43 @@ mod tests {
         assert_eq!(crate::exit_status(0, 1, 0, true), "partial");
         assert_eq!(crate::exit_status(0, 0, 1, true), "partial");
         assert_eq!(crate::exit_status(0, 0, 0, false), "partial");
+    }
+
+    #[test]
+    fn stages_to_run_restart_runs_everything() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(Stage::Extract.marker()), "").unwrap();
+        assert_eq!(stages_to_run(dir.path(), true), Stage::ALL);
+    }
+
+    #[test]
+    fn stages_to_run_resume_skips_completed_leading_stages() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(Stage::Extract.marker()), "").unwrap();
+        assert_eq!(
+            stages_to_run(dir.path(), false),
+            vec![Stage::Query, Stage::Reconcile]
+        );
+    }
+
+    #[test]
+    fn stages_to_run_empty_work_dir_runs_all() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(stages_to_run(dir.path(), false), Stage::ALL);
+    }
+
+    #[test]
+    fn histogram_bucket_clamps_and_includes_top_edge() {
+        // Edges [0.0, 0.5, 0.7, 0.8, 0.9, 1.0] -> five buckets, indexes 0..=4.
+        assert_eq!(histogram_bucket(0.0), 0);
+        assert_eq!(histogram_bucket(0.49), 0);
+        assert_eq!(histogram_bucket(0.5), 1);
+        assert_eq!(histogram_bucket(0.85), 3);
+        assert_eq!(histogram_bucket(0.9), 4);
+        // The last bucket includes the upper bound, so a perfect 1.0 is counted...
+        assert_eq!(histogram_bucket(1.0), 4);
+        // ...and out-of-range confidences clamp to the nearest bucket.
+        assert_eq!(histogram_bucket(1.5), 4);
+        assert_eq!(histogram_bucket(-0.1), 0);
     }
 }

@@ -4,7 +4,7 @@
 
 Use these conventions when adding or updating tests.
 
-Shared helpers live in the dev-only [`comet-test-support`](../crates/test-support)
+Shared helpers live in the dev-only [`comet-enrich-test-support`](../crates/test-support)
 crate. Add it under `[dev-dependencies]` and use it before adding local fixtures or
 utilities.
 
@@ -14,7 +14,7 @@ utilities.
 - Start the test module with `use super::*;`.
 - Put helpers, fixtures, and fakes before the `#[test]` functions.
 - Put integration tests in `tests/`.
-- Share cross-crate test helpers through `comet-test-support`.
+- Share cross-crate test helpers through `comet-enrich-test-support`.
 
 ### Naming
 
@@ -27,13 +27,13 @@ Lead with the unit under test so related tests sort together.
 ### Assertions
 
 - Prefer `assert_eq!(actual, expected)`, with the actual value first.
-- Use `comet_test_support::assert_close(actual, expected)` for float comparisons.
+- Use `comet_enrich_test_support::assert_close(actual, expected)` for float comparisons.
 - Check enum variants with `assert!(matches!(x, V(..)))`.
 
 ### Errors
 
 - Assert specific failures with
-  `comet_test_support::assert_err_contains(result, "substring")`.
+  `comet_enrich_test_support::assert_err_contains(result, "substring")`.
 - Use bare `assert!(result.is_err())` only when the error content does not matter.
 - Default to bare `.unwrap()` in tests.
 - Use `.expect("…")` only where the panic would otherwise be unclear.

@@ -92,6 +92,8 @@ allow = [
     "BSD-3-Clause",        # subtle, via the TLS stack
     "BSL-1.0",             # xxhash-rust (dedup hash) and ryu (serde_json float formatting)
     "CDLA-Permissive-2.0", # webpki-roots, via reqwest
+    "MIT-0",               # borrow-or-share, via jsonschema's referencing
+    "Zlib",                # foldhash, via jsonschema's referencing
 ]
 # The confidence threshold for detecting a license from license text.
 # The higher the value, the more closely the license text must be to the

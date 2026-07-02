@@ -15,10 +15,9 @@ mod fanout;
 pub mod manifest;
 pub mod match_service;
 pub mod method;
+pub mod options;
 pub mod provenance;
-pub mod run;
 pub mod schema;
-pub mod staged;
 pub mod staged_run;
 pub mod transform;
 pub mod writer;
@@ -27,11 +26,10 @@ pub use dedup::{DedupStore, HashBits, hash_input};
 pub use manifest::{HashInfo, Manifest, Report, RunMeta, SourceRelease, StageTimings, exit_status};
 pub use match_service::{MarpleClient, MatchHit, MatchService, RorLookup};
 pub use method::{EnrichmentAction, EnrichmentMethod, EnrichmentParts, Extracted, Lookups};
+pub use options::{RunOptions, RunStats};
 pub use provenance::{EnrichmentTemplate, build_enrichment_record, load_template};
-pub use run::{RunOptions, RunStats};
 pub use schema::SCHEMA;
-pub use staged::{LookupConfig, Stage, WorkDir, stages_to_run};
-pub use staged_run::{pipeline_complete, run_staged};
+pub use staged_run::{LookupConfig, Stage, WorkDir, pipeline_complete, run_staged, stages_to_run};
 pub use transform::run;
 pub use writer::{
     DEFAULT_OUTPUT_PART_SIZE_MIB, DEFAULT_OUTPUT_WRITER_LANES, ENRICHMENTS_DIR,

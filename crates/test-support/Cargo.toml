@@ -1,5 +1,5 @@
 [package]
-name = "comet-test-support"
+name = "comet-enrich-test-support"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

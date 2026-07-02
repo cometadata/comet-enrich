@@ -5,7 +5,6 @@
 //! Methods return only the enrichment value parts; provenance is added later by
 //! build_enrichment_record.
 
-use anyhow::Result;
 use serde_json::Value;
 use std::collections::HashMap;
 
@@ -80,17 +79,6 @@ pub trait EnrichmentMethod: Sync {
         Vec::new()
     }
 
-    /// Resolve unique extracted inputs through an external service.
-    ///
-    /// Methods without lookups can use the default implementation.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if lookup resolution fails.
-    fn lookup(&self, _inputs: &[String]) -> Result<Lookups<Self::Lookup>> {
-        Ok(HashMap::new())
-    }
-
     /// Map one extraction back into enrichment value fields.
     fn map_back(
         &self,
@@ -134,7 +122,6 @@ mod tests {
             matches!(method.extract(&Value::Null), Extracted::Items(items) if items == vec![()])
         );
         assert!(method.inputs(&()).is_empty());
-        assert!(method.lookup(&["x".to_owned()]).unwrap().is_empty());
         assert!(method.map_back((), &lookups).is_empty());
     }
 

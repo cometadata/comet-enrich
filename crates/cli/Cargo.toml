@@ -12,7 +12,7 @@ clap = { version = "4", features = ["derive"] }
 # Pinned to 4.5.x: the 4.6 bash generator escapes hyphenated binary names
 # inconsistently, so no subcommand or flag completion ever matches.
 clap_complete = "~4.5"
-comet-enrichment-core = { workspace = true }
+comet-enrich-core = { workspace = true }
 jsonschema = { workspace = true }
 log = { workspace = true }
 serde = { workspace = true }
@@ -23,7 +23,7 @@ funders = { package = "comet-enrich-datacite-funders", path = "../datacite-funde
 
 [dev-dependencies]
 assert_cmd = "2"
-comet-test-support = { workspace = true }
+comet-enrich-test-support = { workspace = true }
 predicates = "3"
 serde_json = { workspace = true }
 

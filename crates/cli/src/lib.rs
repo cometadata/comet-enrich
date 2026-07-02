@@ -1,7 +1,7 @@
 //! CLI for comet-enrich.
 //!
 //! Parses command-line arguments, builds the selected enrichment method, and runs it
-//! through [comet_enrichment_core::run].
+//! through [comet_enrich_core::run].
 
 // DataCite, ROR, and COMET are names, not Rust identifiers.
 #![allow(clippy::doc_markdown)]
@@ -11,7 +11,7 @@ pub mod args;
 use anyhow::Result;
 use args::{IoArgs, LookupArgs, RunArgs, StageArg, init_logging};
 use clap::{CommandFactory, Parser, Subcommand};
-use comet_enrichment_core::{
+use comet_enrich_core::{
     EnrichmentMethod, EnrichmentTemplate, HashInfo, LookupConfig, Manifest, MarpleClient, MatchHit,
     MatchService, RunMeta, RunStats, Stage, StageTimings, exit_status, pipeline_complete,
     run_staged,
@@ -29,7 +29,7 @@ use std::time::Instant;
 #[command(name = "comet-enrich", version, propagate_version = true)]
 pub struct Cli {
     #[command(subcommand)]
-    pub method: Method,
+    pub command: Command,
 }
 
 /// Installation instructions shown by `comet-enrich completions --help`.
@@ -45,9 +45,9 @@ Installation:
     zsh:   comet-enrich completions zsh > <dir on $fpath>/_comet-enrich
     fish:  comet-enrich completions fish > ~/.config/fish/completions/comet-enrich.fish";
 
-/// Enrichment method to run.
+/// Subcommand to run: an enrichment method, or a shell-completions generator.
 #[derive(Subcommand, Debug)]
-pub enum Method {
+pub enum Command {
     /// Reclassify resource types from types.resourceType.
     ResourceTypeGeneral(ResourceTypeGeneralArgs),
 
@@ -56,14 +56,14 @@ pub enum Method {
     /// Runs the extract, query, and reconcile stages. Omit the stage to run the full
     /// pipeline. Intermediate files are written to a `.work` directory inside the output
     /// directory, and existing stage outputs there are reused unless `--from-scratch` is used.
-    Affiliations(RorLookupArgs),
+    Affiliations(AffiliationsArgs),
 
     /// Match funder names to ROR IDs.
     ///
     /// Runs the extract, query, and reconcile stages. Omit the stage to run the full
     /// pipeline. Intermediate files are written to a `.work` directory inside the output
     /// directory, and existing stage outputs there are reused unless `--from-scratch` is used.
-    Funders(RorLookupArgs),
+    Funders(FundersArgs),
 
     /// Generate a shell completion script on stdout.
     #[command(after_long_help = COMPLETIONS_HELP)]
@@ -92,9 +92,12 @@ pub struct CompletionsArgs {
     pub shell: clap_complete::Shell,
 }
 
-/// Arguments shared by the ROR lookup methods.
+/// Arguments for the affiliations method.
+///
+/// Affiliations needs no ROR registry file: the matched ROR id comes straight
+/// from the match service.
 #[derive(clap::Args, Debug)]
-pub struct RorLookupArgs {
+pub struct AffiliationsArgs {
     #[command(flatten)]
     pub io: IoArgs,
 
@@ -109,43 +112,42 @@ pub struct RorLookupArgs {
     pub stage: Option<StageArg>,
 }
 
-impl Method {
-    /// Shared run options for the selected method.
-    fn run_args(&self) -> &RunArgs {
-        match self {
-            Method::ResourceTypeGeneral(a) => &a.run,
-            Method::Affiliations(a) | Method::Funders(a) => &a.run,
-            Method::Completions(_) => unreachable!("completions returns before run args are read"),
-        }
-    }
+/// Arguments for the funders method.
+#[derive(clap::Args, Debug)]
+pub struct FundersArgs {
+    #[command(flatten)]
+    pub io: IoArgs,
 
-    /// Shared input/output options for the selected method.
-    fn io(&self) -> &IoArgs {
-        match self {
-            Method::ResourceTypeGeneral(a) => &a.io,
-            Method::Affiliations(a) | Method::Funders(a) => &a.io,
-            Method::Completions(_) => unreachable!("completions returns before io args are read"),
-        }
-    }
+    #[command(flatten)]
+    pub lookup: LookupArgs,
+
+    /// ROR registry JSON used to build the Crossref Funder ID to ROR crosswalk.
+    #[arg(long, value_name = "FILE", help_heading = "ROR matching")]
+    pub ror_file: PathBuf,
+
+    #[command(flatten)]
+    pub run: RunArgs,
+
+    /// Run a single stage instead of the whole pipeline.
+    #[command(subcommand)]
+    pub stage: Option<StageArg>,
 }
 
-/// Run the selected enrichment method.
+/// Run the selected subcommand.
 pub fn run(cli: Cli) -> Result<()> {
-    // Completions write the script to stdout and skip logging and provenance setup.
-    if let Method::Completions(a) = &cli.method {
-        clap_complete::generate(
-            a.shell,
-            &mut Cli::command(),
-            "comet-enrich",
-            &mut std::io::stdout(),
-        );
-        return Ok(());
-    }
-    init_logging(cli.method.run_args().log_level)?;
-    // Validate provenance before scanning the corpus or calling the ROR service.
-    let template = comet_enrichment_core::load_template(&cli.method.io().provenance)?;
-    match cli.method {
-        Method::ResourceTypeGeneral(a) => {
+    match cli.command {
+        // Completions write the script to stdout and skip logging and provenance setup.
+        Command::Completions(a) => {
+            clap_complete::generate(
+                a.shell,
+                &mut Cli::command(),
+                "comet-enrich",
+                &mut std::io::stdout(),
+            );
+            Ok(())
+        }
+        Command::ResourceTypeGeneral(a) => {
+            let template = setup(&a.run, &a.io)?;
             let method = rtg::ResourceTypeGeneral::try_new(rtg::Config {
                 rules: a.rules.clone(),
             })?;
@@ -159,7 +161,8 @@ pub fn run(cli: Cli) -> Result<()> {
                 &["not_in_scope", "malformed_types"],
             )
         }
-        Method::Affiliations(a) => {
+        Command::Affiliations(a) => {
+            let template = setup(&a.run, &a.io)?;
             let method = affiliations::Affiliations::try_new((&a.lookup).into())?;
             run_lookup_method(
                 "affiliations",
@@ -172,14 +175,24 @@ pub fn run(cli: Cli) -> Result<()> {
                 a.stage,
             )
         }
-        Method::Funders(a) => {
-            let method = funders::Funders::try_new((&a.lookup).into())?;
+        Command::Funders(a) => {
+            let template = setup(&a.run, &a.io)?;
+            let method = funders::Funders::try_new(funders::Config {
+                lookup: (&a.lookup).into(),
+                ror_file: a.ror_file.clone(),
+            })?;
             run_lookup_method(
                 "funders", &method, &a.io, &a.lookup, &a.run, &template, "funder", a.stage,
             )
         }
-        Method::Completions(_) => unreachable!("handled above"),
     }
+}
+
+/// Per-method preamble: initialise logging, then load and validate provenance —
+/// before any method files are read or corpus work starts.
+fn setup(run: &RunArgs, io: &IoArgs) -> Result<EnrichmentTemplate> {
+    init_logging(run.log_level)?;
+    comet_enrich_core::load_template(&io.provenance)
 }
 
 /// Run a configured method, write the run manifest, and log the summary.
@@ -188,7 +201,7 @@ pub fn run(cli: Cli) -> Result<()> {
 /// selected by the extractor; they are excluded from the manifest's in-scope count.
 ///
 /// # Errors
-/// Propagates any error from [`comet_enrichment_core::run`] (including schema
+/// Propagates any error from [`comet_enrich_core::run`] (including schema
 /// compilation), from building the manifest sources, or from writing the manifest.
 fn run_method<M: EnrichmentMethod>(
     name: &str,
@@ -204,8 +217,7 @@ fn run_method<M: EnrichmentMethod>(
     let sources = io.sources()?;
 
     let started = Instant::now();
-    let stats =
-        comet_enrichment_core::run(method, &io.run_options(run), template, validator.as_ref())?;
+    let stats = comet_enrich_core::run(method, &io.run_options(run), template, validator.as_ref())?;
     let total_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
 
     let meta = RunMeta {
@@ -275,12 +287,13 @@ where
         method_version: env!("CARGO_PKG_VERSION"),
         sources,
     };
-    // `partial` if any data-losing condition occurred (read/schema/match failures) or
-    // the pipeline did not complete every stage (e.g. a single-stage debug run).
+    // `partial` if any data-losing condition occurred (read/schema failures, or
+    // lookups lost to match-service errors and timeouts) or the pipeline did not
+    // complete every stage (e.g. a single-stage debug run).
     let match_errors = report
         .match_
         .as_ref()
-        .map_or(0, |m| m.failure_taxonomy.error);
+        .map_or(0, |m| m.failure_taxonomy.lost());
     let complete = pipeline_complete(&io.output);
     let manifest_status = exit_status(
         report.counters.files_failed,
@@ -337,11 +350,9 @@ mod tests {
             "out.jsonl",
             "--provenance",
             "e.yaml",
-            "--ror-file",
-            "ror.json",
         ])
         .unwrap();
-        let Method::Affiliations(a) = cli.method else {
+        let Command::Affiliations(a) = cli.command else {
             panic!("expected affiliations");
         };
         assert_eq!(a.lookup.ror_concurrency, 50);
@@ -371,7 +382,7 @@ mod tests {
             "128",
         ])
         .unwrap();
-        let Method::Funders(a) = cli.method else {
+        let Command::Funders(a) = cli.command else {
             panic!("expected funders");
         };
         assert_eq!(a.lookup.hash_bits, args::HashBitsArg::Bits128);
@@ -407,15 +418,41 @@ mod tests {
             "out.jsonl",
             "--provenance",
             "e.yaml",
-            "--ror-file",
-            "ror.json",
             "query",
         ])
         .unwrap();
-        let Method::Affiliations(a) = cli.method else {
+        let Command::Affiliations(a) = cli.command else {
             panic!("expected affiliations");
         };
         assert_eq!(a.stage, Some(StageArg::Query));
+    }
+
+    #[test]
+    fn ror_file_is_required_for_funders_and_rejected_for_affiliations() {
+        // Funders needs the registry for the Crossref-to-ROR crosswalk; clap
+        // enforces the flag. Affiliations never reads it, so it has no such flag.
+        let base = |method: &'static str| {
+            vec![
+                "comet-enrich",
+                method,
+                "-i",
+                "in",
+                "-o",
+                "out",
+                "--provenance",
+                "e.yaml",
+            ]
+        };
+
+        assert!(parse(&base("funders")).is_err());
+
+        let mut funders = base("funders");
+        funders.extend_from_slice(&["--ror-file", "ror.json"]);
+        assert!(parse(&funders).is_ok());
+
+        let mut affiliations = base("affiliations");
+        affiliations.extend_from_slice(&["--ror-file", "ror.json"]);
+        assert!(parse(&affiliations).is_err());
     }
 
     #[test]
@@ -442,7 +479,7 @@ mod tests {
     fn output_part_options_parse_and_reject_zero() {
         let cli =
             parse_rtg(&["--output-part-size-mib", "16", "--output-writer-lanes", "4"]).unwrap();
-        let Method::ResourceTypeGeneral(a) = cli.method else {
+        let Command::ResourceTypeGeneral(a) = cli.command else {
             panic!("expected resource-type-general");
         };
         assert_eq!(a.run.output_part_size_mib, 16);
@@ -508,10 +545,18 @@ mod tests {
     fn completions_parses_each_shell_and_rejects_unknown() {
         for shell in ["bash", "zsh", "fish", "powershell", "elvish"] {
             let cli = parse(&["comet-enrich", "completions", shell]).unwrap();
-            assert!(matches!(cli.method, Method::Completions(_)));
+            assert!(matches!(cli.command, Command::Completions(_)));
         }
         assert!(parse(&["comet-enrich", "completions", "tcsh"]).is_err());
         assert!(parse(&["comet-enrich", "completions"]).is_err());
+    }
+
+    /// Destructure a parsed reclassifier command into its args.
+    fn rtg_args(cli: Cli) -> ResourceTypeGeneralArgs {
+        let Command::ResourceTypeGeneral(a) = cli.command else {
+            panic!("expected resource-type-general");
+        };
+        a
     }
 
     #[test]
@@ -525,7 +570,7 @@ mod tests {
             "datacite=2024-02-01",
         ])
         .unwrap();
-        assert!(cli.method.io().sources().is_err());
+        assert!(rtg_args(cli).io.sources().is_err());
     }
 
     #[test]
@@ -537,7 +582,7 @@ mod tests {
             "ror=2024-04-11",
         ])
         .unwrap();
-        let sources = cli.method.io().sources().unwrap();
+        let sources = rtg_args(cli).io.sources().unwrap();
         assert_eq!(sources.len(), 2);
         assert_eq!(sources["datacite"].release_date, "2024-01-01");
         assert_eq!(sources["ror"].release_date, "2024-04-11");

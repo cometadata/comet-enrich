@@ -1,5 +1,5 @@
 [package]
-name = "comet-enrichment-core"
+name = "comet-enrich-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -17,14 +17,14 @@ num_cpus = "1"
 rayon = "1"
 serde = { workspace = true }
 serde_json = { workspace = true }
-serde_yaml = { workspace = true }
+serde_yaml_ng = { workspace = true }
 xxhash-rust = { workspace = true }
 tokio = { workspace = true }
 reqwest = { workspace = true }
 async-trait = { workspace = true }
 
 [dev-dependencies]
-comet-test-support = { workspace = true }
+comet-enrich-test-support = { workspace = true }
 tempfile = { workspace = true }
 wiremock = "0.6"
 
