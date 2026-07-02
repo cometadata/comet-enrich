@@ -26,7 +26,7 @@ Options can be set via environment variables or flags (pass flags through a pipe
 ```bash
 # Pin a version. Required while only pre-releases exist, as "latest" resolves
 # only to stable releases.
-COMET_ENRICH_VERSION=v0.1.0-rc1 curl -fsSL .../install.sh | sh
+curl -fsSL .../install.sh | COMET_ENRICH_VERSION=v0.1.0-rc1 sh
 
 # Same, using flags; also choose the install directory and skip completions.
 curl -fsSL .../install.sh | sh -s -- --version v0.1.0-rc1 --bin-dir ~/bin --no-completions
