@@ -8,26 +8,25 @@ The method runs as a three-stage pipeline:
 
 1. **extract**: scan the corpus and collect the unique funder names to look up.
 2. **query**: resolve those names with the match service, using Marple's `funder` task.
-3. **reconcile**: join the matches back to the records, look up matched ROR IDs in the ROR registry
-   dataset, and emit enrichment records. This also uses Crossref Funder ID–to–ROR crosswalks from
-   the registry data.
+3. **reconcile**: join matches back to the records and emit enrichment records, skipping
+   references with a valid existing ROR ID.
 
-Running `funders` without a stage runs the whole pipeline. Intermediate files are written to
-`--work-dir`. A later run resumes from completed stages in that directory unless `--from-scratch`
-is given.
+Running `funders` without a stage runs the whole pipeline. Intermediate files are written to a
+`.work` directory inside `--output`. A later run resumes from completed stages there unless
+`--from-scratch` is given.
 
 ## Prerequisites
 
 - A running **Marple** match service, loaded with ROR data, that matches funder names to
   ROR IDs (see the [Requirements](../../README.md#requirements)).
 - The **ROR registry dataset** (`--ror-file`): the JSON extracted from the ROR data dump, used at
-  the reconcile stage to resolve matched ROR IDs.
+  reconcile to skip references already identified by their Crossref Funder ID.
 
 ## Synopsis
 
 ```text
 comet-enrich funders \
-  --input <DIR> --output <FILE> \
+  --input <DIR> --output <DIR> \
   --provenance <FILE> --ror-file <FILE> \
   [OPTIONS] [extract|query|reconcile]
 ```
@@ -39,12 +38,12 @@ In addition to the [global options](../usage.md#global-options):
 | Option                    | Default                 | Description                                                                                |
 |---------------------------|-------------------------|--------------------------------------------------------------------------------------------|
 | `--ror-service-url <URL>` | `http://localhost:8000` | Base URL of the ROR match service / Marple                                                 |
-| `--ror-file <FILE>`       | _required_              | ROR registry dataset used to reconcile matched ROR IDs                                        |
+| `--ror-file <FILE>`       | _required_              | ROR registry JSON for Crossref Funder ID checks                                             |
 | `--ror-batch-size <N>`    | `50`                    | Inputs per ROR match-service bulk request                                                  |
 | `--ror-concurrency <N>`   | `50`                    | Concurrent ROR match-service requests                                                      |
 | `--ror-timeout <SECS>`    | `30`                    | ROR match-service request timeout in seconds                                               |
-| `--work-dir <DIR>`        | _optional_              | Directory for extracted inputs and match results; use a stable path to resume runs |
-| `--from-scratch`          | off                     | Ignore existing work-dir artifacts and rerun all stages                                    |
+| `--hash-bits <N>`         | `64`                    | Dedup hash width (`64` or `128`)                                                          |
+| `--from-scratch`          | off                     | Ignore existing stage outputs in `.work` and rerun all stages                             |
 
 ## Stages
 
@@ -63,11 +62,10 @@ Omit the stage to run all three in order.
 ```bash
 comet-enrich funders \
   --input      /data/datacite/DataCite_Public_Data_File_2024 \
-  --output     funders.jsonl \
+  --output     ./out \
   --provenance configs/provenance/funders.yaml \
   --ror-file   /data/ror/v2.6-2026-04-14-ror-data.json \
   --ror-service-url http://localhost:8000 \
-  --work-dir   /work/funders \
   --threads    16
 ```
 
