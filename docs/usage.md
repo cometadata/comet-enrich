@@ -24,7 +24,7 @@ Reclassify resource types for the DataCite Public Data File:
 ```bash
 comet-enrich resource-type-general \
   --input      /data/datacite \
-  --output     resource_type_general.jsonl \
+  --output     ./out \
   --rules      configs/reclassification_rules.yaml \
   --provenance configs/provenance/resource_type_general.yaml
 ```
@@ -37,8 +37,12 @@ recursively.
 
 ## Output and validation
 
-Each method writes newline-delimited JSON to `--output`, with one enrichment record per line.
-Records are validated against the built-in enrichment input schema as they are written.
+Each method writes gzip-compressed JSONL parts under `--output/enrichments/`, one record per line.
+Records are validated as they are written. Invalid records are diverted to
+`enrichments.failed.jsonl` with the validator error attached, and the run continues.
+
+Part files are storage chunks, not semantic partitions. Consumers should read every
+`*.jsonl.gz` file under `enrichments/`.
 
 Use these options to change the validation behaviour:
 
@@ -61,16 +65,18 @@ The provenance file is validated before the method runs.
 
 These flags are shared by every method:
 
-| Option                 | Default    | Description                                                          |
-|------------------------|------------|----------------------------------------------------------------------|
-| `-i, --input <DIR>`    | _required_ | Input directory of DataCite `*.jsonl.gz` files, searched recursively |
-| `-o, --output <FILE>`  | _required_ | Output JSONL file for emitted enrichment records                     |
-| `--provenance <FILE>`  | _required_ | YAML provenance metadata attached to each record                     |
-| `-t, --threads <N>`    | `0`        | Worker threads; `0` uses all available CPUs                          |
-| `-b, --batch-size <N>` | `5000`     | Enrichment records per writer batch                                  |
-| `--schema <FILE>`      | built-in   | Validate output against a custom JSON Schema                         |
-| `--no-validate`        | off        | Skip output schema validation                                        |
-| `--log-level <LEVEL>`  | `info`     | Minimum log level (`trace`, `debug`, `info`, `warn`, `error`)        |
+| Option                         | Default    | Description                                                          |
+|--------------------------------|------------|----------------------------------------------------------------------|
+| `-i, --input <DIR>`            | _required_ | Input directory of DataCite `*.jsonl.gz` files, searched recursively |
+| `-o, --output <DIR>`           | _required_ | Output directory; writes `enrichments/part_NNNN.jsonl.gz` (and `enrichments.failed.jsonl`) |
+| `--provenance <FILE>`          | _required_ | YAML provenance metadata attached to each record                     |
+| `-t, --threads <N>`            | `0`        | Worker threads; `0` uses all available CPUs                          |
+| `-b, --batch-size <N>`         | `5000`     | Enrichment records per internal batch                                |
+| `--output-part-size-mib <MIB>` | `256`      | Target compressed MiB per final enrichment part                      |
+| `--output-writer-lanes <N>`    | `1`        | Parallel writer lanes for final enrichment output                    |
+| `--schema <FILE>`              | built-in   | Validate output against a custom JSON Schema                         |
+| `--no-validate`                | off        | Skip output schema validation                                        |
+| `--log-level <LEVEL>`          | `info`     | Minimum log level (`trace`, `debug`, `info`, `warn`, `error`)        |
 
 Each method adds its own options. See its page below.
 
@@ -79,5 +85,5 @@ Each method adds its own options. See its page below.
 | Method                                                       | What it does                                                                |
 |--------------------------------------------------------------|-----------------------------------------------------------------------------|
 | [`resource-type-general`](commands/resource-type-general.md) | Reclassify `types.resourceTypeGeneral` from free-text `resourceType` values |
-| [`affiliations`](commands/affiliations.md)                   | Match creator affiliation strings to ROR IDs                                |
+| [`affiliations`](commands/affiliations.md)                   | Match creator and contributor affiliation strings to ROR IDs                |
 | [`funders`](commands/funders.md)                             | Match funder names to ROR IDs                                               |
