@@ -12,7 +12,7 @@ mod parser;
 use anyhow::Result;
 use comet_enrich_core::{
     EnrichmentAction, EnrichmentMethod, EnrichmentParts, Extracted, HashBits, LookupConfig,
-    Lookups, RorLookup,
+    Lookups, RorLookup, datacite,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -97,7 +97,7 @@ impl EnrichmentMethod for Affiliations {
     type Lookup = RorLookup;
 
     fn extract(&self, record: &Value) -> Extracted<Self::Extraction> {
-        let Some(doi) = parser::extract_doi(record) else {
+        let Some(doi) = datacite::doi(record) else {
             return Extracted::Skip("no_doi");
         };
         let persons = parser::parse_persons(doi, record, self.hash_bits);
@@ -248,13 +248,31 @@ mod tests {
 
     #[test]
     fn extract_skips_record_without_doi() {
-        let record = json!({"attributes": {"creators": [
+        let missing = json!({"attributes": {"creators": [
             {"name": "Doe, Jane", "affiliation": [{"name": "MIT"}]}
         ]}});
-        assert!(matches!(
-            method().extract(&record),
-            Extracted::Skip("no_doi")
-        ));
+        let blank = json!({"id": "", "attributes": {
+            "doi": " ",
+            "creators": [{"name": "Doe, Jane", "affiliation": [{"name": "MIT"}]}]
+        }});
+        for record in [missing, blank] {
+            assert!(matches!(
+                method().extract(&record),
+                Extracted::Skip("no_doi")
+            ));
+        }
+    }
+
+    #[test]
+    fn extract_falls_back_to_attributes_doi_when_id_is_blank() {
+        let record = json!({"id": "", "attributes": {
+            "doi": "10.1234/attr",
+            "creators": [{"name": "Doe, Jane", "affiliation": [{"name": "MIT"}]}]
+        }});
+        match method().extract(&record) {
+            Extracted::Items(items) => assert_eq!(items[0].doi, "10.1234/attr"),
+            Extracted::Skip(r) => panic!("expected Items, got skip {r}"),
+        }
     }
 
     #[test]

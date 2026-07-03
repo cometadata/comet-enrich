@@ -7,14 +7,6 @@ use crate::identifiers::{IdentifierScheme, normalize_fundref, normalize_ror, sni
 use comet_enrich_core::{HashBits, hash_input};
 use serde_json::Value;
 
-/// DOI from the top-level `id`, falling back to `attributes.doi`.
-pub(crate) fn extract_doi(record: &Value) -> Option<&str> {
-    record
-        .get("id")
-        .and_then(Value::as_str)
-        .or_else(|| record.pointer("/attributes/doi").and_then(Value::as_str))
-}
-
 /// Extract one [`FundingExtraction`] per funding reference with a funder name.
 pub(crate) fn parse_funding_references(
     doi: &str,
@@ -92,6 +84,7 @@ fn resolve_identifier(entry: &Value) -> (Option<String>, Option<String>) {
 mod tests {
     use super::*;
 
+    use comet_enrich_core::datacite;
     use serde_json::json;
 
     fn single_doi(funding_refs: Value) -> Value {
@@ -101,7 +94,7 @@ mod tests {
     }
 
     fn parse(record: &Value) -> Vec<FundingExtraction> {
-        parse_funding_references(extract_doi(record).unwrap(), record, HashBits::Bits64)
+        parse_funding_references(datacite::doi(record).unwrap(), record, HashBits::Bits64)
     }
 
     #[test]
@@ -354,15 +347,11 @@ mod tests {
     }
 
     #[test]
-    fn extract_doi_falls_back_to_attributes_doi() {
-        assert_eq!(
-            extract_doi(&json!({"attributes": {"doi": "10.1234/attr"}})),
-            Some("10.1234/attr")
-        );
-        assert_eq!(
-            extract_doi(&json!({"id": "10.1234/id", "attributes": {"doi": "10.1234/attr"}})),
-            Some("10.1234/id")
-        );
-        assert_eq!(extract_doi(&json!({"attributes": {}})), None);
+    fn parse_uses_shared_doi_fallback() {
+        let record = json!({"id": "", "attributes": {
+            "doi": "10.1234/attr",
+            "fundingReferences": [{"funderName": "NSF"}]
+        }});
+        assert_eq!(parse(&record)[0].doi, "10.1234/attr");
     }
 }

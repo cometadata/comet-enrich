@@ -6,14 +6,6 @@ use crate::{AffiliationOccurrence, PersonExtraction, RecordField};
 use comet_enrich_core::{HashBits, hash_input};
 use serde_json::Value;
 
-/// DOI from the top-level `id`, falling back to `attributes.doi`.
-pub(crate) fn extract_doi(record: &Value) -> Option<&str> {
-    record
-        .get("id")
-        .and_then(Value::as_str)
-        .or_else(|| record.pointer("/attributes/doi").and_then(Value::as_str))
-}
-
 fn affiliation_name(entry: &Value) -> Option<&str> {
     match entry {
         Value::String(s) => Some(s),
@@ -110,10 +102,11 @@ fn parse_field(
 mod tests {
     use super::*;
 
+    use comet_enrich_core::datacite;
     use serde_json::json;
 
     fn parse(record: &Value) -> Vec<PersonExtraction> {
-        parse_persons(extract_doi(record).unwrap(), record, HashBits::Bits64)
+        parse_persons(datacite::doi(record).unwrap(), record, HashBits::Bits64)
     }
 
     #[test]
@@ -363,15 +356,11 @@ mod tests {
     }
 
     #[test]
-    fn extract_doi_falls_back_to_attributes_doi() {
-        assert_eq!(
-            extract_doi(&json!({"attributes": {"doi": "10.1234/attr"}})),
-            Some("10.1234/attr")
-        );
-        assert_eq!(
-            extract_doi(&json!({"id": "10.1234/id", "attributes": {"doi": "10.1234/attr"}})),
-            Some("10.1234/id")
-        );
-        assert_eq!(extract_doi(&json!({"attributes": {}})), None);
+    fn parse_uses_shared_doi_fallback() {
+        let record = json!({"id": "", "attributes": {
+            "doi": "10.1234/attr",
+            "creators": [{"name": "Doe, Jane", "affiliation": [{"name": "MIT"}]}]
+        }});
+        assert_eq!(parse(&record)[0].doi, "10.1234/attr");
     }
 }

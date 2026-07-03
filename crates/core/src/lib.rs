@@ -9,6 +9,7 @@
 #![allow(clippy::doc_markdown)]
 
 mod artifact_lifecycle;
+pub mod datacite;
 pub mod datacite_enums;
 pub mod dedup;
 mod fanout;

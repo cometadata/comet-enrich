@@ -108,7 +108,7 @@ fn cli_affiliations_constructs_and_validates_input() {
         ])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("no *.jsonl.gz input files found"));
+        .stderr(predicate::str::contains("input path is not a directory"));
 }
 
 #[test]

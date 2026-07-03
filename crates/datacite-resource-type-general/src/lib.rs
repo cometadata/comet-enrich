@@ -15,7 +15,9 @@ mod config;
 mod matcher;
 
 use anyhow::Result;
-use comet_enrich_core::{EnrichmentAction, EnrichmentMethod, EnrichmentParts, Extracted, Lookups};
+use comet_enrich_core::{
+    EnrichmentAction, EnrichmentMethod, EnrichmentParts, Extracted, Lookups, datacite,
+};
 use matcher::{MatchOutcome, Matcher};
 use serde_json::{Value, json};
 use std::collections::HashSet;
@@ -123,15 +125,14 @@ impl EnrichmentMethod for ResourceTypeGeneral {
             return Extracted::Skip("no_change");
         }
 
-        let doi = match record.get("id").and_then(Value::as_str) {
-            Some(s) if !s.is_empty() => s.to_string(),
-            _ => return Extracted::Skip("no_doi"),
+        let Some(doi) = datacite::doi(record) else {
+            return Extracted::Skip("no_doi");
         };
 
         let mut enriched = types.clone();
         enriched["resourceTypeGeneral"] = json!(matched);
         Extracted::Items(vec![EnrichmentParts {
-            doi,
+            doi: doi.to_owned(),
             action: EnrichmentAction::Update,
             field: "types",
             original: types.clone(),
@@ -252,8 +253,25 @@ mod tests {
     #[test]
     fn extract_skips_no_doi() {
         let m = test_method(scope_text_other_null());
-        let rec = json!({"attributes": {
+        let missing = json!({"attributes": {
             "types": {"resourceType": "Journal article", "resourceTypeGeneral": "Text"}}});
-        assert!(matches!(m.extract(&rec), Extracted::Skip("no_doi")));
+        let blank = json!({"id": "", "attributes": {
+            "doi": " ",
+            "types": {"resourceType": "Journal article", "resourceTypeGeneral": "Text"}}});
+        for record in [missing, blank] {
+            assert!(matches!(m.extract(&record), Extracted::Skip("no_doi")));
+        }
+    }
+
+    #[test]
+    fn extract_falls_back_to_attributes_doi_when_id_is_blank() {
+        let m = test_method(scope_text_other_null());
+        let rec = json!({"id": "", "attributes": {
+            "doi": "10.5281/attr",
+            "types": {"resourceType": "Journal article", "resourceTypeGeneral": "Text"}}});
+        match m.extract(&rec) {
+            Extracted::Items(items) => assert_eq!(items[0].doi, "10.5281/attr"),
+            Extracted::Skip(r) => panic!("expected Items, got skip {r}"),
+        }
     }
 }

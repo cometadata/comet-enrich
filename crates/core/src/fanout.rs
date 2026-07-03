@@ -1,11 +1,11 @@
 //! Shared input-file scanning helpers for the transform and staged runners.
 
 use anyhow::{Context, Result, bail};
-use glob::glob;
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
+use walkdir::WalkDir;
 
 /// Classifies per-file failures.
 #[derive(Debug)]
@@ -26,21 +26,29 @@ pub(crate) enum FileError {
 /// indistinguishable from a mistyped `--input` path, and must not become a
 /// clean-looking empty run.
 pub(crate) fn input_files(dir: &Path) -> Result<Vec<PathBuf>> {
-    let files = sorted_glob(&format!(
-        "{}/**/*.jsonl.gz",
-        dir.to_string_lossy().trim_end_matches('/')
-    ))?;
+    if !dir.is_dir() {
+        bail!("input path is not a directory: {}", dir.display());
+    }
+
+    let mut files = Vec::new();
+    for entry in WalkDir::new(dir) {
+        let entry = entry.with_context(|| format!("walking input directory {}", dir.display()))?;
+        if entry.file_type().is_file() && is_jsonl_gz(entry.path()) {
+            files.push(entry.into_path());
+        }
+    }
+    files.sort();
+
     if files.is_empty() {
         bail!("no *.jsonl.gz input files found under {}", dir.display());
     }
     Ok(files)
 }
 
-/// Glob `pattern` and return the matches in stable sorted order.
-pub(crate) fn sorted_glob(pattern: &str) -> Result<Vec<PathBuf>> {
-    let mut files: Vec<PathBuf> = glob(pattern)?.filter_map(Result::ok).collect();
-    files.sort();
-    Ok(files)
+fn is_jsonl_gz(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.ends_with(".jsonl.gz"))
 }
 
 /// Own the skip-reason keys collected during a run.
@@ -116,6 +124,7 @@ pub(crate) fn make_pool(threads: usize) -> Result<rayon::ThreadPool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use std::io::{BufReader, Cursor, Read};
 
     /// Reader that fails after its buffered prefix.
@@ -166,5 +175,68 @@ mod tests {
             Err(FileError::Fatal(_)) => panic!("read error must not be fatal"),
             Ok(_) => panic!("read error must fail the file"),
         }
+    }
+
+    #[test]
+    fn input_files_treats_glob_metacharacters_as_literal_path_chars() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("input[2024]?*");
+        let nested = input.join("updated_2024-01");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(nested.join("part_0000.jsonl.gz"), b"not checked here").unwrap();
+
+        let files = input_files(&input).unwrap();
+
+        assert_eq!(files, vec![nested.join("part_0000.jsonl.gz")]);
+    }
+
+    #[test]
+    fn input_files_returns_sorted_jsonl_gz_files_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path();
+        fs::create_dir_all(input.join("b")).unwrap();
+        fs::create_dir_all(input.join("a")).unwrap();
+        fs::write(input.join("b/part_0001.jsonl.gz"), b"").unwrap();
+        fs::write(input.join("a/part_0000.jsonl.gz"), b"").unwrap();
+        fs::write(input.join("a/ignore.jsonl"), b"").unwrap();
+        fs::write(input.join("a/ignore.gz"), b"").unwrap();
+
+        let files = input_files(input).unwrap();
+
+        assert_eq!(
+            files,
+            vec![
+                input.join("a/part_0000.jsonl.gz"),
+                input.join("b/part_0001.jsonl.gz")
+            ]
+        );
+    }
+
+    #[test]
+    fn input_files_errors_for_missing_input_root() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let err = input_files(&dir.path().join("missing")).unwrap_err();
+
+        assert!(err.to_string().contains("input path is not a directory"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn input_files_surfaces_traversal_errors() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let blocked = dir.path().join("blocked");
+        fs::create_dir(&blocked).unwrap();
+        let original = fs::metadata(&blocked).unwrap().permissions();
+        let mut locked = original.clone();
+        locked.set_mode(0o000);
+        fs::set_permissions(&blocked, locked).unwrap();
+
+        let err = input_files(dir.path()).unwrap_err();
+
+        fs::set_permissions(&blocked, original).unwrap();
+        assert!(err.to_string().contains("walking input directory"));
     }
 }

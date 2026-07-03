@@ -13,7 +13,7 @@ mod parser;
 use anyhow::Result;
 use comet_enrich_core::{
     EnrichmentAction, EnrichmentMethod, EnrichmentParts, Extracted, HashBits, LookupConfig,
-    Lookups, RorLookup,
+    Lookups, RorLookup, datacite,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -90,7 +90,7 @@ impl EnrichmentMethod for Funders {
     type Lookup = RorLookup;
 
     fn extract(&self, record: &Value) -> Extracted<Self::Extraction> {
-        let Some(doi) = parser::extract_doi(record) else {
+        let Some(doi) = datacite::doi(record) else {
             return Extracted::Skip("no_doi");
         };
         let refs = parser::parse_funding_references(doi, record, self.hash_bits);
@@ -250,11 +250,30 @@ mod tests {
     #[test]
     fn extract_skips_record_without_doi() {
         let dump = ror_dump_file();
-        let record = json!({"attributes": {"fundingReferences": [{"funderName": "NSF"}]}});
-        assert!(matches!(
-            method(&dump).extract(&record),
-            Extracted::Skip("no_doi")
-        ));
+        let missing = json!({"attributes": {"fundingReferences": [{"funderName": "NSF"}]}});
+        let blank = json!({"id": "", "attributes": {
+            "doi": " ",
+            "fundingReferences": [{"funderName": "NSF"}]
+        }});
+        for record in [missing, blank] {
+            assert!(matches!(
+                method(&dump).extract(&record),
+                Extracted::Skip("no_doi")
+            ));
+        }
+    }
+
+    #[test]
+    fn extract_falls_back_to_attributes_doi_when_id_is_blank() {
+        let dump = ror_dump_file();
+        let record = json!({"id": "", "attributes": {
+            "doi": "10.1234/attr",
+            "fundingReferences": [{"funderName": "NSF"}]
+        }});
+        match method(&dump).extract(&record) {
+            Extracted::Items(items) => assert_eq!(items[0].doi, "10.1234/attr"),
+            Extracted::Skip(r) => panic!("expected Items, got skip {r}"),
+        }
     }
 
     #[test]
