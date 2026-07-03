@@ -6,6 +6,7 @@ members = [
     "crates/datacite-affiliations",
     "crates/datacite-resource-type-general",
     "crates/datacite-funders",
+    "crates/test-support",
 ]
 
 [workspace.package]
@@ -27,17 +28,20 @@ missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 
 [workspace.dependencies]
-comet-enrichment-core = { path = "crates/core" }
-# Adding dependencies shared by two or more crates here
-# to make it easier to manage their versions
+comet-enrich-core = { path = "crates/core" }
+comet-enrich-test-support = { path = "crates/test-support" }
 anyhow = "1"
 flate2 = "1"
-jsonschema = { version = "0.18", default-features = false, features = ["resolve-file"] }
+jsonschema = { version = "0.46", default-features = false }
 log = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
-serde_yaml = "0.9"
+serde_yaml_ng = "0.10"
 tempfile = "3"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+async-trait = "0.1"
 
 [profile.release]
 strip = true
