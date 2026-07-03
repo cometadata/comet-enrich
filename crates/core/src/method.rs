@@ -5,7 +5,6 @@
 //! Methods return only the enrichment value parts; provenance is added later by
 //! build_enrichment_record.
 
-use anyhow::Result;
 use serde_json::Value;
 use std::collections::HashMap;
 
@@ -40,6 +39,10 @@ pub struct EnrichmentParts {
     pub doi: String,
     /// Action to apply for this record.
     pub action: EnrichmentAction,
+    /// Top-level DataCite field this record enriches, such as `"types"`. Set per
+    /// record so a method can target different fields across records (for example
+    /// affiliations emits both `"creators"` and `"contributors"`).
+    pub field: &'static str,
     pub original: Value,
     pub enriched: Value,
 }
@@ -64,21 +67,16 @@ pub trait EnrichmentMethod: Sync {
     /// Lookup result for one unique input. Use `()` for methods without lookups.
     type Lookup: Send;
 
-    /// Top-level DataCite field enriched by this method, such as `"types"`.
-    fn field(&self) -> &'static str;
-
     /// Extract values from one input record.
     fn extract(&self, record: &Value) -> Extracted<Self::Extraction>;
 
-    /// Resolve unique extracted inputs through an external service.
+    /// Unique lookup inputs contributed by one extraction.
     ///
-    /// Methods without lookups can use the default implementation.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if lookup resolution fails.
-    fn lookup(&self, _inputs: &[String]) -> Result<Lookups<Self::Lookup>> {
-        Ok(HashMap::new())
+    /// The staged runner collects these across the corpus, deduplicates them, and
+    /// resolves them through the match service; `map_back` re-derives the same hash
+    /// to index the results. Transform methods keep the default (no inputs).
+    fn inputs(&self, _extraction: &Self::Extraction) -> Vec<String> {
+        Vec::new()
     }
 
     /// Map one extraction back into enrichment value fields.
@@ -87,4 +85,51 @@ pub trait EnrichmentMethod: Sync {
         extraction: Self::Extraction,
         lookups: &Lookups<Self::Lookup>,
     ) -> Vec<EnrichmentParts>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct TransformOnly;
+
+    impl EnrichmentMethod for TransformOnly {
+        type Extraction = ();
+        type Lookup = ();
+
+        fn extract(&self, _record: &Value) -> Extracted<Self::Extraction> {
+            Extracted::Items(vec![()])
+        }
+
+        fn map_back(
+            &self,
+            _extraction: Self::Extraction,
+            _lookups: &Lookups<Self::Lookup>,
+        ) -> Vec<EnrichmentParts> {
+            Vec::new()
+        }
+    }
+
+    // Transform-only methods intentionally use `Lookup = ()`; this test pins that
+    // the generic `Lookups<L>` API still works for that no-lookup case.
+    #[allow(clippy::zero_sized_map_values)]
+    #[test]
+    fn enrichment_method_default_lookup_hooks_are_empty() {
+        let method = TransformOnly;
+        let lookups = Lookups::new();
+
+        assert!(
+            matches!(method.extract(&Value::Null), Extracted::Items(items) if items == vec![()])
+        );
+        assert!(method.inputs(&()).is_empty());
+        assert!(method.map_back((), &lookups).is_empty());
+    }
+
+    #[test]
+    fn enrichment_action_matches_schema_values() {
+        assert_eq!(EnrichmentAction::Update.as_str(), "update");
+        assert_eq!(EnrichmentAction::UpdateChild.as_str(), "updateChild");
+        assert_eq!(EnrichmentAction::Insert.as_str(), "insert");
+        assert_eq!(EnrichmentAction::DeleteChild.as_str(), "deleteChild");
+    }
 }

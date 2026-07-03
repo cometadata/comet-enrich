@@ -1,10 +1,10 @@
 //! Provenance config and record-building helpers.
 //!
-//! A provenance YAML file describes the contributors and resources added to every
-//! enrichment record. The file is loaded once into an [`EnrichmentTemplate`], then
-//! reused while records are written.
+//! Provenance YAML is loaded into an [`EnrichmentTemplate`] and reused while
+//! records are written.
 
 use crate::datacite_enums;
+use crate::method::EnrichmentParts;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -104,8 +104,7 @@ impl EnrichmentTemplate {
     /// Build a reusable template from a provenance config.
     #[must_use]
     pub fn from_config(cfg: &EnrichmentConfig) -> Self {
-        // The config structs already match the output JSON shape through their
-        // serde rename and skip_serializing_if attributes.
+        // The config structs already match the output JSON shape.
         let contributors = Value::Array(
             cfg.contributors
                 .iter()
@@ -126,33 +125,23 @@ impl EnrichmentTemplate {
     }
 }
 
-/// Build one enrichment record from method output and the shared provenance template.
+/// Build one enrichment record.
 ///
-/// `field` is the top-level DataCite field being enriched, such as `"types"`.
 /// Key order is fixed and covered by tests.
 #[must_use]
-pub fn build_enrichment_record(
-    template: &EnrichmentTemplate,
-    doi: &str,
-    action: &str,
-    field: &str,
-    original_value: Value,
-    enriched_value: Value,
-) -> Value {
+pub fn build_enrichment_record(template: &EnrichmentTemplate, parts: EnrichmentParts) -> Value {
     let mut m = serde_json::Map::new();
-    m.insert("doi".into(), json!(doi));
+    m.insert("doi".into(), json!(parts.doi));
     m.insert("contributors".into(), template.contributors.clone());
     m.insert("resources".into(), template.resources.clone());
-    m.insert("action".into(), json!(action));
-    m.insert("field".into(), json!(field));
-    m.insert("originalValue".into(), original_value);
-    m.insert("enrichedValue".into(), enriched_value);
+    m.insert("action".into(), json!(parts.action.as_str()));
+    m.insert("field".into(), json!(parts.field));
+    m.insert("originalValue".into(), parts.original);
+    m.insert("enrichedValue".into(), parts.enriched);
     Value::Object(m)
 }
 
-/// Load provenance YAML and render it for use in emitted records.
-///
-/// This is called before scanning input files so provenance errors fail quickly.
+/// Load provenance YAML for emitted records.
 ///
 /// # Errors
 ///
@@ -170,7 +159,7 @@ pub fn load_template<P: AsRef<Path>>(path: P) -> Result<EnrichmentTemplate> {
 pub fn load_enrichment<P: AsRef<Path>>(path: P) -> Result<EnrichmentConfig> {
     let text = std::fs::read_to_string(path.as_ref())
         .with_context(|| format!("reading {}", path.as_ref().display()))?;
-    let cfg: EnrichmentConfig = serde_yaml::from_str(&text)
+    let cfg: EnrichmentConfig = serde_yaml_ng::from_str(&text)
         .with_context(|| format!("parsing {}", path.as_ref().display()))?;
     validate_enrichment(&cfg)
         .with_context(|| format!("invalid provenance in {}", path.as_ref().display()))?;
@@ -199,10 +188,6 @@ fn push_unknown(
 }
 
 /// Validate provenance against the COMET Enrichment Data Model.
-///
-/// Checks DataCite controlled-vocabulary fields and the required COMET provenance
-/// entries. All problems are collected and returned together so the config can be
-/// fixed in one pass.
 ///
 /// # Errors
 ///
@@ -311,6 +296,7 @@ pub fn validate_enrichment(cfg: &EnrichmentConfig) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::method::EnrichmentAction;
 
     fn simple_template() -> EnrichmentTemplate {
         let yaml = r#"
@@ -322,7 +308,7 @@ resources:
     relatedIdentifierType: DOI
     relationType: IsDocumentedBy
 "#;
-        let cfg: EnrichmentConfig = serde_yaml::from_str(yaml).unwrap();
+        let cfg: EnrichmentConfig = serde_yaml_ng::from_str(yaml).unwrap();
         EnrichmentTemplate::from_config(&cfg)
     }
 
@@ -331,11 +317,13 @@ resources:
         let t = simple_template();
         let rec = build_enrichment_record(
             &t,
-            "10.5281/x",
-            "update",
-            "types",
-            json!({"a":1}),
-            json!({"a":2}),
+            EnrichmentParts {
+                doi: "10.5281/x".to_owned(),
+                action: EnrichmentAction::Update,
+                field: "types",
+                original: json!({"a":1}),
+                enriched: json!({"a":2}),
+            },
         );
         let s = serde_json::to_string(&rec).unwrap();
         let order = [
@@ -371,11 +359,13 @@ resources:
         enriched["resourceTypeGeneral"] = json!("JournalArticle");
         let rec = build_enrichment_record(
             &t,
-            "10.x/y",
-            "update",
-            "types",
-            original.clone(),
-            enriched.clone(),
+            EnrichmentParts {
+                doi: "10.x/y".to_owned(),
+                action: EnrichmentAction::Update,
+                field: "types",
+                original: original.clone(),
+                enriched: enriched.clone(),
+            },
         );
         for k in ["resourceType", "bibtex", "citeproc", "schemaOrg", "ris"] {
             assert_eq!(rec["originalValue"][k], original[k]);
@@ -388,7 +378,6 @@ resources:
         );
     }
 
-    /// Minimal config satisfying the full model: COMET Producer plus both required resources.
     const VALID_YAML: &str = r#"
 contributors:
   - name: "COMET"
@@ -407,7 +396,7 @@ resources:
 
     #[test]
     fn load_enrichment_parses_sample_yaml() {
-        let cfg: EnrichmentConfig = serde_yaml::from_str(VALID_YAML).unwrap();
+        let cfg: EnrichmentConfig = serde_yaml_ng::from_str(VALID_YAML).unwrap();
         assert_eq!(cfg.contributors[0].name, "COMET");
         assert_eq!(cfg.resources[0].related_identifier, "10.82461/bpzr-jd55");
         validate_enrichment(&cfg).unwrap();
@@ -415,7 +404,6 @@ resources:
 
     #[test]
     fn validate_enrichment_rejects_unknown_contributor_type() {
-        // Valid base config plus one contributor with a bad contributorType.
         let yaml = r#"
 contributors:
   - name: "COMET"
@@ -433,7 +421,7 @@ resources:
     relationType: "IsDerivedFrom"
     resourceTypeGeneral: "Dataset"
 "#;
-        let cfg: EnrichmentConfig = serde_yaml::from_str(yaml).unwrap();
+        let cfg: EnrichmentConfig = serde_yaml_ng::from_str(yaml).unwrap();
         let err = validate_enrichment(&cfg).unwrap_err().to_string();
         assert!(err.contains("BadType"), "got: {err}");
         assert!(err.contains("contributors[1]"), "got: {err}");
@@ -475,11 +463,10 @@ resources:
     relationType: "IsDerivedFrom"
     resourceTypeGeneral: "Dataset"
 "#;
-        let cfg: EnrichmentConfig = serde_yaml::from_str(yaml).unwrap();
+        let cfg: EnrichmentConfig = serde_yaml_ng::from_str(yaml).unwrap();
         validate_enrichment(&cfg).unwrap();
         let template = EnrichmentTemplate::from_config(&cfg);
 
-        // The community contributor keeps `lang` and the typed ROR identifier.
         assert_eq!(
             template.contributors[1],
             json!({
@@ -494,7 +481,6 @@ resources:
                 }]
             })
         );
-        // The curator keeps the typed affiliation and ORCID identifier.
         assert_eq!(
             template.contributors[2],
             json!({
@@ -517,7 +503,6 @@ resources:
 
     #[test]
     fn rejects_unknown_field() {
-        // A typo should fail at parse time, not disappear from the output.
         let yaml = r#"
 contributors:
   - name: "COMET"
@@ -529,7 +514,7 @@ resources:
     relationType: "IsDocumentedBy"
     resourceTypeGeneral: "Project"
 "#;
-        let err = serde_yaml::from_str::<EnrichmentConfig>(yaml).unwrap_err();
+        let err = serde_yaml_ng::from_str::<EnrichmentConfig>(yaml).unwrap_err();
         assert!(err.to_string().contains("unknown field"), "got: {err}");
     }
 
@@ -553,9 +538,8 @@ resources:
     relationType: "IsDervedFrom"
     resourceTypeGeneral: "Dataset"
 "#;
-        let cfg: EnrichmentConfig = serde_yaml::from_str(yaml).unwrap();
+        let cfg: EnrichmentConfig = serde_yaml_ng::from_str(yaml).unwrap();
         let err = validate_enrichment(&cfg).unwrap_err().to_string();
-        // Report both invalid controlled-vocabulary values in one error.
         assert!(err.contains("contributors[1]"), "got: {err}");
         assert!(err.contains("Producr"), "got: {err}");
         assert!(err.contains("resources[1]"), "got: {err}");
@@ -564,7 +548,6 @@ resources:
 
     #[test]
     fn validate_enrichment_enforces_required_entries() {
-        // Missing the derived Dataset resource.
         let no_dataset = r#"
 contributors:
   - name: "COMET"
@@ -576,11 +559,10 @@ resources:
     relationType: "IsDocumentedBy"
     resourceTypeGeneral: "Project"
 "#;
-        let cfg: EnrichmentConfig = serde_yaml::from_str(no_dataset).unwrap();
+        let cfg: EnrichmentConfig = serde_yaml_ng::from_str(no_dataset).unwrap();
         let err = validate_enrichment(&cfg).unwrap_err().to_string();
         assert!(err.contains("IsDerivedFrom / Dataset"), "got: {err}");
 
-        // Missing the Project documentation resource.
         let no_project = r#"
 contributors:
   - name: "COMET"
@@ -592,11 +574,10 @@ resources:
     relationType: "IsDerivedFrom"
     resourceTypeGeneral: "Dataset"
 "#;
-        let cfg: EnrichmentConfig = serde_yaml::from_str(no_project).unwrap();
+        let cfg: EnrichmentConfig = serde_yaml_ng::from_str(no_project).unwrap();
         let err = validate_enrichment(&cfg).unwrap_err().to_string();
         assert!(err.contains("IsDocumentedBy / Project"), "got: {err}");
 
-        // Missing the COMET Producer contributor.
         let no_comet = r#"
 contributors:
   - name: "eLife"
@@ -612,7 +593,7 @@ resources:
     relationType: "IsDerivedFrom"
     resourceTypeGeneral: "Dataset"
 "#;
-        let cfg: EnrichmentConfig = serde_yaml::from_str(no_comet).unwrap();
+        let cfg: EnrichmentConfig = serde_yaml_ng::from_str(no_comet).unwrap();
         let err = validate_enrichment(&cfg).unwrap_err().to_string();
         assert!(
             err.contains("COMET / Organizational / Producer"),
