@@ -54,5 +54,10 @@ build:
 build-release:
 > RUSTFLAGS="$(if $(RUST_TARGET_CPU),-C target-cpu=$(RUST_TARGET_CPU))" cargo build --release --workspace $(if $(RUST_TARGET),--target $(RUST_TARGET))
 
+# Build the release binary and install it, with shell completions, into ~/.local/bin
+# (override with COMET_ENRICH_BIN_DIR).
+install:
+> ./install-local.sh
+
 clean:
 > cargo clean

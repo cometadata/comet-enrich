@@ -21,6 +21,7 @@ set -eu
 
 REPO="cometadata/comet-enrich"
 BIN_NAME="comet-enrich"
+# Release asset suffixes; keep in sync with the matrix in .github/workflows/release.yml.
 KNOWN_TARGETS="x86_64-v3-unknown-linux-musl x86_64-unknown-linux-musl aarch64-unknown-linux-musl aarch64-apple-darwin"
 
 version="${COMET_ENRICH_VERSION:-}"
@@ -59,21 +60,12 @@ Options (flags override the matching environment variable):
 EOF
 }
 
-fetch() {
-    if command -v curl >/dev/null 2>&1; then
-        curl -fsSL "$1"
-    elif command -v wget >/dev/null 2>&1; then
-        wget -qO- "$1"
-    else
-        die "need curl or wget to download files"
-    fi
-}
-
+# Download $1 to file $2, or to stdout when $2 is omitted.
 download() {
     if command -v curl >/dev/null 2>&1; then
-        curl -fsSL -o "$2" "$1"
+        curl -fsSL -o "${2:--}" "$1"
     elif command -v wget >/dev/null 2>&1; then
-        wget -qO "$2" "$1"
+        wget -qO "${2:--}" "$1"
     else
         die "need curl or wget to download files"
     fi
@@ -123,8 +115,8 @@ resolve_version() {
         return
     fi
     info "looking up the latest release"
-    version=$(fetch "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null |
-        sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1) || version=""
+    version=$(download "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null |
+        sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
     if [ -z "$version" ]; then
         die "could not determine the latest release. If only pre-releases exist, pin one, e.g.:
   --version v0.1.0-rc1   (or COMET_ENRICH_VERSION=v0.1.0-rc1)
@@ -141,14 +133,15 @@ download_and_verify() {
     download "$url.sha256" "$tmpdir/$asset.sha256" ||
         die "download failed for the checksum file $asset.sha256"
     if command -v sha256sum >/dev/null 2>&1; then
-        (cd "$tmpdir" && sha256sum -c "$asset.sha256" >/dev/null 2>&1) ||
-            die "checksum verification failed for $asset"
+        sha_cmd="sha256sum"
     elif command -v shasum >/dev/null 2>&1; then
-        (cd "$tmpdir" && shasum -a 256 -c "$asset.sha256" >/dev/null 2>&1) ||
-            die "checksum verification failed for $asset"
+        sha_cmd="shasum -a 256"
     else
         die "need sha256sum or shasum to verify the download"
     fi
+    # $sha_cmd is unquoted so "shasum -a 256" word-splits into its arguments.
+    (cd "$tmpdir" && $sha_cmd -c "$asset.sha256" >/dev/null 2>&1) ||
+        die "checksum verification failed for $asset"
     info "checksum verified"
     tar -xzf "$tmpdir/$asset" -C "$tmpdir"
     [ -f "$tmpdir/$BIN_NAME" ] || die "$asset did not contain the $BIN_NAME binary"
@@ -184,7 +177,8 @@ generate_completion() {
 }
 
 install_completions() {
-    shell_name=$(basename "${SHELL:-}")
+    shell_name=${SHELL:-}
+    shell_name=${shell_name##*/}
     case "$shell_name" in
         bash)
             dest="${XDG_DATA_HOME:-$HOME/.local/share}/bash-completion/completions/$BIN_NAME"
@@ -213,13 +207,13 @@ install_completions() {
 main() {
     while [ $# -gt 0 ]; do
         case "$1" in
-            --version) version="${2:?--version needs a value}" && shift ;;
+            --version) version="${2:?--version needs a value}"; shift ;;
             --version=*) version="${1#--version=}" ;;
-            --bin-dir) bin_dir="${2:?--bin-dir needs a value}" && shift ;;
+            --bin-dir) bin_dir="${2:?--bin-dir needs a value}"; shift ;;
             --bin-dir=*) bin_dir="${1#--bin-dir=}" ;;
-            --target) target="${2:?--target needs a value}" && shift ;;
+            --target) target="${2:?--target needs a value}"; shift ;;
             --target=*) target="${1#--target=}" ;;
-            --base-url) base_url="${2:?--base-url needs a value}" && shift ;;
+            --base-url) base_url="${2:?--base-url needs a value}"; shift ;;
             --base-url=*) base_url="${1#--base-url=}" ;;
             --no-completions) completions=0 ;;
             -h | --help)
@@ -234,7 +228,8 @@ main() {
     detect_platform
     resolve_version
     tmpdir=$(mktemp -d)
-    trap 'rm -rf "$tmpdir"' EXIT INT TERM
+    trap 'rm -rf "$tmpdir"' EXIT
+    trap 'exit 1' INT TERM
     download_and_verify
     install_binary
     if [ "$completions" -eq 1 ]; then
