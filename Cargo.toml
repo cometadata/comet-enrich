@@ -30,7 +30,7 @@ missing_panics_doc = "allow"
 [workspace.dependencies]
 comet-enrich-core = { path = "crates/core" }
 comet-enrich-test-support = { path = "crates/test-support" }
-anyhow = "1"
+anyhow = "1.0.103"
 flate2 = "1"
 jsonschema = { version = "0.46", default-features = false }
 log = "0.4"

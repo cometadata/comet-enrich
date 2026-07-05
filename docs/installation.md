@@ -88,6 +88,20 @@ make build-release RUST_TARGET_CPU=x86-64-v3   # AVX2-class x86-64 baseline
 RUST_TARGET_CPU=znver3 make build-release      # or set it in the environment
 ```
 
+### Install from source
+
+Build and install locally with:
+
+```bash
+./install-local.sh        # or: make install
+```
+
+This compiles the release binary, installs it to `~/.local/bin`, and adds shell completions.
+
+Use `--bin-dir` or `COMET_ENRICH_BIN_DIR` to change the install path, `--target-cpu` or `RUST_TARGET_CPU`
+to tune the build, and `--no-completions` to skip completions.
+Run `./install-local.sh --help` for all options.
+
 ## Prebuilt binaries
 
 Tagged releases include prebuilt binaries on the
