@@ -28,7 +28,7 @@ Running `funders` without a stage runs the whole pipeline. Intermediate files ar
 comet-enrich funders \
   --input <DIR> --output <DIR> \
   --provenance <FILE> --ror-file <FILE> \
-  [OPTIONS] [extract|query|reconcile]
+  [OPTIONS] [--stage <extract|query|reconcile>]
 ```
 
 ## Options
@@ -44,18 +44,19 @@ In addition to the [global options](../usage.md#global-options):
 | `--ror-timeout <SECS>`    | `30`                    | ROR match-service request timeout in seconds                                               |
 | `--hash-bits <N>`         | `64`                    | Dedup hash width (`64` or `128`)                                                          |
 | `--from-scratch`          | off                     | Ignore existing stage outputs in `.work` and rerun all stages                             |
+| `--stage <STAGE>`         | all stages              | Run a single stage: `extract`, `query`, or `reconcile`                                    |
 
 ## Stages
 
-Run a single stage by naming it after the method:
+Run a single stage with `--stage`:
 
 ```bash
-comet-enrich funders extract   ...   # collect the unique funder names
-comet-enrich funders query     ...   # match them against Marple
-comet-enrich funders reconcile ...   # emit the enrichment records
+comet-enrich funders ... --stage extract     # collect the unique funder names
+comet-enrich funders ... --stage query       # match them against Marple
+comet-enrich funders ... --stage reconcile   # emit the enrichment records
 ```
 
-Omit the stage to run all three in order.
+Omit `--stage` to run all three in order.
 
 ## Full pipeline example
 

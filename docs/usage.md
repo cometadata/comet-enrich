@@ -9,12 +9,12 @@ comet-enrich <method> [OPTIONS]
 The available methods are [`resource-type-general`](commands/resource-type-general.md),
 [`affiliations`](commands/affiliations.md), and [`funders`](commands/funders.md).
 
-Use `--help` on the binary, a method, or a method stage to see the available options:
+Use `--help` on the binary or a method to see the available options:
 
 ```bash
 comet-enrich --help
 comet-enrich resource-type-general --help
-comet-enrich affiliations query --help
+comet-enrich affiliations --help
 ```
 
 ## Quick start

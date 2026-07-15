@@ -148,7 +148,7 @@ Two checks keep the extraction and lookup files in sync:
   input files have changed.
 
 `--from-scratch` clears the work directory and starts again. A single stage can also be rerun, for
-example `comet-enrich affiliations query`, but only if the previous stage files already exist.
+example `comet-enrich affiliations --stage query`, but only if the previous stage files already exist.
 
 ### Match service client
 

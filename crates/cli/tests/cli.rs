@@ -67,11 +67,13 @@ fn cli_completions_help_shows_install_instructions() {
 }
 
 #[test]
-fn cli_stage_help_displays() {
+fn cli_stage_option_listed() {
     cli()
-        .args(["affiliations", "query", "--help"])
+        .args(["affiliations", "--help"])
         .assert()
-        .success();
+        .success()
+        .stdout(predicate::str::contains("--stage <STAGE>"))
+        .stdout(predicate::str::contains("query"));
 }
 
 #[test]
