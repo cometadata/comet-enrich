@@ -385,6 +385,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "comet-enrich-tools"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "flate2",
+ "serde_json",
+ "xxhash-rust",
+]
+
+[[package]]
 name = "console"
 version = "0.15.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"

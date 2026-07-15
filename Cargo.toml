@@ -7,6 +7,7 @@ members = [
     "crates/datacite-resource-type-general",
     "crates/datacite-funders",
     "crates/test-support",
+    "crates/tools",
 ]
 
 [workspace.package]
