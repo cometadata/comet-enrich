@@ -101,9 +101,10 @@ pub trait MatchService: Send + Sync {
     async fn match_bulk(&self, inputs: &[String], task: &str) -> Result<Vec<MatchOutcome>>;
 }
 
+/// Request body for `POST /match/bulk`.
 #[derive(Serialize)]
-struct BulkRequest<'a> {
-    inputs: &'a [String],
+pub struct BulkRequest<'a> {
+    pub inputs: &'a [String],
 }
 
 #[derive(Deserialize)]
@@ -163,6 +164,38 @@ fn outcome_from_bulk_item(item: BulkOuterItem) -> Result<MatchOutcome> {
     }
 }
 
+/// Build a Marple HTTP client with a per-request timeout.
+///
+/// Idle connections are not pooled, which distributes requests across workers.
+pub fn build_http_client(timeout: Duration) -> Result<Client> {
+    Client::builder()
+        .timeout(timeout)
+        .pool_max_idle_per_host(0)
+        .build()
+        .context("building HTTP client")
+}
+
+/// Parse a `/match/bulk` response into one [`MatchOutcome`] per expected input.
+///
+/// Fails on invalid JSON, an unexpected result count, or an unknown slot status.
+pub fn parse_bulk_outcomes(text: &str, expected_len: usize) -> Result<Vec<MatchOutcome>> {
+    let parsed: BulkResponse = serde_json::from_str(text)
+        .with_context(|| format!("parsing match response (body: {})", truncate(text, 200)))?;
+    if parsed.message.items.len() != expected_len {
+        return Err(anyhow!(
+            "bulk response length mismatch: got {} results for {} inputs",
+            parsed.message.items.len(),
+            expected_len
+        ));
+    }
+    parsed
+        .message
+        .items
+        .into_iter()
+        .map(outcome_from_bulk_item)
+        .collect()
+}
+
 /// The real bulk client for the Marple match service.
 pub struct MarpleClient {
     client: Client,
@@ -178,10 +211,7 @@ impl MarpleClient {
     /// client cannot be built.
     pub fn new(base_url: impl Into<String>, timeout: Duration) -> Result<Self> {
         let base = Url::parse(&base_url.into()).context("invalid match-service URL")?;
-        let client = Client::builder()
-            .timeout(timeout)
-            .build()
-            .context("building HTTP client")?;
+        let client = build_http_client(timeout)?;
         Ok(Self { client, base })
     }
 
@@ -221,26 +251,7 @@ impl MatchService for MarpleClient {
                     let status = response.status();
                     if status.is_success() {
                         let text = response.text().await?;
-                        let parsed: BulkResponse =
-                            serde_json::from_str(&text).with_context(|| {
-                                format!(
-                                    "parsing match response (status {status}, body: {})",
-                                    truncate(&text, 200)
-                                )
-                            })?;
-                        if parsed.message.items.len() != inputs.len() {
-                            return Err(anyhow!(
-                                "bulk response length mismatch: got {} results for {} inputs",
-                                parsed.message.items.len(),
-                                inputs.len()
-                            ));
-                        }
-                        return parsed
-                            .message
-                            .items
-                            .into_iter()
-                            .map(outcome_from_bulk_item)
-                            .collect::<Result<Vec<_>>>();
+                        return parse_bulk_outcomes(&text, inputs.len());
                     } else if status == StatusCode::PAYLOAD_TOO_LARGE {
                         return Err(anyhow!(
                             "batch size {} exceeds the match-service batch cap (HTTP 413); reduce the per-request batch size",
@@ -408,6 +419,50 @@ mod tests {
             .match_bulk(&["MIT".to_owned()], "affiliation")
             .await;
         assert!(out.is_err());
+    }
+
+    #[test]
+    fn parse_bulk_outcomes_maps_slots() {
+        let body = serde_json::json!({"message": {"items": [
+            {"status": "ok", "items": [{"id": "https://ror.org/02mhbdp94", "confidence": 0.9}]},
+            {"status": "ok", "items": []},
+            {"status": "error", "error": {"code": "E", "message": "boom"}, "items": []},
+        ]}})
+        .to_string();
+        let out = parse_bulk_outcomes(&body, 3).unwrap();
+        assert_eq!(
+            out[0],
+            MatchOutcome::Match(MatchHit {
+                id: "https://ror.org/02mhbdp94".to_owned(),
+                confidence: 0.9
+            })
+        );
+        assert_eq!(out[1], MatchOutcome::NoMatch);
+        assert_eq!(
+            out[2],
+            MatchOutcome::Error(MatchError {
+                code: "E".to_owned(),
+                message: "boom".to_owned()
+            })
+        );
+    }
+
+    #[test]
+    fn parse_bulk_outcomes_rejects_length_mismatch() {
+        let body = serde_json::json!({"message": {"items": []}}).to_string();
+        assert_err_contains(parse_bulk_outcomes(&body, 2), "length mismatch");
+    }
+
+    #[test]
+    fn parse_bulk_outcomes_rejects_unparseable_body() {
+        assert_err_contains(parse_bulk_outcomes("not json", 1), "parsing match response");
+    }
+
+    #[test]
+    fn parse_bulk_outcomes_rejects_unknown_status() {
+        let body = serde_json::json!({"message": {"items": [{"status": "pending", "items": []}]}})
+            .to_string();
+        assert_err_contains(parse_bulk_outcomes(&body, 1), "unknown bulk item status");
     }
 
     #[test]

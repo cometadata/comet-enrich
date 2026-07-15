@@ -28,7 +28,8 @@ pub use manifest::{HashInfo, Manifest, Report, RunMeta, SourceRelease, StageTimi
 #[cfg(any(test, feature = "test-support"))]
 pub use match_service::FakeMatchService;
 pub use match_service::{
-    MarpleClient, MatchError, MatchHit, MatchOutcome, MatchService, RorLookup,
+    BulkRequest, MarpleClient, MatchError, MatchHit, MatchOutcome, MatchService, RorLookup,
+    build_http_client, parse_bulk_outcomes,
 };
 pub use method::{EnrichmentAction, EnrichmentMethod, EnrichmentParts, Extracted, Lookups};
 pub use options::{RunOptions, RunStats};
