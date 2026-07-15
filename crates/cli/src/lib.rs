@@ -101,7 +101,7 @@ pub struct AffiliationsArgs {
     pub run: RunArgs,
 
     /// Run a single stage instead of the whole pipeline.
-    #[command(subcommand)]
+    #[arg(long, value_enum, value_name = "STAGE", help_heading = "Options")]
     pub stage: Option<StageArg>,
 }
 
@@ -122,7 +122,7 @@ pub struct FundersArgs {
     pub run: RunArgs,
 
     /// Run a single stage instead of the whole pipeline.
-    #[command(subcommand)]
+    #[arg(long, value_enum, value_name = "STAGE", help_heading = "Options")]
     pub stage: Option<StageArg>,
 }
 
@@ -398,6 +398,7 @@ mod tests {
             "out.jsonl",
             "--provenance",
             "e.yaml",
+            "--stage",
             "query",
         ])
         .unwrap();

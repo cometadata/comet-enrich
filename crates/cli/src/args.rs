@@ -1,7 +1,7 @@
 //! Shared CLI arguments for `comet-enrich`.
 
 use anyhow::{Result, bail};
-use clap::{Args, Subcommand, ValueEnum};
+use clap::{Args, ValueEnum};
 use comet_enrich_core::{
     DEFAULT_OUTPUT_PART_SIZE_MIB, DEFAULT_OUTPUT_WRITER_LANES, HashBits, LookupConfig, RunOptions,
     SCHEMA, SourceRelease, Stage, schema,
@@ -263,7 +263,7 @@ impl From<HashBitsArg> for HashBits {
 }
 
 /// Pipeline stage to run on its own.
-#[derive(Subcommand, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StageArg {
     /// Scan the corpus and collect the unique inputs to look up.
     Extract,
