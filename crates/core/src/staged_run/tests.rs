@@ -3,7 +3,7 @@ use super::report::{classify_failure, histogram_bucket};
 use super::*;
 use crate::dedup::HashBits;
 use crate::manifest::{MANIFEST_FILE, MatchFailureTaxonomy, Report};
-use crate::match_service::{FakeMatchService, RorLookup};
+use crate::match_service::{FakeMatchService, MatchError, MatchOutcome, RorLookup};
 use crate::method::{EnrichmentAction, EnrichmentMethod, EnrichmentParts, Extracted, Lookups};
 use crate::options::RunOptions;
 use crate::provenance::EnrichmentTemplate;
@@ -104,11 +104,7 @@ struct PanickingMatchService;
 
 #[async_trait]
 impl MatchService for PanickingMatchService {
-    async fn match_bulk(
-        &self,
-        _inputs: &[String],
-        _task: &str,
-    ) -> Result<Vec<Option<(String, f64)>>> {
+    async fn match_bulk(&self, _inputs: &[String], _task: &str) -> Result<Vec<MatchOutcome>> {
         panic!("simulated query panic");
     }
 }
@@ -705,6 +701,39 @@ fn batch_timeout_is_lost_data_not_success() {
     assert_eq!(m.failure_taxonomy.timeout, 3);
     assert_eq!(m.failure_taxonomy.error, 0);
     assert_eq!(m.failure_taxonomy.lost(), 3);
+    let status = crate::exit_status(0, 0, m.failure_taxonomy.lost(), true);
+    assert_eq!(status, "partial");
+}
+
+#[test]
+fn item_error_is_recorded_not_certified_as_no_match() {
+    let mut t = TestRun::new();
+    let mut matches = HashMap::new();
+    matches.insert(
+        "MIT".to_owned(),
+        ("https://ror.org/042nb2s44".to_owned(), 0.99),
+    );
+    matches.insert(
+        "NSF".to_owned(),
+        ("https://ror.org/021nxhr62".to_owned(), 0.95),
+    );
+    let mut item_errors = HashMap::new();
+    item_errors.insert(
+        "Unknown University".to_owned(),
+        MatchError {
+            code: "opensearch_rejected".to_owned(),
+            message: "OpenSearch rejected this search after retries".to_owned(),
+        },
+    );
+    t.svc = Arc::new(FakeMatchService::with_item_errors(matches, item_errors));
+
+    let report = t.run(true).unwrap();
+
+    let m = report.match_.expect("match block present");
+    assert_eq!(m.matched, 2);
+    assert_eq!(m.failure_taxonomy.error, 1);
+    assert_eq!(m.failure_taxonomy.no_match, 0);
+    assert_eq!(m.failure_taxonomy.lost(), 1);
     let status = crate::exit_status(0, 0, m.failure_taxonomy.lost(), true);
     assert_eq!(status, "partial");
 }

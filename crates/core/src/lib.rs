@@ -27,7 +27,9 @@ pub use dedup::{DedupStore, HashBits, hash_input};
 pub use manifest::{HashInfo, Manifest, Report, RunMeta, SourceRelease, StageTimings, exit_status};
 #[cfg(any(test, feature = "test-support"))]
 pub use match_service::FakeMatchService;
-pub use match_service::{MarpleClient, MatchHit, MatchService, RorLookup};
+pub use match_service::{
+    MarpleClient, MatchError, MatchHit, MatchOutcome, MatchService, RorLookup,
+};
 pub use method::{EnrichmentAction, EnrichmentMethod, EnrichmentParts, Extracted, Lookups};
 pub use options::{RunOptions, RunStats};
 pub use provenance::{EnrichmentTemplate, build_enrichment_record, load_template};

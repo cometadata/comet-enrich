@@ -1,6 +1,6 @@
 use super::{INPUTS_FILE, LOOKUPS_FAILED_FILE, LOOKUPS_FILE, LookupConfig, for_each_jsonl};
 use crate::fanout::progress_bar;
-use crate::match_service::{MatchHit, MatchService};
+use crate::match_service::{MatchHit, MatchOutcome, MatchService};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -118,26 +118,7 @@ where
 
                 match svc.match_bulk(&values, &task).await {
                     Ok(results) => {
-                        let mut hits: Vec<String> = Vec::new();
-                        let mut misses: Vec<String> = Vec::new();
-                        for (rec, res) in batch.iter().zip(results) {
-                            match res {
-                                Some((id, confidence)) => {
-                                    let row = LookupRow {
-                                        value: rec.value.clone(),
-                                        hash: rec.hash.clone(),
-                                        lookup: L::from(MatchHit { id, confidence }),
-                                    };
-                                    hits.push(serde_json::to_string(&row)?);
-                                }
-                                None => misses.push(serde_json::to_string(&FailedRow {
-                                    value: &rec.value,
-                                    hash: &rec.hash,
-                                    kind: FAIL_KIND_NO_MATCH,
-                                    error: "no match",
-                                })?),
-                            }
-                        }
+                        let (hits, misses) = serialize_results::<L>(batch, results)?;
                         write_lines(&matches_w, &hits).await?;
                         write_lines(&failed_w, &misses).await?;
                     }
@@ -172,6 +153,49 @@ where
     matches_w.lock().await.flush()?;
     failed_w.lock().await.flush()?;
     Ok(())
+}
+
+fn serialize_results<L>(
+    batch: &[InputRecord],
+    results: Vec<MatchOutcome>,
+) -> Result<(Vec<String>, Vec<String>)>
+where
+    L: Serialize + From<MatchHit>,
+{
+    let mut hits = Vec::new();
+    let mut misses = Vec::new();
+
+    for (rec, result) in batch.iter().zip(results) {
+        match result {
+            MatchOutcome::Match(hit) => {
+                let row = LookupRow {
+                    value: rec.value.clone(),
+                    hash: rec.hash.clone(),
+                    lookup: L::from(hit),
+                };
+                hits.push(serde_json::to_string(&row)?);
+            }
+            MatchOutcome::NoMatch => {
+                misses.push(serde_json::to_string(&FailedRow {
+                    value: &rec.value,
+                    hash: &rec.hash,
+                    kind: FAIL_KIND_NO_MATCH,
+                    error: "no match",
+                })?);
+            }
+            MatchOutcome::Error(error) => {
+                let message = format!("{}: {}", error.code, error.message);
+                misses.push(serde_json::to_string(&FailedRow {
+                    value: &rec.value,
+                    hash: &rec.hash,
+                    kind: FAIL_KIND_ERROR,
+                    error: &message,
+                })?);
+            }
+        }
+    }
+
+    Ok((hits, misses))
 }
 
 fn read_inputs(path: &Path) -> Result<Vec<InputRecord>> {
