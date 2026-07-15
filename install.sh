@@ -21,8 +21,8 @@ set -eu
 
 REPO="cometadata/comet-enrich"
 BIN_NAME="comet-enrich"
-# Release asset suffixes; keep in sync with the matrix in .github/workflows/release.yml.
-KNOWN_TARGETS="x86_64-v3-unknown-linux-musl x86_64-unknown-linux-musl aarch64-unknown-linux-musl aarch64-apple-darwin"
+# Release asset suffixes; keep in sync with .github/workflows/release.yml.
+KNOWN_TARGETS="x86_64-v3-unknown-linux-musl x86_64-v3-unknown-linux-gnu x86_64-unknown-linux-musl aarch64-unknown-linux-musl aarch64-apple-darwin"
 
 version="${COMET_ENRICH_VERSION:-}"
 bin_dir="${COMET_ENRICH_BIN_DIR:-$HOME/.local/bin}"

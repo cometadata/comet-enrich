@@ -109,6 +109,7 @@ Tagged releases include prebuilt binaries on the
 
 Available builds:
 
+- Linux x86-64-v3 (glibc 2.34+): `comet-enrich-<tag>-x86_64-v3-unknown-linux-gnu.tar.gz`
 - Linux x86-64-v3 (AVX2): `comet-enrich-<tag>-x86_64-v3-unknown-linux-musl.tar.gz`
 - Linux x86-64 baseline: `comet-enrich-<tag>-x86_64-unknown-linux-musl.tar.gz`
 - Linux arm64: `comet-enrich-<tag>-aarch64-unknown-linux-musl.tar.gz`
