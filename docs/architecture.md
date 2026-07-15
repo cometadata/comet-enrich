@@ -154,9 +154,10 @@ example `comet-enrich affiliations --stage query`, but only if the previous stag
 
 The match client (`crates/core/src/match_service.rs`) posts batches to Marple's `/match/bulk`
 endpoint, using either the `affiliation` or `funder` task. It expects one result slot per input, in
-the same order as the request. It retries 429, 408, and server errors with capped backoff, and it
-honours a numeric `Retry-After` header up to 120 seconds. HTTP 413 is not retried; the fix is to
-lower `--ror-batch-size`.
+the same order as the request. Each slot is a match, a clean no-match, or an item-level error from
+Marple. It retries 429, 408, and server errors with capped backoff, and it honours a numeric
+`Retry-After` header up to 120 seconds. HTTP 413 is not retried; the fix is to lower
+`--ror-batch-size`.
 
 `lookups.failed.jsonl` records whether an input had `no_match` or an `error`. Timeouts and errors
 are counted as lost lookups in the manifest, so the run is marked `partial`. A clean `no_match` is

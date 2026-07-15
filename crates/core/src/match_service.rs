@@ -54,10 +54,25 @@ fn truncate(s: &str, max: usize) -> &str {
 }
 
 /// One successful match returned by the match service.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MatchHit {
     pub id: String,
     pub confidence: f64,
+}
+
+/// Error for one input in a bulk response.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MatchError {
+    pub code: String,
+    pub message: String,
+}
+
+/// Result for one input in a bulk response.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MatchOutcome {
+    Match(MatchHit),
+    NoMatch,
+    Error(MatchError),
 }
 
 /// ROR lookup result stored between query and reconcile.
@@ -81,10 +96,9 @@ impl From<MatchHit> for RorLookup {
 pub trait MatchService: Send + Sync {
     /// Resolve one batch, returning one result per input in input order.
     ///
-    /// Slots are `Some((id, confidence))` for a match and `None` for no match.
-    /// Whole-batch failures return `Err`.
-    async fn match_bulk(&self, inputs: &[String], task: &str)
-    -> Result<Vec<Option<(String, f64)>>>;
+    /// Slots are `Match` for a match, `NoMatch` for no match, or `Error` for
+    /// per-input failures. Whole-batch failures return `Err`.
+    async fn match_bulk(&self, inputs: &[String], task: &str) -> Result<Vec<MatchOutcome>>;
 }
 
 #[derive(Serialize)]
@@ -104,13 +118,49 @@ struct BulkMessage {
 
 #[derive(Deserialize)]
 struct BulkOuterItem {
+    #[serde(default)]
+    status: Option<String>,
     items: Vec<BulkInnerItem>,
+    #[serde(default)]
+    error: Option<BulkErrorItem>,
 }
 
 #[derive(Deserialize)]
 struct BulkInnerItem {
     id: String,
     confidence: f64,
+}
+
+#[derive(Deserialize)]
+struct BulkErrorItem {
+    code: String,
+    message: String,
+}
+
+fn outcome_from_bulk_item(item: BulkOuterItem) -> Result<MatchOutcome> {
+    match item.status.as_deref().unwrap_or("ok") {
+        "ok" => Ok(item
+            .items
+            .into_iter()
+            .next()
+            .map_or(MatchOutcome::NoMatch, |i| {
+                MatchOutcome::Match(MatchHit {
+                    id: i.id,
+                    confidence: i.confidence,
+                })
+            })),
+        "error" => Ok(MatchOutcome::Error(item.error.map_or_else(
+            || MatchError {
+                code: "match_service_error".to_owned(),
+                message: "match service returned an item-level error".to_owned(),
+            },
+            |e| MatchError {
+                code: e.code,
+                message: e.message,
+            },
+        ))),
+        other => Err(anyhow!("unknown bulk item status {other:?}")),
+    }
 }
 
 /// The real bulk client for the Marple match service.
@@ -150,11 +200,7 @@ impl MarpleClient {
 
 #[async_trait]
 impl MatchService for MarpleClient {
-    async fn match_bulk(
-        &self,
-        inputs: &[String],
-        task: &str,
-    ) -> Result<Vec<Option<(String, f64)>>> {
+    async fn match_bulk(&self, inputs: &[String], task: &str) -> Result<Vec<MatchOutcome>> {
         let mut url = self.base.clone();
         url.path_segments_mut()
             .map_err(|()| anyhow!("base URL cannot be a base"))?
@@ -189,14 +235,12 @@ impl MatchService for MarpleClient {
                                 inputs.len()
                             ));
                         }
-                        return Ok(parsed
+                        return parsed
                             .message
                             .items
                             .into_iter()
-                            .map(|outer| {
-                                outer.items.into_iter().next().map(|i| (i.id, i.confidence))
-                            })
-                            .collect());
+                            .map(outcome_from_bulk_item)
+                            .collect::<Result<Vec<_>>>();
                     } else if status == StatusCode::PAYLOAD_TOO_LARGE {
                         return Err(anyhow!(
                             "batch size {} exceeds the match-service batch cap (HTTP 413); reduce the per-request batch size",
@@ -252,6 +296,7 @@ impl MatchService for MarpleClient {
 #[cfg(any(test, feature = "test-support"))]
 pub struct FakeMatchService {
     matches: std::collections::HashMap<String, (String, f64)>,
+    item_errors: std::collections::HashMap<String, MatchError>,
     error: Option<String>,
 }
 
@@ -262,6 +307,20 @@ impl FakeMatchService {
     pub fn new(matches: std::collections::HashMap<String, (String, f64)>) -> Self {
         Self {
             matches,
+            item_errors: std::collections::HashMap::new(),
+            error: None,
+        }
+    }
+
+    /// Build a fake with matches and per-input errors.
+    #[must_use]
+    pub fn with_item_errors(
+        matches: std::collections::HashMap<String, (String, f64)>,
+        item_errors: std::collections::HashMap<String, MatchError>,
+    ) -> Self {
+        Self {
+            matches,
+            item_errors,
             error: None,
         }
     }
@@ -272,6 +331,7 @@ impl FakeMatchService {
     pub fn erroring(message: &str) -> Self {
         Self {
             matches: std::collections::HashMap::new(),
+            item_errors: std::collections::HashMap::new(),
             error: Some(message.to_owned()),
         }
     }
@@ -280,17 +340,24 @@ impl FakeMatchService {
 #[cfg(any(test, feature = "test-support"))]
 #[async_trait]
 impl MatchService for FakeMatchService {
-    async fn match_bulk(
-        &self,
-        inputs: &[String],
-        _task: &str,
-    ) -> Result<Vec<Option<(String, f64)>>> {
+    async fn match_bulk(&self, inputs: &[String], _task: &str) -> Result<Vec<MatchOutcome>> {
         if let Some(msg) = &self.error {
             anyhow::bail!("{msg}");
         }
         Ok(inputs
             .iter()
-            .map(|i| self.matches.get(i).cloned())
+            .map(|i| {
+                if let Some(error) = self.item_errors.get(i) {
+                    MatchOutcome::Error(error.clone())
+                } else if let Some((id, confidence)) = self.matches.get(i) {
+                    MatchOutcome::Match(MatchHit {
+                        id: id.clone(),
+                        confidence: *confidence,
+                    })
+                } else {
+                    MatchOutcome::NoMatch
+                }
+            })
             .collect())
     }
 }
@@ -318,9 +385,21 @@ mod tests {
         let out = svc.match_bulk(&inputs, "affiliation").await.unwrap();
 
         assert_eq!(out.len(), 3);
-        assert_eq!(out[0], Some(("https://ror.org/021nxhr62".to_owned(), 0.97)));
-        assert_eq!(out[1], None);
-        assert_eq!(out[2], Some(("https://ror.org/042nb2s44".to_owned(), 0.99)));
+        assert_eq!(
+            out[0],
+            MatchOutcome::Match(MatchHit {
+                id: "https://ror.org/021nxhr62".to_owned(),
+                confidence: 0.97
+            })
+        );
+        assert_eq!(out[1], MatchOutcome::NoMatch);
+        assert_eq!(
+            out[2],
+            MatchOutcome::Match(MatchHit {
+                id: "https://ror.org/042nb2s44".to_owned(),
+                confidence: 0.99
+            })
+        );
     }
 
     #[tokio::test]

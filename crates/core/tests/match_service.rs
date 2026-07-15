@@ -1,12 +1,19 @@
 //! Wiremock tests for `MarpleClient`.
 
-use comet_enrich_core::{MarpleClient, MatchService};
+use comet_enrich_core::{MarpleClient, MatchError, MatchHit, MatchOutcome, MatchService};
 use std::time::Duration;
 use wiremock::matchers::{body_json, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn client(uri: String) -> MarpleClient {
     MarpleClient::new(uri, Duration::from_secs(30)).unwrap()
+}
+
+fn match_hit(id: &str, confidence: f64) -> MatchOutcome {
+    MatchOutcome::Match(MatchHit {
+        id: id.to_owned(),
+        confidence,
+    })
 }
 
 #[tokio::test]
@@ -30,10 +37,7 @@ async fn match_bulk_success() {
         .match_bulk(&["University of Oxford".to_owned()], "affiliation")
         .await
         .unwrap();
-    assert_eq!(
-        out,
-        vec![Some(("https://ror.org/052gg0110".to_owned(), 0.92))]
-    );
+    assert_eq!(out, vec![match_hit("https://ror.org/052gg0110", 0.92)]);
 }
 
 #[tokio::test]
@@ -53,7 +57,7 @@ async fn match_bulk_normalizes_trailing_slash_base_url() {
         .match_bulk(&["x".to_owned()], "affiliation")
         .await
         .unwrap();
-    assert_eq!(out, vec![None]);
+    assert_eq!(out, vec![MatchOutcome::NoMatch]);
 }
 
 #[tokio::test]
@@ -71,7 +75,7 @@ async fn match_bulk_no_match_returns_none_per_slot() {
         .match_bulk(&["Unknown Institution".to_owned()], "affiliation")
         .await
         .unwrap();
-    assert_eq!(out, vec![None]);
+    assert_eq!(out, vec![MatchOutcome::NoMatch]);
 }
 
 #[tokio::test]
@@ -97,7 +101,44 @@ async fn match_bulk_preserves_order() {
         .unwrap();
     assert_eq!(
         out,
-        vec![Some(("https://ror.org/aaaaaaaaa".to_owned(), 0.91)), None]
+        vec![
+            match_hit("https://ror.org/aaaaaaaaa", 0.91),
+            MatchOutcome::NoMatch
+        ]
+    );
+}
+
+#[tokio::test]
+async fn match_bulk_item_error_returns_error_slot() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/match/bulk"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "message": { "items": [
+                {
+                    "status": "error",
+                    "items": [],
+                    "error": {
+                        "code": "opensearch_rejected",
+                        "message": "OpenSearch rejected this search after retries"
+                    }
+                }
+            ] }
+        })))
+        .mount(&server)
+        .await;
+
+    let out = client(server.uri())
+        .match_bulk(&["University of Oxford".to_owned()], "affiliation")
+        .await
+        .unwrap();
+
+    assert_eq!(
+        out,
+        vec![MatchOutcome::Error(MatchError {
+            code: "opensearch_rejected".to_owned(),
+            message: "OpenSearch rejected this search after retries".to_owned(),
+        })]
     );
 }
 
@@ -183,10 +224,7 @@ async fn match_bulk_retries_after_429() {
         .match_bulk(&["University of Oxford".to_owned()], "affiliation")
         .await
         .unwrap();
-    assert_eq!(
-        out,
-        vec![Some(("https://ror.org/052gg0110".to_owned(), 0.88))]
-    );
+    assert_eq!(out, vec![match_hit("https://ror.org/052gg0110", 0.88)]);
 }
 
 #[tokio::test]
@@ -214,7 +252,7 @@ async fn match_bulk_waits_for_numeric_retry_after() {
         .await
         .unwrap();
 
-    assert_eq!(out, vec![None]);
+    assert_eq!(out, vec![MatchOutcome::NoMatch]);
     // The client must wait at least the server-requested second before retrying.
     assert!(
         started.elapsed() >= Duration::from_secs(1),
@@ -246,7 +284,7 @@ async fn match_bulk_retries_after_503() {
         .match_bulk(&["x".to_owned()], "affiliation")
         .await
         .unwrap();
-    assert_eq!(out, vec![None]);
+    assert_eq!(out, vec![MatchOutcome::NoMatch]);
 }
 
 #[tokio::test]
