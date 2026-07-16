@@ -121,7 +121,9 @@ impl EnrichmentMethod for Affiliations {
         lookups: &Lookups<Self::Lookup>,
     ) -> Vec<EnrichmentParts> {
         // Emit only when this person gains a new ROR match. Once emitted,
-        // rewrite every matched affiliation and preserve the rest.
+        // rewrite affiliations without an existing ROR ID whose string
+        // matched; preserve the rest, so an asserted ROR ID is never
+        // replaced by a disagreeing match.
         let has_new_match = extraction
             .affiliations
             .iter()
@@ -139,13 +141,13 @@ impl EnrichmentMethod for Affiliations {
             .affiliations
             .iter()
             .map(|a| match lookups.get(&a.affiliation_hash) {
-                Some(hit) => json!({
+                Some(hit) if a.existing_ror_id.is_none() => json!({
                     "name": a.affiliation,
                     "affiliationIdentifier": hit.ror_id,
                     "affiliationIdentifierScheme": "ROR",
                     "schemeUri": "https://ror.org"
                 }),
-                None => raw_or_fallback(a),
+                _ => raw_or_fallback(a),
             })
             .collect();
 
@@ -417,8 +419,10 @@ mod tests {
     }
 
     #[test]
-    fn map_back_rewrites_matched_affiliation_that_had_existing_ror() {
-        // A new sibling match opens the person; existing ROR matches are rewritten too.
+    fn map_back_preserves_affiliation_with_existing_ror_even_when_matched() {
+        // A new sibling match opens the person; an affiliation that already
+        // carries a ROR ID keeps its asserted value even when the match
+        // service returns a different (disagreeing) ROR ID for its string.
         let p = person(
             RecordField::Creators,
             json!({"name": "Doe, Jane"}),
@@ -435,20 +439,12 @@ mod tests {
         let parts = method().map_back(
             p,
             &lookups(&[
-                ("University of Oxford", OXFORD_ROR, 0.9),
+                ("University of Oxford", MIT_ROR, 0.9),
                 ("MIT", MIT_ROR, 0.99),
             ]),
         );
 
-        assert_eq!(
-            parts[0].enriched["affiliation"][0],
-            json!({
-                "name": "University of Oxford",
-                "affiliationIdentifier": OXFORD_ROR,
-                "affiliationIdentifierScheme": "ROR",
-                "schemeUri": "https://ror.org"
-            })
-        );
+        assert_eq!(parts[0].enriched["affiliation"][0], oxford_with_ror());
     }
 
     #[test]
