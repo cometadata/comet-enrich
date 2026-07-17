@@ -118,11 +118,6 @@ pub struct FundersArgs {
     #[arg(long, value_name = "FILE", help_heading = "ROR matching")]
     pub ror_file: PathBuf,
 
-    /// Match the original tool: treat any ROR-typed identifier as already
-    /// resolved (and skip it), even if the value is malformed.
-    #[arg(long, help_heading = "ROR matching")]
-    pub legacy_ror_resolution: bool,
-
     #[command(flatten)]
     pub run: RunArgs,
 
@@ -178,7 +173,6 @@ pub fn run(cli: Cli) -> Result<()> {
             let method = funders::Funders::try_new(funders::Config {
                 lookup: (&a.lookup).into(),
                 ror_file: a.ror_file.clone(),
-                legacy_ror_resolution: a.legacy_ror_resolution,
             })?;
             run_lookup_method(
                 "funders", &method, &a.io, &a.lookup, &a.run, &template, "funder", a.stage,
@@ -391,33 +385,6 @@ mod tests {
             ])
             .is_err()
         );
-    }
-
-    #[test]
-    fn legacy_ror_resolution_defaults_off_and_parses() {
-        let base = [
-            "comet-enrich",
-            "funders",
-            "-i",
-            "in",
-            "-o",
-            "out",
-            "--provenance",
-            "e.yaml",
-            "--ror-file",
-            "ror.json",
-        ];
-        let Command::Funders(a) = parse(&base).unwrap().command else {
-            panic!("expected funders");
-        };
-        assert!(!a.legacy_ror_resolution);
-
-        let mut with_flag = base.to_vec();
-        with_flag.push("--legacy-ror-resolution");
-        let Command::Funders(a) = parse(&with_flag).unwrap().command else {
-            panic!("expected funders");
-        };
-        assert!(a.legacy_ror_resolution);
     }
 
     #[test]

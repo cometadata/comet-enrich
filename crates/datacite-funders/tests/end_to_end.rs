@@ -99,7 +99,6 @@ fn run_pipeline() -> (tempfile::TempDir, PathBuf, Report) {
     let method = Funders::try_new(Config {
         lookup: cfg(),
         ror_file,
-        legacy_ror_resolution: false,
     })
     .unwrap();
     let svc = fake_service();

@@ -10,6 +10,7 @@
 mod parser;
 
 use anyhow::Result;
+use comet_enrich_core::identifiers::ROR_SCHEME_URI;
 use comet_enrich_core::{
     EnrichmentAction, EnrichmentMethod, EnrichmentParts, Extracted, HashBits, LookupConfig,
     Lookups, RorLookup, datacite,
@@ -145,7 +146,7 @@ impl EnrichmentMethod for Affiliations {
                     "name": a.affiliation,
                     "affiliationIdentifier": hit.ror_id,
                     "affiliationIdentifierScheme": "ROR",
-                    "schemeUri": "https://ror.org"
+                    "schemeUri": ROR_SCHEME_URI
                 }),
                 _ => raw_or_fallback(a),
             })

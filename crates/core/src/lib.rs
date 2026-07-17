@@ -13,6 +13,7 @@ pub mod datacite;
 pub mod datacite_enums;
 pub mod dedup;
 mod fanout;
+pub mod identifiers;
 pub mod manifest;
 pub mod match_service;
 pub mod method;

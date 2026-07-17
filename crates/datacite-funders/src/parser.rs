@@ -3,7 +3,8 @@
 //! Funder-name hashes use the original string bytes: no trimming or case folding.
 
 use crate::FundingExtraction;
-use crate::identifiers::{IdentifierScheme, normalize_fundref, normalize_ror, sniff_identifier};
+use crate::identifiers::{IdentifierScheme, sniff_identifier};
+use comet_enrich_core::identifiers::{normalize_fundref, normalize_ror};
 use comet_enrich_core::{HashBits, hash_input};
 use serde_json::Value;
 

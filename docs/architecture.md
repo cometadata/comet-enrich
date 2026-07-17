@@ -267,9 +267,10 @@ set per record because the method can update both `creators` and `contributors`.
 
 A lookup method. It extracts one unit per funding reference with a funder name and normalizes
 existing ROR and Crossref Funder identifiers. The ROR registry file is loaded at startup to build
-the Crossref Funder ID to ROR crosswalk. References that already resolve to ROR, either directly
-or through the crosswalk, are skipped. Unresolved names are looked up with Marple's `funder` task;
-a match emits an `updateChild` adding the funder's ROR identifier. See
+the Crossref Funder ID to ROR crosswalk. References with an identifier labelled `ROR` are skipped
+without validating the value. Crossref Funder IDs are skipped when they occur in the crosswalk.
+Unresolved names are looked up with Marple's `funder` task; a match emits an `updateChild` adding
+the funder's ROR identifier. See
 [commands/funders.md](commands/funders.md).
 
 ## Operational context

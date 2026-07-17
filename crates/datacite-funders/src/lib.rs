@@ -1,7 +1,8 @@
 //! DataCite funder matching.
 //!
-//! Matches funder names to ROR IDs. References with a valid existing ROR ID are
-//! skipped.
+//! Matches funder names to ROR IDs. References with an identifier labelled ROR
+//! are skipped without validating the value. Crossref Funder IDs in the ROR
+//! registry crosswalk are also skipped.
 
 // DataCite, ROR, and COMET are names, not Rust identifiers.
 #![allow(clippy::doc_markdown)]
@@ -11,6 +12,7 @@ mod identifiers;
 mod parser;
 
 use anyhow::Result;
+use comet_enrich_core::identifiers::ROR_SCHEME_URI;
 use comet_enrich_core::{
     EnrichmentAction, EnrichmentMethod, EnrichmentParts, Extracted, HashBits, LookupConfig,
     Lookups, RorLookup, datacite,
@@ -25,9 +27,6 @@ pub struct Config {
     pub lookup: LookupConfig,
     /// ROR registry JSON used to map Crossref Funder IDs to ROR.
     pub ror_file: PathBuf,
-    /// Reproduce the original tool: treat any ROR-typed identifier as already
-    /// resolved (and skip it) without validating the value.
-    pub legacy_ror_resolution: bool,
 }
 
 /// One funding reference extracted for matching.
@@ -58,9 +57,6 @@ pub struct Funders {
     hash_bits: HashBits,
     /// Bare Crossref Funder ID to ROR ID.
     crosswalk: HashMap<String, String>,
-    /// When true, any ROR-typed identifier counts as resolved even if malformed
-    /// (matches the original tool). See [`Config::legacy_ror_resolution`].
-    legacy_ror_resolution: bool,
 }
 
 impl Funders {
@@ -73,7 +69,6 @@ impl Funders {
         Ok(Self {
             hash_bits: config.lookup.hash_bits,
             crosswalk: crosswalk::load(&config.ror_file)?,
-            legacy_ror_resolution: config.legacy_ror_resolution,
         })
     }
 
@@ -85,9 +80,8 @@ impl Funders {
             return false;
         };
         if id_type.eq_ignore_ascii_case("ROR") {
-            // Legacy mode trusts the label; otherwise a malformed ROR-labelled
-            // value falls through to name matching.
-            return self.legacy_ror_resolution || identifiers::normalize_ror(id).is_some();
+            // The ROR label is trusted without validating the value.
+            return true;
         }
         id_type.eq_ignore_ascii_case("Crossref Funder ID") && self.crosswalk.contains_key(id)
     }
@@ -117,7 +111,8 @@ impl EnrichmentMethod for Funders {
         extraction: Self::Extraction,
         lookups: &Lookups<Self::Lookup>,
     ) -> Vec<EnrichmentParts> {
-        // Skip references that already resolve to ROR.
+        // ROR labels are trusted without validating the value; Crossref Funder
+        // IDs require an entry in the registry crosswalk.
         if self.has_existing_resolution(&extraction) {
             return Vec::new();
         }
@@ -130,7 +125,7 @@ impl EnrichmentMethod for Funders {
         if let Some(obj) = enriched.as_object_mut() {
             obj.insert("funderIdentifier".to_owned(), json!(hit.ror_id));
             obj.insert("funderIdentifierType".to_owned(), json!("ROR"));
-            obj.insert("schemeUri".to_owned(), json!("https://ror.org"));
+            obj.insert("schemeUri".to_owned(), json!(ROR_SCHEME_URI));
         }
 
         vec![EnrichmentParts {
@@ -181,16 +176,6 @@ mod tests {
         Funders::try_new(Config {
             lookup: lookup_config(),
             ror_file: dump.path().to_path_buf(),
-            legacy_ror_resolution: false,
-        })
-        .unwrap()
-    }
-
-    fn legacy_method(dump: &tempfile::NamedTempFile) -> Funders {
-        Funders::try_new(Config {
-            lookup: lookup_config(),
-            ror_file: dump.path().to_path_buf(),
-            legacy_ror_resolution: true,
         })
         .unwrap()
     }
@@ -236,7 +221,6 @@ mod tests {
             Funders::try_new(Config {
                 lookup: lookup_config(),
                 ror_file: dump.path().to_path_buf(),
-                legacy_ror_resolution: false,
             })
             .is_ok()
         );
@@ -248,7 +232,6 @@ mod tests {
             Funders::try_new(Config {
                 lookup: lookup_config(),
                 ror_file: PathBuf::from("__missing_ror__.json"),
-                legacy_ror_resolution: false,
             }),
             "opening ROR registry",
         );
@@ -262,7 +245,6 @@ mod tests {
             Funders::try_new(Config {
                 lookup: lookup_config(),
                 ror_file: file.path().to_path_buf(),
-                legacy_ror_resolution: false,
             }),
             "parsing ROR registry",
         );
@@ -395,10 +377,9 @@ mod tests {
     }
 
     #[test]
-    fn map_back_enriches_reference_with_invalid_asserted_ror() {
-        // The record claims its identifier is a ROR, but the value is junk.
-        // Trusting the label would skip the reference and leave the junk in
-        // place; instead the name match is applied.
+    fn map_back_skips_reference_with_invalid_asserted_ror() {
+        // The ROR label is trusted without validating the value, so the
+        // reference is skipped even though the identifier is junk.
         let dump = ror_dump_file();
         let x = extraction(
             "NSF",
@@ -409,37 +390,7 @@ mod tests {
 
         let parts = method(&dump).map_back(x, &lookups(&[("NSF", NSF_ROR, 0.99)]));
 
-        assert_eq!(parts.len(), 1);
-        assert_eq!(parts[0].enriched["funderIdentifier"], NSF_ROR);
-        assert_eq!(parts[0].original["funderIdentifier"], "not a valid id");
-    }
-
-    #[test]
-    fn legacy_mode_skips_reference_with_invalid_asserted_ror() {
-        // The original tool trusted the "ROR" label and skipped the reference
-        // without validating the value. Legacy mode reproduces that.
-        let dump = ror_dump_file();
-        let x = extraction(
-            "NSF",
-            Some(("not a valid id", "ROR")),
-            json!({"funderName": "NSF", "funderIdentifier": "not a valid id",
-                   "funderIdentifierType": "ROR"}),
-        );
-
-        let parts = legacy_method(&dump).map_back(x, &lookups(&[("NSF", NSF_ROR, 0.99)]));
-
         assert_eq!(parts.len(), 0);
-    }
-
-    #[test]
-    fn legacy_mode_still_enriches_unlabelled_match() {
-        // Legacy mode only changes ROR-labelled handling; a reference with no
-        // existing identifier is still enriched on a name match.
-        let dump = ror_dump_file();
-        let x = extraction("NSF", None, json!({"funderName": "NSF"}));
-        let parts = legacy_method(&dump).map_back(x, &lookups(&[("NSF", NSF_ROR, 0.99)]));
-        assert_eq!(parts.len(), 1);
-        assert_eq!(parts[0].enriched["funderIdentifier"], NSF_ROR);
     }
 
     #[test]
