@@ -24,6 +24,11 @@ jobs:
             target: x86_64-unknown-linux-musl
             target_cpu: x86-64-v3 # AVX2-class Linux x86_64 build.
             asset_suffix: x86_64-v3-unknown-linux-musl
+          - os: ubuntu-latest
+            make: make
+            target: x86_64-unknown-linux-musl
+            target_cpu: x86-64 # Baseline x86_64, runs on any 64-bit CPU.
+            asset_suffix: x86_64-unknown-linux-musl
           - os: ubuntu-24.04-arm
             make: make
             target: aarch64-unknown-linux-musl
@@ -71,8 +76,46 @@ jobs:
           path: dist/*
           retention-days: 1
 
+  build-linux-gnu:
+    runs-on: ubuntu-latest
+    container: public.ecr.aws/amazonlinux/amazonlinux:2023
+    steps:
+      - name: Install build tools
+        run: dnf install -y gcc git make tar gzip
+
+      - name: Checkout
+        uses: actions/checkout@v6.0.3
+
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Build release binary
+        run: |
+          make build-release \
+            RUST_TARGET=x86_64-unknown-linux-gnu \
+            RUST_TARGET_CPU=x86-64-v3
+
+      - name: Package and checksum
+        run: |
+          asset="comet-enrich-${{ github.ref_name }}-x86_64-v3-unknown-linux-gnu"
+          mkdir -p dist
+          tar -czf "dist/${asset}.tar.gz" \
+            -C target/x86_64-unknown-linux-gnu/release comet-enrich
+          ( cd dist && sha256sum "${asset}.tar.gz" > "${asset}.tar.gz.sha256" )
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: x86_64-v3-unknown-linux-gnu
+          path: dist/*
+          retention-days: 1
+
   publish:
-    needs: build
+    needs:
+      - build
+      - build-linux-gnu
     runs-on: ubuntu-latest
     permissions:
       contents: write

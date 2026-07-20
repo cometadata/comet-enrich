@@ -1,0 +1,17 @@
+[package]
+name = "comet-enrich-test-support"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+comet-enrich-core = { workspace = true, features = ["test-support"] }
+flate2 = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

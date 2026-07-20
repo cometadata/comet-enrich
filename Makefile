@@ -8,9 +8,10 @@ RUST_TARGET_CPU ?=
 RUST_TARGET ?=
 
 setup-rust:
-> rustup component add rustfmt clippy
+> rustup component add rustfmt clippy llvm-tools-preview
 > @command -v cargo-deny >/dev/null 2>&1 || cargo install cargo-deny
 > @command -v rumdl >/dev/null 2>&1 || cargo install rumdl
+> @command -v cargo-llvm-cov >/dev/null 2>&1 || cargo install cargo-llvm-cov
 
 fmt:
 > cargo fmt --all
@@ -34,11 +35,29 @@ lint-ci:
 test:
 > cargo test --workspace
 
+# Print a coverage summary for the workspace test suite
+coverage:
+> cargo llvm-cov --workspace
+
+# Write an HTML coverage report under target/llvm-cov/html/.
+coverage-html:
+> cargo llvm-cov --workspace --html
+> @echo "HTML report: target/llvm-cov/html/index.html"
+
+# Write lcov.info for CI upload
+coverage-lcov:
+> cargo llvm-cov --workspace --lcov --output-path lcov.info
+
 build:
 > cargo build --workspace
 
 build-release:
 > RUSTFLAGS="$(if $(RUST_TARGET_CPU),-C target-cpu=$(RUST_TARGET_CPU))" cargo build --release --workspace $(if $(RUST_TARGET),--target $(RUST_TARGET))
+
+# Build the release binary and install it, with shell completions, into ~/.local/bin
+# (override with COMET_ENRICH_BIN_DIR).
+install:
+> ./install-local.sh
 
 clean:
 > cargo clean

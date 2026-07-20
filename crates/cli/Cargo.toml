@@ -9,9 +9,13 @@ rust-version.workspace = true
 [dependencies]
 anyhow = { workspace = true }
 clap = { version = "4", features = ["derive"] }
-comet-enrichment-core = { workspace = true }
+# Pinned to 4.5.x: the 4.6 bash generator escapes hyphenated binary names
+# inconsistently, so no subcommand or flag completion ever matches.
+clap_complete = "~4.5"
+comet-enrich-core = { workspace = true }
 jsonschema = { workspace = true }
 log = { workspace = true }
+serde = { workspace = true }
 simple_logger = "5"
 rtg = { package = "comet-enrich-datacite-resource-type-general", path = "../datacite-resource-type-general" }
 affiliations = { package = "comet-enrich-datacite-affiliations", path = "../datacite-affiliations" }
@@ -19,7 +23,9 @@ funders = { package = "comet-enrich-datacite-funders", path = "../datacite-funde
 
 [dev-dependencies]
 assert_cmd = "2"
+comet-enrich-test-support = { workspace = true }
 predicates = "3"
+serde_json = { workspace = true }
 
 [lints]
 workspace = true

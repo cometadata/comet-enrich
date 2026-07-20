@@ -9,8 +9,19 @@ enrichment input schema
 It currently provides three enrichment methods:
 
 - **resource-type-general**: reclassify `types.resourceTypeGeneral` from free-text `resourceType` values.
-- **affiliations**: match creator affiliation strings to ROR IDs.
+- **affiliations**: match creator and contributor affiliation strings to ROR IDs.
 - **funders**: match funder names to ROR IDs.
+
+## Install
+
+Install the latest release binary and shell completions with:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/cometadata/comet-enrich/main/install.sh | sh
+```
+
+See [Installation](docs/installation.md) for pinning a version, supported platforms, Docker
+usage, and building from source.
 
 ## Requirements
 
@@ -24,9 +35,10 @@ It currently provides three enrichment methods:
   ```
 
   then follow that repository's README to build and run it.
-- **ROR registry dataset**: for `affiliations` and `funders` only. This is used during
-  reconciliation. Download the ROR data dump from [its DOI](https://doi.org/10.5281/zenodo.6347574),
-  extract the zip, and point `--ror-file` at the JSON file inside.
+- **ROR registry dataset**: for `funders` only, where it supplies the Crossref Funder ID
+  to ROR crosswalk. Download the ROR data dump from
+  [its DOI](https://doi.org/10.5281/zenodo.6347574), extract the zip, and point
+  `--ror-file` at the JSON file inside.
 
 ## Data sources
 
