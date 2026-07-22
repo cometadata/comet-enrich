@@ -8,7 +8,9 @@ The method runs as a three-stage pipeline:
 
 1. **extract**: scan the corpus and collect the unique affiliation strings to look up.
 2. **query**: resolve those strings with the match service, using Marple's `affiliation` task.
-3. **reconcile**: join the matches back to the records and emit enrichment records.
+3. **reconcile**: join matches back to the records and emit enrichment records. Valid ROR IDs
+   remain unchanged; all other matched affiliations, including those with invalid ROR IDs or
+   non-ROR identifiers, receive the matched ROR ID.
 
 Running `affiliations` without a stage runs the whole pipeline. Intermediate files are written to a
 `.work` directory inside `--output`. A later run resumes from completed stages there unless

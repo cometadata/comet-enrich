@@ -1,8 +1,7 @@
 //! DataCite funder matching.
 //!
-//! Matches funder names to ROR IDs. References with an identifier labelled ROR
-//! are skipped without validating the value. Crossref Funder IDs in the ROR
-//! registry crosswalk are also skipped.
+//! Matches funder names to ROR IDs. References with a valid ROR ID or a
+//! Crossref Funder ID in the ROR registry crosswalk are skipped.
 
 // DataCite, ROR, and COMET are names, not Rust identifiers.
 #![allow(clippy::doc_markdown)]
@@ -12,7 +11,7 @@ mod identifiers;
 mod parser;
 
 use anyhow::Result;
-use comet_enrich_core::identifiers::ROR_SCHEME_URI;
+use comet_enrich_core::identifiers::{ROR_SCHEME_URI, normalize_ror};
 use comet_enrich_core::{
     EnrichmentAction, EnrichmentMethod, EnrichmentParts, Extracted, HashBits, LookupConfig,
     Lookups, RorLookup, datacite,
@@ -37,7 +36,7 @@ pub struct FundingExtraction {
     pub funder_name: String,
     /// Hash of `funder_name`, used as the lookup join key.
     pub funder_name_hash: String,
-    /// Existing identifier after ROR/Fundref normalization.
+    /// Existing identifier, normalized when recognized as a valid ROR or Crossref Funder ID.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub existing_identifier: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -80,8 +79,8 @@ impl Funders {
             return false;
         };
         if id_type.eq_ignore_ascii_case("ROR") {
-            // The ROR label is trusted without validating the value.
-            return true;
+            // Invalid ROR IDs remain eligible for replacement by a name match.
+            return normalize_ror(id).is_some();
         }
         id_type.eq_ignore_ascii_case("Crossref Funder ID") && self.crosswalk.contains_key(id)
     }
@@ -111,8 +110,6 @@ impl EnrichmentMethod for Funders {
         extraction: Self::Extraction,
         lookups: &Lookups<Self::Lookup>,
     ) -> Vec<EnrichmentParts> {
-        // ROR labels are trusted without validating the value; Crossref Funder
-        // IDs require an entry in the registry crosswalk.
         if self.has_existing_resolution(&extraction) {
             return Vec::new();
         }
@@ -377,9 +374,7 @@ mod tests {
     }
 
     #[test]
-    fn map_back_skips_reference_with_invalid_asserted_ror() {
-        // The ROR label is trusted without validating the value, so the
-        // reference is skipped even though the identifier is junk.
+    fn map_back_replaces_reference_with_invalid_asserted_ror() {
         let dump = ror_dump_file();
         let x = extraction(
             "NSF",
@@ -390,7 +385,16 @@ mod tests {
 
         let parts = method(&dump).map_back(x, &lookups(&[("NSF", NSF_ROR, 0.99)]));
 
-        assert_eq!(parts.len(), 0);
+        assert_eq!(parts.len(), 1);
+        assert_eq!(
+            parts[0].enriched,
+            json!({
+                "funderName": "NSF",
+                "funderIdentifier": NSF_ROR,
+                "funderIdentifierType": "ROR",
+                "schemeUri": "https://ror.org"
+            })
+        );
     }
 
     #[test]

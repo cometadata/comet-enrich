@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 const MIT_ROR: &str = "https://ror.org/042nb2s44";
 const STANFORD_ROR: &str = "https://ror.org/00f54p054";
-const HELMHOLTZ_ROR: &str = "https://ror.org/03x1xhg78";
+const HELMHOLTZ_ROR: &str = "https://ror.org/03x1xhg60";
 const OXFORD_ROR: &str = "https://ror.org/052gg0110";
 
 fn oxford_with_ror() -> Value {

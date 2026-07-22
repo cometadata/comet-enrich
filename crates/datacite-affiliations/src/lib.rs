@@ -10,7 +10,7 @@
 mod parser;
 
 use anyhow::Result;
-use comet_enrich_core::identifiers::ROR_SCHEME_URI;
+use comet_enrich_core::identifiers::{ROR_SCHEME_URI, normalize_ror};
 use comet_enrich_core::{
     EnrichmentAction, EnrichmentMethod, EnrichmentParts, Extracted, HashBits, LookupConfig,
     Lookups, RorLookup, datacite,
@@ -87,6 +87,15 @@ fn raw_or_fallback(occurrence: &AffiliationOccurrence) -> Value {
         .unwrap_or_else(|| json!({ "name": occurrence.affiliation }))
 }
 
+/// Allows name matches to fill missing or invalid ROR IDs.
+fn eligible_for_match(occurrence: &AffiliationOccurrence) -> bool {
+    occurrence
+        .existing_ror_id
+        .as_deref()
+        .and_then(normalize_ror)
+        .is_none()
+}
+
 fn person_with_affiliations(source_raw: &Value, affiliations: Vec<Value>) -> Value {
     let mut person = source_raw.as_object().cloned().unwrap_or_default();
     person.insert("affiliation".to_owned(), Value::Array(affiliations));
@@ -121,14 +130,12 @@ impl EnrichmentMethod for Affiliations {
         extraction: Self::Extraction,
         lookups: &Lookups<Self::Lookup>,
     ) -> Vec<EnrichmentParts> {
-        // Emit only when this person gains a new ROR match. Once emitted,
-        // rewrite affiliations without an existing ROR ID whose string
-        // matched; preserve the rest, so an asserted ROR ID is never
-        // replaced by a disagreeing match.
+        // Emit only when a missing or invalid ROR ID can be replaced. Keep every
+        // other affiliation unchanged.
         let has_new_match = extraction
             .affiliations
             .iter()
-            .any(|a| a.existing_ror_id.is_none() && lookups.contains_key(&a.affiliation_hash));
+            .any(|a| eligible_for_match(a) && lookups.contains_key(&a.affiliation_hash));
         if !has_new_match {
             return Vec::new();
         }
@@ -142,7 +149,7 @@ impl EnrichmentMethod for Affiliations {
             .affiliations
             .iter()
             .map(|a| match lookups.get(&a.affiliation_hash) {
-                Some(hit) if a.existing_ror_id.is_none() => json!({
+                Some(hit) if eligible_for_match(a) => json!({
                     "name": a.affiliation,
                     "affiliationIdentifier": hit.ror_id,
                     "affiliationIdentifierScheme": "ROR",
