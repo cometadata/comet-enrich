@@ -1,7 +1,7 @@
 //! Shared CLI arguments for `comet-enrich`.
 
 use anyhow::{Result, bail};
-use clap::{Args, ValueEnum};
+use clap::{Args, ValueEnum, ValueHint};
 use comet_enrich_core::{
     DEFAULT_OUTPUT_PART_SIZE_MIB, DEFAULT_OUTPUT_WRITER_LANES, HashBits, LookupConfig, RunOptions,
     SCHEMA, SourceRelease, Stage, schema,
@@ -14,15 +14,15 @@ use std::path::PathBuf;
 #[derive(Args, Debug, Clone)]
 pub struct IoArgs {
     /// Input directory containing DataCite `*.jsonl.gz` files.
-    #[arg(short, long, value_name = "DIR", help_heading = "Input/output")]
+    #[arg(short, long, value_name = "DIR", value_hint = ValueHint::DirPath, help_heading = "Input/output")]
     pub input: PathBuf,
 
     /// Output directory for enrichment records (writes rolling enrichments/part_NNNN.jsonl.gz).
-    #[arg(short, long, value_name = "DIR", help_heading = "Input/output")]
+    #[arg(short, long, value_name = "DIR", value_hint = ValueHint::DirPath, help_heading = "Input/output")]
     pub output: PathBuf,
 
     /// YAML provenance metadata for the enrichment records.
-    #[arg(long, value_name = "FILE", help_heading = "Input/output")]
+    #[arg(long, value_name = "FILE", value_hint = ValueHint::FilePath, help_heading = "Input/output")]
     pub provenance: PathBuf,
 
     /// Release date of a data source, as name=YYYY-MM-DD (repeatable), e.g. datacite=2024-01-01.
@@ -155,6 +155,7 @@ pub struct RunArgs {
     #[arg(
         long,
         value_name = "FILE",
+        value_hint = ValueHint::FilePath,
         conflicts_with = "no_validate",
         help_heading = "Options"
     )]

@@ -10,7 +10,7 @@ pub mod args;
 
 use anyhow::Result;
 use args::{IoArgs, LookupArgs, RunArgs, StageArg, init_logging};
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand, ValueHint};
 use comet_enrich_core::{
     EnrichmentMethod, EnrichmentTemplate, HashInfo, LookupConfig, Manifest, MarpleClient, MatchHit,
     MatchService, RunMeta, RunStats, Stage, StageTimings, exit_status, pipeline_complete,
@@ -73,7 +73,7 @@ pub struct ResourceTypeGeneralArgs {
     pub io: IoArgs,
 
     /// YAML rules for mapping free-text resourceType values to resourceTypeGeneral
-    #[arg(long, value_name = "FILE", help_heading = "Input/output")]
+    #[arg(long, value_name = "FILE", value_hint = ValueHint::FilePath, help_heading = "Input/output")]
     pub rules: PathBuf,
 
     #[command(flatten)]
@@ -115,7 +115,7 @@ pub struct FundersArgs {
     pub lookup: LookupArgs,
 
     /// ROR registry JSON used to build the Crossref Funder ID to ROR crosswalk.
-    #[arg(long, value_name = "FILE", help_heading = "ROR matching")]
+    #[arg(long, value_name = "FILE", value_hint = ValueHint::FilePath, help_heading = "ROR matching")]
     pub ror_file: PathBuf,
 
     #[command(flatten)]
