@@ -8,9 +8,10 @@ The method runs as a three-stage pipeline:
 
 1. **extract**: scan the corpus and collect the unique funder names to look up.
 2. **query**: resolve those names with the match service, using Marple's `funder` task.
-3. **reconcile**: join matches back to the records and emit enrichment records. References with
-   an identifier labelled `ROR` are skipped without validating the value; Crossref Funder IDs are
-   skipped when they occur in the ROR registry crosswalk.
+3. **reconcile**: join matches back to the records and emit enrichment records. Valid ROR IDs and
+   crosswalk-mapped Crossref Funder IDs remain unchanged; all other matched funding
+   references, including those with invalid ROR IDs or non-ROR identifiers, receive the matched ROR
+   ID.
 
 Running `funders` without a stage runs the whole pipeline. Intermediate files are written to a
 `.work` directory inside `--output`. A later run resumes from completed stages there unless

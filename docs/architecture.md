@@ -259,16 +259,17 @@ emits an `update` on `types`; records outside the configured scope are counted a
 
 A lookup method. It extracts one unit per creator or contributor that has affiliations, looks up
 each affiliation string with Marple's `affiliation` task, and emits an `updateChild` enrichment
-only when that person gains a new ROR match. Existing ROR IDs are left alone. The output field is
-set per record because the method can update both `creators` and `contributors`. See
+only when that person gains a new ROR match. Valid existing ROR IDs are left alone; invalid ones
+can be replaced by a name match. The output field is set per record because the method can update
+both `creators` and `contributors`. See
 [commands/affiliations.md](commands/affiliations.md).
 
 ### funders
 
 A lookup method. It extracts one unit per funding reference with a funder name and normalizes
 existing ROR and Crossref Funder identifiers. The ROR registry file is loaded at startup to build
-the Crossref Funder ID to ROR crosswalk. References with an identifier labelled `ROR` are skipped
-without validating the value. Crossref Funder IDs are skipped when they occur in the crosswalk.
+the Crossref Funder ID to ROR crosswalk. References with a valid ROR ID, or a Crossref Funder ID in
+the crosswalk, are skipped. Invalid ROR IDs remain eligible for replacement by a name match.
 Unresolved names are looked up with Marple's `funder` task; a match emits an `updateChild` adding
 the funder's ROR identifier. See
 [commands/funders.md](commands/funders.md).
