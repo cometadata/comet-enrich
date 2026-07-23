@@ -31,7 +31,7 @@ usage, and building from source.
   Run COMET's branch:
 
   ```bash
-  git clone -b feature/marple-speed-improvements https://gitlab.com/jdiprose/marple.git
+  git clone -b feature/comet-marple-enhancements https://gitlab.com/jdiprose/marple.git
   ```
 
   then follow that repository's README to build and run it.

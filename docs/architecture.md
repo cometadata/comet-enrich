@@ -5,7 +5,7 @@
 binary. The binary reads a directory of DataCite `*.jsonl.gz` files, runs one enrichment method,
 and writes records that match the DataCite enrichment input schema
 (`configs/schema/enrichment_input_schema.json`). ROR matching uses
-[Marple](https://gitlab.com/jdiprose/marple), on the `feature/marple-speed-improvements` branch.
+[Marple](https://gitlab.com/jdiprose/marple), on the `feature/comet-marple-enhancements` branch.
 
 In the COMET pipeline, Airflow and AWS Batch decide when jobs run, where the input data lives, and
 where the output is uploaded. `comet-enrich` just works inside the local output directory it is
@@ -285,7 +285,7 @@ for the Batch setup.
 
 `comet-enrich` does not start Marple or seed the OpenSearch index. The lookup methods expect a
 running service at `--ror-service-url`. In COMET runs, this is the
-[`feature/marple-speed-improvements`](https://gitlab.com/jdiprose/marple/-/tree/feature/marple-speed-improvements)
+[`feature/comet-marple-enhancements`](https://gitlab.com/jdiprose/marple/-/tree/feature/comet-marple-enhancements)
 branch of `https://gitlab.com/jdiprose/marple.git`. Funders also needs the ROR registry JSON file
 so it can skip references already identified by Crossref Funder ID.
 
