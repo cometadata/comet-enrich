@@ -3,7 +3,7 @@ use super::{EXTRACTIONS_DIR, LOOKUPS_FILE, RECONCILE_STATS_FILE, for_each_jsonl}
 use crate::fanout::{make_pool, progress_bar};
 use crate::method::EnrichmentMethod;
 use crate::options::RunOptions;
-use crate::provenance::{EnrichmentTemplate, build_enrichment_record};
+use crate::template::{EnrichmentTemplate, build_enrichment_record};
 use crate::writer::{
     ENRICHMENTS_DIR, ENRICHMENTS_FAILED_FILE, FailureSink, ParallelRollingWriter, RecordBatcher,
 };
@@ -23,6 +23,8 @@ use std::sync::Mutex;
 pub(super) struct ReconcileStats {
     pub(super) emitted: u64,
     pub(super) schema_failures: u64,
+    #[serde(default)]
+    pub(super) source_id: String,
 }
 /// Join lookups onto extractions and write enrichment records.
 pub(super) fn run_reconcile<M>(
@@ -77,6 +79,7 @@ where
     let stats = ReconcileStats {
         emitted,
         schema_failures: failures.records_failed,
+        source_id: template.source_id().to_owned(),
     };
     let json = serde_json::to_string(&stats).context("serializing reconcile stats")?;
     fs::write(work.join(RECONCILE_STATS_FILE), json).context("writing reconcile.stats.json")?;

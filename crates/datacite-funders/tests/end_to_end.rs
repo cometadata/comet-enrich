@@ -4,12 +4,13 @@
 #![allow(clippy::doc_markdown)]
 
 use comet_enrich_core::{
-    HashBits, HashInfo, LookupConfig, Manifest, MatchService, Report, RunMeta, RunOptions,
-    SourceRelease, load_template, run_staged, schema,
+    HashBits, HashInfo, LookupConfig, Manifest, MatchService, Report, RunMeta, RunOptions, SCHEMA,
+    SourceRelease, run_staged, schema,
 };
 use comet_enrich_datacite_funders::{Config, Funders};
 use comet_enrich_test_support::{
-    FakeMatchService, assert_close, config_path, gz_input_fixture, read_enrichment_parts,
+    FakeMatchService, SOURCE_ID, assert_close, enrichment_template, gz_input_fixture,
+    read_enrichment_parts,
 };
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap};
@@ -102,8 +103,8 @@ fn run_pipeline() -> (tempfile::TempDir, PathBuf, Report) {
     })
     .unwrap();
     let svc = fake_service();
-    let template = load_template(config_path("provenance/funders.yaml")).unwrap();
-    let validator = schema::compile(&config_path("schema/enrichment_input_schema.json")).unwrap();
+    let template = enrichment_template();
+    let validator = schema::compile_str(SCHEMA).unwrap();
 
     let report = run_staged(
         &method,
@@ -129,6 +130,10 @@ fn records_by_doi(output: &Path) -> HashMap<String, Value> {
 #[test]
 fn funders_staged_pipeline_matches_golden_outcomes() {
     let (_dir, output, report) = run_pipeline();
+
+    for rec in read_enrichment_parts(&output) {
+        assert_eq!(rec["sourceId"], json!(SOURCE_ID));
+    }
 
     // Coverage is per funding reference.
     assert_eq!(report.counters.records_scanned, 8);

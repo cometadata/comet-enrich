@@ -1,7 +1,7 @@
 //! End-to-end tests for the DataCite `resourceTypeGeneral` reclassifier.
 //!
 //! These tests run the real [`ResourceTypeGeneral`] method through `core::run`,
-//! using the project rules, provenance template, and output schema. The input
+//! using the project rules, a record template, and output schema. The input
 //! records are inlined and gzipped during the test so the fixture stays readable
 //! without committing a binary data file.
 
@@ -9,10 +9,13 @@
 #![allow(clippy::doc_markdown)]
 
 use comet_enrich_core::{
-    Manifest, RunMeta, RunOptions, RunStats, SourceRelease, StageTimings, run,
+    Manifest, RunMeta, RunOptions, RunStats, SCHEMA, SourceRelease, StageTimings, run, schema,
 };
 use comet_enrich_datacite_resource_type_general::{Config, ResourceTypeGeneral};
-use comet_enrich_test_support::{assert_close, config_path, read_enrichment_parts, write_gz_lines};
+use comet_enrich_test_support::{
+    SOURCE_ID, assert_close, config_path, enrichment_template, read_enrichment_parts,
+    write_gz_lines,
+};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
@@ -75,16 +78,12 @@ fn run_reclassifier() -> (tempfile::TempDir, PathBuf, RunStats) {
         output_writer_lanes: 1,
     };
 
-    let template =
-        comet_enrich_core::load_template(config_path("provenance/resource_type_general.yaml"))
-            .unwrap();
+    let template = enrichment_template();
     let method = ResourceTypeGeneral::try_new(Config {
         rules: config_path("reclassification_rules.yaml"),
     })
     .unwrap();
-    let validator =
-        comet_enrich_core::schema::compile(&config_path("schema/enrichment_input_schema.json"))
-            .unwrap();
+    let validator = schema::compile_str(SCHEMA).unwrap();
     let stats = run(&method, &opts, &template, Some(&validator)).unwrap();
     (dir, output, stats)
 }
@@ -113,6 +112,7 @@ fn reclassifier_matches_golden_outcomes() {
     for rec in &recs {
         assert_eq!(rec["field"], json!("types"));
         assert_eq!(rec["action"], json!("update"));
+        assert_eq!(rec["sourceId"], json!(SOURCE_ID));
         let doi = rec["doi"].as_str().unwrap().to_string();
         let rtg = rec["enrichedValue"]["resourceTypeGeneral"]
             .as_str()
@@ -190,6 +190,4 @@ fn reclassifier_writes_run_manifest() {
 
     // No match block or hash fields on the transform path.
     assert!(report.get("match").is_none());
-    assert!(!raw.contains("content_hash"));
-    assert!(!raw.contains("provenance_fingerprint"));
 }

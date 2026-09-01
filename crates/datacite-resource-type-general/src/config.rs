@@ -5,14 +5,51 @@
 //! `resourceTypeGeneral` values that may be overwritten.
 //!
 //! Reference values, redundancy matches, and scope entries are checked against
-//! [`RESOURCE_TYPE_GENERAL`](comet_enrich_core::datacite_enums::RESOURCE_TYPE_GENERAL)
-//! from `core`, so invalid DataCite type names are rejected when the rules are loaded.
+//! [`RESOURCE_TYPE_GENERAL`], so invalid DataCite type names are rejected when the
+//! rules are loaded.
 
 use anyhow::{Context, Result, bail};
-use comet_enrich_core::datacite_enums;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
+
+/// DataCite Metadata Schema 4.6 `resourceTypeGeneral` values.
+const RESOURCE_TYPE_GENERAL: &[&str] = &[
+    "Audiovisual",
+    "Award",
+    "Book",
+    "BookChapter",
+    "Collection",
+    "ComputationalNotebook",
+    "ConferencePaper",
+    "ConferenceProceeding",
+    "DataPaper",
+    "Dataset",
+    "Dissertation",
+    "Event",
+    "Image",
+    "InteractiveResource",
+    "Instrument",
+    "Journal",
+    "JournalArticle",
+    "Model",
+    "OutputManagementPlan",
+    "PeerReview",
+    "PhysicalObject",
+    "Poster",
+    "Preprint",
+    "Presentation",
+    "Project",
+    "Report",
+    "Service",
+    "Software",
+    "Sound",
+    "Standard",
+    "StudyRegistration",
+    "Text",
+    "Workflow",
+    "Other",
+];
 
 #[derive(Debug, Deserialize)]
 pub struct RulesConfig {
@@ -54,19 +91,19 @@ fn validate_rules(cfg: &RulesConfig) -> Result<()> {
         bail!("threshold must be in [0, 1], got {}", cfg.threshold);
     }
     for rv in &cfg.reference_values {
-        if !datacite_enums::RESOURCE_TYPE_GENERAL.contains(rv.as_str()) {
+        if !RESOURCE_TYPE_GENERAL.contains(&rv.as_str()) {
             bail!("reference_values contains unknown DataCite type: {rv:?}");
         }
     }
     for rule in &cfg.redundancy_exclusions {
         for m in &rule.matches {
-            if !datacite_enums::RESOURCE_TYPE_GENERAL.contains(m.as_str()) {
+            if !RESOURCE_TYPE_GENERAL.contains(&m.as_str()) {
                 bail!("redundancy_exclusions.matches contains unknown type: {m:?}");
             }
         }
     }
     for s in cfg.scope.target_resource_type_general.iter().flatten() {
-        if !datacite_enums::RESOURCE_TYPE_GENERAL.contains(s.as_str()) {
+        if !RESOURCE_TYPE_GENERAL.contains(&s.as_str()) {
             bail!("scope.target contains unknown type: {s:?}");
         }
     }
@@ -139,5 +176,14 @@ scope:
 ";
         let cfg: RulesConfig = serde_yaml_ng::from_str(yaml).unwrap();
         assert!(validate_rules(&cfg).is_err());
+    }
+
+    #[test]
+    fn resource_type_general_vocabulary_is_case_sensitive() {
+        for known in ["Dataset", "Project", "Text", "Other"] {
+            assert!(RESOURCE_TYPE_GENERAL.contains(&known), "missing {known}");
+        }
+        assert!(!RESOURCE_TYPE_GENERAL.contains(&"dataset"));
+        assert!(!RESOURCE_TYPE_GENERAL.contains(&"BadType"));
     }
 }

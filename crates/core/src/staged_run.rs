@@ -22,7 +22,7 @@ use crate::manifest::{Report, StageTimings};
 use crate::match_service::{MatchHit, MatchService};
 use crate::method::EnrichmentMethod;
 use crate::options::RunOptions;
-use crate::provenance::EnrichmentTemplate;
+use crate::template::EnrichmentTemplate;
 
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
@@ -104,12 +104,19 @@ where
     let work_path = wd.path.as_path();
 
     // Plan the stages before touching anything on disk.
-    let stages = if let Some(stage) = only_stage {
+    let mut stages = if let Some(stage) = only_stage {
         planning::ensure_predecessors_done(&wd, stage)?;
         vec![stage]
     } else {
         stages_to_run(work_path, cfg.from_scratch)
     };
+
+    if only_stage.is_none() && stages.is_empty() {
+        let reconciled = report::read_reconcile_stats(work_path, true)?;
+        if reconciled.source_id != template.source_id() {
+            stages.push(Stage::Reconcile);
+        }
+    }
 
     // Validate the input corpus before clearing any artifacts, so a mistyped
     // input path cannot destroy a previous run's outputs.

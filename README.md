@@ -4,7 +4,7 @@
 [DataCite Public Data File](https://datafiles.datacite.org/). It reads a directory of
 DataCite `*.jsonl.gz` files and writes JSONL records that conform to the DataCite
 enrichment input schema
-([`configs/schema/enrichment_input_schema.json`](configs/schema/enrichment_input_schema.json)).
+([`configs/enrichment_input_schema.json`](configs/enrichment_input_schema.json)).
 
 It currently provides three enrichment methods:
 

@@ -29,7 +29,7 @@ Running `funders` without a stage runs the whole pipeline. Intermediate files ar
 ```text
 comet-enrich funders \
   --input <DIR> --output <DIR> \
-  --provenance <FILE> --ror-file <FILE> \
+  --source-id <ID> --ror-file <FILE> \
   [OPTIONS] [--stage <extract|query|reconcile>]
 ```
 
@@ -66,7 +66,7 @@ Omit `--stage` to run all three in order.
 comet-enrich funders \
   --input      /data/datacite/DataCite_Public_Data_File_2024 \
   --output     ./out \
-  --provenance configs/provenance/funders.yaml \
+  --source-id  10.1234/example \
   --ror-file   /data/ror/v2.6-2026-04-14-ror-data.json \
   --ror-service-url http://localhost:8000 \
   --threads    16

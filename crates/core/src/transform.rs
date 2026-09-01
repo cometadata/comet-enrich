@@ -12,7 +12,7 @@ use crate::fanout::{
 };
 use crate::method::{EnrichmentMethod, Extracted, Lookups};
 use crate::options::{RunOptions, RunStats};
-use crate::provenance::{EnrichmentTemplate, build_enrichment_record};
+use crate::template::{EnrichmentTemplate, build_enrichment_record};
 use crate::writer::{
     ENRICHMENTS_DIR, ENRICHMENTS_FAILED_FILE, FailureSink, ParallelRollingWriter, RecordBatcher,
 };
@@ -36,7 +36,7 @@ struct Counters {
 
 /// Run an enrichment method over all input files.
 ///
-/// The provenance template is supplied by the caller and cloned into each emitted
+/// The template is supplied by the caller and its values are copied into each emitted
 /// record. If `validator` is set, each record is validated immediately before it
 /// is written.
 ///

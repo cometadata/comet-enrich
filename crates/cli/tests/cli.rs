@@ -1,17 +1,11 @@
 use assert_cmd::Command;
-use comet_enrich_test_support::{config_path, gz_input_fixture, read_enrichment_parts};
+use comet_enrich_test_support::{SOURCE_ID, config_path, gz_input_fixture, read_enrichment_parts};
 use predicates::prelude::*;
 use serde_json::{Value, json};
 use std::fs;
 
 fn cli() -> Command {
     Command::cargo_bin("comet-enrich").unwrap()
-}
-
-fn provenance(method: &str) -> String {
-    config_path(&format!("provenance/{method}.yaml"))
-        .to_string_lossy()
-        .into_owned()
 }
 
 fn rules() -> String {
@@ -85,8 +79,8 @@ fn cli_funders_validates_ror_file() {
             "in",
             "-o",
             "out.jsonl",
-            "--provenance",
-            provenance("funders").as_str(),
+            "--source-id",
+            SOURCE_ID,
             "--ror-file",
             "ror.json",
         ])
@@ -105,8 +99,8 @@ fn cli_affiliations_constructs_and_validates_input() {
             "in",
             "-o",
             "out.jsonl",
-            "--provenance",
-            provenance("affiliations").as_str(),
+            "--source-id",
+            SOURCE_ID,
         ])
         .assert()
         .failure()
@@ -122,8 +116,8 @@ fn cli_resource_type_general_loads_rules() {
             "in",
             "-o",
             "out.jsonl",
-            "--provenance",
-            provenance("resource_type_general").as_str(),
+            "--source-id",
+            SOURCE_ID,
             "--rules",
             "r.yaml",
         ])
@@ -147,7 +141,6 @@ fn cli_resource_type_general_runs_and_writes_manifest() {
 
     let input = input.to_string_lossy().into_owned();
     let output_arg = output.to_string_lossy().into_owned();
-    let provenance = provenance("resource_type_general");
     let rules = rules();
     cli()
         .args([
@@ -156,8 +149,8 @@ fn cli_resource_type_general_runs_and_writes_manifest() {
             input.as_str(),
             "-o",
             output_arg.as_str(),
-            "--provenance",
-            provenance.as_str(),
+            "--source-id",
+            SOURCE_ID,
             "--rules",
             rules.as_str(),
             "--source-release-date",
@@ -176,6 +169,7 @@ fn cli_resource_type_general_runs_and_writes_manifest() {
         records[0]["enrichedValue"]["resourceTypeGeneral"],
         json!("Dataset")
     );
+    assert_eq!(records[0]["sourceId"], json!(SOURCE_ID));
 
     let manifest: Value =
         serde_json::from_str(&fs::read_to_string(output.join("manifest.json")).unwrap()).unwrap();
@@ -189,7 +183,7 @@ fn cli_resource_type_general_runs_and_writes_manifest() {
 }
 
 #[test]
-fn cli_validates_provenance_before_method_files() {
+fn cli_rejects_malformed_source_id_before_method_files() {
     cli()
         .args([
             "resource-type-general",
@@ -197,14 +191,15 @@ fn cli_validates_provenance_before_method_files() {
             "in",
             "-o",
             "out.jsonl",
-            "--provenance",
-            "nope.yaml",
+            "--source-id",
+            "not-a-doi",
             "--rules",
             "r.yaml",
         ])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("nope.yaml"))
+        .stderr(predicate::str::contains("--source-id"))
+        .stderr(predicate::str::contains("not-a-doi"))
         .stderr(predicate::str::contains("reading r.yaml").not());
 }
 

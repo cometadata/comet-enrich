@@ -27,7 +27,7 @@ Running `affiliations` without a stage runs the whole pipeline. Intermediate fil
 ```text
 comet-enrich affiliations \
   --input <DIR> --output <DIR> \
-  --provenance <FILE> \
+  --source-id <ID> \
   [OPTIONS] [--stage <extract|query|reconcile>]
 ```
 
@@ -63,7 +63,7 @@ Omit `--stage` to run all three in order.
 comet-enrich affiliations \
   --input      /data/datacite/DataCite_Public_Data_File_2024 \
   --output     ./out \
-  --provenance configs/provenance/affiliations.yaml \
+  --source-id  10.1234/example \
   --ror-service-url http://localhost:8000 \
   --threads    16
 ```

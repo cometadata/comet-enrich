@@ -129,7 +129,7 @@ pub struct FundersArgs {
 /// Run the selected subcommand.
 pub fn run(cli: Cli) -> Result<()> {
     match cli.command {
-        // Completions write the script to stdout and skip logging and provenance setup.
+        // Completions write the script to stdout and skip logging and template setup.
         Command::Completions(a) => {
             clap_complete::generate(
                 a.shell,
@@ -181,10 +181,10 @@ pub fn run(cli: Cli) -> Result<()> {
     }
 }
 
-/// Initialise logging and load provenance.
+/// Initialise logging and build the record template.
 fn setup(run: &RunArgs, io: &IoArgs) -> Result<EnrichmentTemplate> {
     init_logging(run.log_level)?;
-    comet_enrich_core::load_template(&io.provenance)
+    io.template()
 }
 
 /// Run a transform method and write its manifest.
@@ -329,8 +329,8 @@ mod tests {
             "in",
             "-o",
             "out.jsonl",
-            "--provenance",
-            "e.yaml",
+            "--source-id",
+            "10.1/x",
         ])
         .unwrap();
         let Command::Affiliations(a) = cli.command else {
@@ -355,8 +355,8 @@ mod tests {
             "in",
             "-o",
             "out",
-            "--provenance",
-            "e.yaml",
+            "--source-id",
+            "10.1/x",
             "--ror-file",
             "ror.json",
             "--hash-bits",
@@ -376,8 +376,8 @@ mod tests {
                 "in",
                 "-o",
                 "out",
-                "--provenance",
-                "e.yaml",
+                "--source-id",
+                "10.1/x",
                 "--ror-file",
                 "ror.json",
                 "--hash-bits",
@@ -396,8 +396,8 @@ mod tests {
             "in",
             "-o",
             "out.jsonl",
-            "--provenance",
-            "e.yaml",
+            "--source-id",
+            "10.1/x",
             "--stage",
             "query",
         ])
@@ -418,8 +418,8 @@ mod tests {
                 "in",
                 "-o",
                 "out",
-                "--provenance",
-                "e.yaml",
+                "--source-id",
+                "10.1/x",
             ]
         };
 
@@ -443,8 +443,8 @@ mod tests {
             "in",
             "-o",
             "out.jsonl",
-            "--provenance",
-            "e.yaml",
+            "--source-id",
+            "10.1/x",
             "--rules",
             "r.yaml",
             "--schema",
@@ -477,8 +477,8 @@ mod tests {
             "in",
             "-o",
             "out.jsonl",
-            "--provenance",
-            "e.yaml",
+            "--source-id",
+            "10.1/x",
             "--rules",
             "r.yaml",
             "--ror-service-url",
@@ -496,8 +496,8 @@ mod tests {
             "in",
             "-o",
             "out.jsonl",
-            "--provenance",
-            "e.yaml",
+            "--source-id",
+            "10.1/x",
         ]);
         assert!(res.is_err());
     }
@@ -510,8 +510,8 @@ mod tests {
             "in",
             "-o",
             "out",
-            "--provenance",
-            "e.yaml",
+            "--source-id",
+            "10.1/x",
             "--rules",
             "r.yaml",
         ];

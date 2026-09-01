@@ -3,8 +3,8 @@
 use anyhow::{Result, bail};
 use clap::{Args, ValueEnum, ValueHint};
 use comet_enrich_core::{
-    DEFAULT_OUTPUT_PART_SIZE_MIB, DEFAULT_OUTPUT_WRITER_LANES, HashBits, LookupConfig, RunOptions,
-    SCHEMA, SourceRelease, Stage, schema,
+    DEFAULT_OUTPUT_PART_SIZE_MIB, DEFAULT_OUTPUT_WRITER_LANES, EnrichmentTemplate, HashBits,
+    LookupConfig, RunOptions, SCHEMA, SourceRelease, Stage, schema,
 };
 use log::LevelFilter;
 use std::collections::BTreeMap;
@@ -21,9 +21,14 @@ pub struct IoArgs {
     #[arg(short, long, value_name = "DIR", value_hint = ValueHint::DirPath, help_heading = "Input/output")]
     pub output: PathBuf,
 
-    /// YAML provenance metadata for the enrichment records.
-    #[arg(long, value_name = "FILE", value_hint = ValueHint::FilePath, help_heading = "Input/output")]
-    pub provenance: PathBuf,
+    /// Source ID written to every enrichment record. The value must be a DOI name, such as 10.1234/example.
+    #[arg(
+        long = "source-id",
+        value_name = "ID",
+        value_parser = parse_source_id,
+        help_heading = "Input/output"
+    )]
+    pub source_id: String,
 
     /// Release date of a data source, as name=YYYY-MM-DD (repeatable), e.g. datacite=2024-01-01.
     #[arg(
@@ -49,6 +54,16 @@ impl IoArgs {
         }
     }
 
+    /// Build the record template from `--source-id`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the source ID does not match DOI name syntax, such as
+    /// `10.1234/example`. Unreachable after argument parsing, which applies the same check.
+    pub fn template(&self) -> Result<EnrichmentTemplate> {
+        EnrichmentTemplate::new(&self.source_id)
+    }
+
     /// Build the manifest `sources` map.
     ///
     /// # Errors
@@ -71,6 +86,14 @@ impl IoArgs {
         }
         Ok(sources)
     }
+}
+
+/// Parse `--source-id`, rejecting values that do not match DOI name syntax, such
+/// as `10.1234/example`.
+fn parse_source_id(s: &str) -> Result<String, String> {
+    EnrichmentTemplate::new(s)
+        .map(|t| t.source_id().to_owned())
+        .map_err(|e| e.to_string())
 }
 
 /// Parse `name=YYYY-MM-DD`.
@@ -345,11 +368,33 @@ mod tests {
     }
 
     #[test]
+    fn parse_source_id_delegates_to_core() {
+        assert_eq!(
+            parse_source_id("10.500.100/UPPER CASE").unwrap(),
+            "10.500.100/UPPER CASE"
+        );
+        assert_err_contains(parse_source_id(" 10.1/x"), "must be a DOI");
+        assert_err_contains(parse_source_id("10.1/x "), "must be a DOI");
+        assert_err_contains(parse_source_id("not-a-doi"), "must be a DOI");
+    }
+
+    #[test]
+    fn io_args_template_carries_source_id() {
+        let io = IoArgs {
+            input: PathBuf::from("input"),
+            output: PathBuf::from("output"),
+            source_id: "10.82461/bpzr-jd55".to_owned(),
+            source_release_date: Vec::new(),
+        };
+        assert_eq!(io.template().unwrap().source_id(), "10.82461/bpzr-jd55");
+    }
+
+    #[test]
     fn io_args_run_options_copies_io_and_run_values() {
         let io = IoArgs {
             input: PathBuf::from("input"),
             output: PathBuf::from("output"),
-            provenance: PathBuf::from("prov.yaml"),
+            source_id: "10.82461/bpzr-jd55".to_owned(),
             source_release_date: Vec::new(),
         };
         let run = run_args(true, None);

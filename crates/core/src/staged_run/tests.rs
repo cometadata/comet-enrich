@@ -6,7 +6,7 @@ use crate::manifest::{MANIFEST_FILE, MatchFailureTaxonomy, Report};
 use crate::match_service::{FakeMatchService, MatchError, MatchOutcome, RorLookup};
 use crate::method::{EnrichmentAction, EnrichmentMethod, EnrichmentParts, Extracted, Lookups};
 use crate::options::RunOptions;
-use crate::provenance::EnrichmentTemplate;
+use crate::template::EnrichmentTemplate;
 use crate::{ENRICHMENTS_DIR, ENRICHMENTS_FAILED_FILE};
 
 use anyhow::Result;
@@ -81,10 +81,7 @@ impl EnrichmentMethod for TestMethod {
 }
 
 fn template() -> EnrichmentTemplate {
-    EnrichmentTemplate {
-        contributors: json!([]),
-        resources: json!([]),
-    }
+    EnrichmentTemplate::new("10.82461/bpzr-jd55").unwrap()
 }
 
 fn fake_service() -> Arc<dyn MatchService> {
@@ -186,12 +183,22 @@ impl TestRun {
         validator: Option<&jsonschema::Validator>,
         only_stage: Option<Stage>,
     ) -> Result<Report> {
+        self.run_with_template(&self.tmpl, cfg, validator, only_stage)
+    }
+
+    fn run_with_template(
+        &self,
+        template: &EnrichmentTemplate,
+        cfg: &LookupConfig,
+        validator: Option<&jsonschema::Validator>,
+        only_stage: Option<Stage>,
+    ) -> Result<Report> {
         run_staged(
             &self.method,
             &self.opts(),
             cfg,
             &self.svc,
-            &self.tmpl,
+            template,
             validator,
             "funder",
             only_stage,
@@ -619,6 +626,9 @@ fn rerun_of_complete_pipeline_keeps_truthful_manifest() {
 
     let again = t.run(false).unwrap();
 
+    assert!(again.stage_timings_ms.extract.is_none());
+    assert!(again.stage_timings_ms.query.is_none());
+    assert!(again.stage_timings_ms.reconcile.is_none());
     assert_eq!(again.counters.emitted, first.counters.emitted);
     assert_eq!(again.counters.emitted, 2);
     assert_eq!(
@@ -627,6 +637,56 @@ fn rerun_of_complete_pipeline_keeps_truthful_manifest() {
     );
     assert_eq!(again.coverage.records_enriched, 2);
     assert_eq!(again.match_.unwrap().matched, 2);
+
+    let stats: Value =
+        serde_json::from_str(&fs::read_to_string(t.work().join(RECONCILE_STATS_FILE)).unwrap())
+            .unwrap();
+    assert_eq!(stats["source_id"], template().source_id());
+}
+
+#[test]
+fn resume_with_changed_source_id_reruns_only_reconcile() {
+    let t = TestRun::new();
+    t.run(true).unwrap();
+
+    let changed_source_id = "10.82461/BPZR-JD55";
+    let changed = EnrichmentTemplate::new(changed_source_id).unwrap();
+    let report = t
+        .run_with_template(&changed, &cfg(HashBits::Bits64, false), None, None)
+        .unwrap();
+
+    assert!(report.stage_timings_ms.extract.is_none());
+    assert!(report.stage_timings_ms.query.is_none());
+    assert!(report.stage_timings_ms.reconcile.is_some());
+    assert_eq!(report.counters.emitted, 2);
+    let records = read_enrichment_parts(&t.output);
+    assert_eq!(records.len(), 2);
+    for record in records {
+        assert_eq!(record["sourceId"], changed_source_id);
+    }
+    let stats: Value =
+        serde_json::from_str(&fs::read_to_string(t.work().join(RECONCILE_STATS_FILE)).unwrap())
+            .unwrap();
+    assert_eq!(stats["source_id"], changed_source_id);
+}
+
+#[test]
+fn resume_with_legacy_reconcile_stats_reruns_reconcile() {
+    let t = TestRun::new();
+    t.run(true).unwrap();
+
+    let path = t.work().join(RECONCILE_STATS_FILE);
+    let mut stats: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    stats.as_object_mut().unwrap().remove("source_id");
+    fs::write(&path, serde_json::to_string(&stats).unwrap()).unwrap();
+
+    let report = t.run(false).unwrap();
+
+    assert!(report.stage_timings_ms.extract.is_none());
+    assert!(report.stage_timings_ms.query.is_none());
+    assert!(report.stage_timings_ms.reconcile.is_some());
+    let refreshed: Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+    assert_eq!(refreshed["source_id"], template().source_id());
 }
 
 #[test]

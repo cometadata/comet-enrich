@@ -10,7 +10,6 @@
 
 mod artifact_lifecycle;
 pub mod datacite;
-pub mod datacite_enums;
 pub mod dedup;
 mod fanout;
 pub mod identifiers;
@@ -18,9 +17,9 @@ pub mod manifest;
 pub mod match_service;
 pub mod method;
 pub mod options;
-pub mod provenance;
 pub mod schema;
 pub mod staged_run;
+pub mod template;
 pub mod transform;
 pub mod writer;
 
@@ -34,9 +33,9 @@ pub use match_service::{
 };
 pub use method::{EnrichmentAction, EnrichmentMethod, EnrichmentParts, Extracted, Lookups};
 pub use options::{RunOptions, RunStats};
-pub use provenance::{EnrichmentTemplate, build_enrichment_record, load_template};
 pub use schema::SCHEMA;
 pub use staged_run::{LookupConfig, Stage, WorkDir, pipeline_complete, run_staged, stages_to_run};
+pub use template::{EnrichmentTemplate, build_enrichment_record};
 pub use transform::run;
 pub use writer::{
     DEFAULT_OUTPUT_PART_SIZE_MIB, DEFAULT_OUTPUT_WRITER_LANES, ENRICHMENTS_DIR,

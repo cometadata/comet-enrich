@@ -26,7 +26,7 @@ comet-enrich resource-type-general \
   --input      /data/datacite \
   --output     ./out \
   --rules      configs/reclassification_rules.yaml \
-  --provenance configs/provenance/resource_type_general.yaml
+  --source-id  10.1234/example
 ```
 
 ## Input data
@@ -49,34 +49,28 @@ Use these options to change the validation behaviour:
 - `--schema <FILE>`: validate against a custom JSON Schema instead of the built-in one.
 - `--no-validate`: skip validation entirely.
 
-## Provenance
+## Source ID
 
-Every enrichment record includes a provenance block (`contributors` and `resources`) loaded from
-`--provenance <FILE>`. Example files live in [`configs/provenance/`](../configs/provenance), with
-one file per method:
+Every enrichment record carries a `sourceId` identifying the enrichment project that produced it.
 
-- `resource_type_general.yaml`
-- `affiliations.yaml`
-- `funders.yaml`
-
-The provenance file is validated before the method runs.
+Pass it with the `--source-id <ID>` command-line argument. The value must be a DOI name, such as `10.1234/example`.
 
 ## Global options
 
 These flags are shared by every method:
 
-| Option                         | Default    | Description                                                          |
-|--------------------------------|------------|----------------------------------------------------------------------|
-| `-i, --input <DIR>`            | _required_ | Input directory of DataCite `*.jsonl.gz` files, searched recursively |
+| Option                         | Default    | Description                                                                                |
+|--------------------------------|------------|--------------------------------------------------------------------------------------------|
+| `-i, --input <DIR>`            | _required_ | Input directory of DataCite `*.jsonl.gz` files, searched recursively                       |
 | `-o, --output <DIR>`           | _required_ | Output directory; writes `enrichments/part_NNNN.jsonl.gz` (and `enrichments.failed.jsonl`) |
-| `--provenance <FILE>`          | _required_ | YAML provenance metadata attached to each record                     |
-| `-t, --threads <N>`            | `0`        | Worker threads; `0` uses all available CPUs                          |
-| `-b, --batch-size <N>`         | `5000`     | Enrichment records per internal batch                                |
-| `--output-part-size-mib <MIB>` | `256`      | Target compressed MiB per final enrichment part                      |
-| `--output-writer-lanes <N>`    | `1`        | Parallel writer lanes for final enrichment output                    |
-| `--schema <FILE>`              | built-in   | Validate output against a custom JSON Schema                         |
-| `--no-validate`                | off        | Skip output schema validation                                        |
-| `--log-level <LEVEL>`          | `info`     | Minimum log level (`trace`, `debug`, `info`, `warn`, `error`)        |
+| `--source-id <ID>`             | _required_ | DOI name, such as `10.1234/example`, written to each record's `sourceId`                   |
+| `-t, --threads <N>`            | `0`        | Worker threads; `0` uses all available CPUs                                                |
+| `-b, --batch-size <N>`         | `5000`     | Enrichment records per internal batch                                                      |
+| `--output-part-size-mib <MIB>` | `256`      | Target compressed MiB per final enrichment part                                            |
+| `--output-writer-lanes <N>`    | `1`        | Parallel writer lanes for final enrichment output                                          |
+| `--schema <FILE>`              | built-in   | Validate output against a custom JSON Schema                                               |
+| `--no-validate`                | off        | Skip output schema validation                                                              |
+| `--log-level <LEVEL>`          | `info`     | Minimum log level (`trace`, `debug`, `info`, `warn`, `error`)                              |
 
 Each method adds its own options. See its page below.
 

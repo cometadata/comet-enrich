@@ -2,8 +2,8 @@
 //!
 //! An enrichment method extracts values from DataCite records, optionally resolves
 //! them through a lookup step, then maps the results back into enrichment records.
-//! Methods return only the enrichment value parts; provenance is added later by
-//! build_enrichment_record.
+//! Methods return only the enrichment value parts; run-level values such as the
+//! source id are added later by build_enrichment_record.
 
 use serde_json::Value;
 use std::collections::HashMap;
@@ -34,7 +34,7 @@ impl EnrichmentAction {
     }
 }
 
-/// Value fields for one enrichment record, before provenance is added.
+/// Value fields for one enrichment record, before run-level values are added.
 pub struct EnrichmentParts {
     pub doi: String,
     /// Action to apply for this record.

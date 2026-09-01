@@ -1,10 +1,11 @@
 //! Compare comet-enrich enrichment output against a re-run of the original
 //! standalone tools (their `--enrichment-format` `enrichments.jsonl`).
 //!
-//! Both sides are treated as a set of enrichment-format JSONL records. The
-//! comparison ignores provenance boilerplate (`contributors`, `resources`) and
-//! JSON key order, keying each record on `(doi, action, field, originalValue)`
-//! and comparing the `enrichedValue`.
+//! Both sides are treated as a set of enrichment-format JSONL records, keyed on
+//! canonical `(doi, action, field, originalValue)` with `enrichedValue` as the
+//! compared value. JSON key order is ignored, and any other field (`sourceId` on
+//! the new side, `contributors`/`resources` on the old side) never enters the
+//! comparison or the printed samples.
 
 // DataCite, ROR, and JSONL are names, not Rust identifiers.
 #![allow(clippy::doc_markdown)]
@@ -184,7 +185,7 @@ impl State {
         // Key absent, or NEW has more copies of this key than OLD did.
         let Some(slot) = old.get_mut(&kh).filter(|s| s.count > 0) else {
             self.counters.only_new += 1;
-            push_sample(&mut self.only_new, self.cap, || compact(rec));
+            push_sample(&mut self.only_new, self.cap, || sample_compact(rec));
             return dump_record(&mut self.dump, "only_new", rec);
         };
         slot.count -= 1;
@@ -226,7 +227,7 @@ impl State {
                 return Ok(());
             };
             if slot.count > 0 {
-                push_sample(&mut self.only_old, self.cap, || compact(rec));
+                push_sample(&mut self.only_old, self.cap, || sample_compact(rec));
                 dump_record(&mut self.dump, "only_old", rec)?;
             }
             if let Some(&idx) = self.mismatch_idx.get(&kh) {
@@ -358,8 +359,8 @@ fn collect_files(path: &Path) -> Result<Vec<PathBuf>> {
 
 /// The comparison key hash and enriched-value hash for one record.
 ///
-/// key = canonical `(doi, action, field, originalValue)`; provenance fields
-/// (`contributors`, `resources`) are ignored entirely.
+/// key = canonical `(doi, action, field, originalValue)`; every other field is
+/// ignored.
 fn key_and_value(rec: &Value) -> (u128, u128) {
     let key_str = key_compact(rec);
     let val_str = enriched_compact(rec);
@@ -383,26 +384,24 @@ fn canonicalize(value: &Value) -> Value {
     }
 }
 
-/// Compact canonical JSON of the whole record minus provenance boilerplate.
-fn compact(rec: &Value) -> String {
-    let mut clone = rec.clone();
-    if let Some(obj) = clone.as_object_mut() {
-        obj.remove("contributors");
-        obj.remove("resources");
-    }
-    serde_json::to_string(&canonicalize(&clone)).unwrap_or_default()
+/// Canonical copies of the named top-level fields (`null` when absent).
+fn fields(rec: &Value, names: &[&str]) -> Vec<Value> {
+    names
+        .iter()
+        .map(|k| rec.get(*k).map_or(Value::Null, canonicalize))
+        .collect()
+}
+
+/// Compact canonical JSON of the comparison key plus `enrichedValue`, for samples.
+fn sample_compact(rec: &Value) -> String {
+    let names = ["doi", "action", "field", "originalValue", "enrichedValue"];
+    serde_json::to_string(&Value::Array(fields(rec, &names))).unwrap_or_default()
 }
 
 /// Compact canonical JSON of just the comparison key.
 fn key_compact(rec: &Value) -> String {
-    let field = |k: &str| rec.get(k).cloned().unwrap_or(Value::Null);
-    let key = Value::Array(vec![
-        field("doi"),
-        field("action"),
-        field("field"),
-        canonicalize(&field("originalValue")),
-    ]);
-    serde_json::to_string(&key).unwrap_or_default()
+    let names = ["doi", "action", "field", "originalValue"];
+    serde_json::to_string(&Value::Array(fields(rec, &names))).unwrap_or_default()
 }
 
 /// Compact canonical JSON of the record's `enrichedValue`.
@@ -435,5 +434,35 @@ fn print_samples(title: &str, samples: &[String]) {
     println!("\n-- {title} [showing {}] --", samples.len());
     for s in samples {
         println!("  {s}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn samples_show_only_key_and_enriched_value() {
+        let new_side = json!({
+            "doi": "10.1/a",
+            "action": "update",
+            "field": "types",
+            "originalValue": {"resourceTypeGeneral": "Text"},
+            "enrichedValue": {"resourceTypeGeneral": "Dataset"},
+            "sourceId": "10.82461/aaaa-aaaa"
+        });
+        let mut old_side = new_side.clone();
+        old_side.as_object_mut().unwrap().remove("sourceId");
+        old_side["contributors"] = json!([{"name": "COMET"}]);
+        old_side["resources"] = json!([{"relatedIdentifier": "10.x/y"}]);
+        assert_eq!(sample_compact(&new_side), sample_compact(&old_side));
+
+        let mut other_value = new_side.clone();
+        other_value["enrichedValue"]["resourceTypeGeneral"] = json!("Software");
+        assert_ne!(sample_compact(&new_side), sample_compact(&other_value));
+
+        assert!(sample_compact(&new_side).contains("\"Dataset\""));
+        assert!(!sample_compact(&new_side).contains("sourceId"));
     }
 }

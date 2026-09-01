@@ -1,15 +1,14 @@
 //! Embedded enrichment-input schema and validator helpers.
 //!
-//! The built-in schema is used for output validation and for the DataCite
-//! vocabulary values in [`crate::datacite_enums`]. Callers can compile a custom
-//! schema with [`compile`].
+//! The built-in schema is used for output validation. Callers can compile a
+//! custom schema with [`compile`].
 
 use anyhow::{Context, Result};
 use serde_json::Value;
 use std::path::Path;
 
 /// Built-in enrichment-input JSON Schema.
-pub const SCHEMA: &str = include_str!("../../../configs/schema/enrichment_input_schema.json");
+pub const SCHEMA: &str = include_str!("../../../configs/enrichment_input_schema.json");
 
 /// Read and compile a schema file.
 ///
