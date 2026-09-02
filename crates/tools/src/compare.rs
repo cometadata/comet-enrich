@@ -384,6 +384,9 @@ fn canonicalize(value: &Value) -> Value {
     }
 }
 
+/// The top-level fields that identify one enrichment record, in key order.
+const KEY_FIELDS: [&str; 4] = ["doi", "action", "field", "originalValue"];
+
 /// Canonical copies of the named top-level fields (`null` when absent).
 fn fields(rec: &Value, names: &[&str]) -> Vec<Value> {
     names
@@ -392,22 +395,35 @@ fn fields(rec: &Value, names: &[&str]) -> Vec<Value> {
         .collect()
 }
 
-/// Compact canonical JSON of the comparison key plus `enrichedValue`, for samples.
+/// Compact canonical JSON of the comparison key plus `enrichedValue`, for
+/// samples. A keyed object (`KEY_FIELDS` order, then `enrichedValue`) rather
+/// than a positional array, so a printed sample reads without knowing the
+/// column order; every other field is dropped. `serde_json`'s `preserve_order`
+/// keeps the keys in insertion order.
 fn sample_compact(rec: &Value) -> String {
-    let names = ["doi", "action", "field", "originalValue", "enrichedValue"];
-    serde_json::to_string(&Value::Array(fields(rec, &names))).unwrap_or_default()
+    let names: Vec<&str> = KEY_FIELDS
+        .iter()
+        .copied()
+        .chain(["enrichedValue"])
+        .collect();
+    let obj: Map<String, Value> = names
+        .iter()
+        .map(|&k| k.to_owned())
+        .zip(fields(rec, &names))
+        .collect();
+    serde_json::to_string(&Value::Object(obj)).unwrap_or_default()
 }
 
-/// Compact canonical JSON of just the comparison key.
+/// Compact canonical JSON of just the comparison key, as a positional array.
+/// This feeds the record hash, so its shape must stay stable.
 fn key_compact(rec: &Value) -> String {
-    let names = ["doi", "action", "field", "originalValue"];
-    serde_json::to_string(&Value::Array(fields(rec, &names))).unwrap_or_default()
+    serde_json::to_string(&Value::Array(fields(rec, &KEY_FIELDS))).unwrap_or_default()
 }
 
 /// Compact canonical JSON of the record's `enrichedValue`.
 fn enriched_compact(rec: &Value) -> String {
-    let ev = rec.get("enrichedValue").cloned().unwrap_or(Value::Null);
-    serde_json::to_string(&canonicalize(&ev)).unwrap_or_default()
+    let ev = rec.get("enrichedValue").map_or(Value::Null, canonicalize);
+    serde_json::to_string(&ev).unwrap_or_default()
 }
 
 /// Push a lazily-built sample if the bucket is below its cap.
@@ -462,7 +478,39 @@ mod tests {
         other_value["enrichedValue"]["resourceTypeGeneral"] = json!("Software");
         assert_ne!(sample_compact(&new_side), sample_compact(&other_value));
 
-        assert!(sample_compact(&new_side).contains("\"Dataset\""));
-        assert!(!sample_compact(&new_side).contains("sourceId"));
+        let sample = sample_compact(&new_side);
+        assert!(sample.contains("\"Dataset\""));
+        assert!(!sample.contains("sourceId"));
+        assert!(sample.contains("\"doi\":"));
+        assert!(sample.contains("\"enrichedValue\":"));
+
+        // Labelled, and in exactly this order.
+        let parsed: Map<String, Value> = serde_json::from_str(&sample).unwrap();
+        let keys: Vec<&str> = parsed.keys().map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            ["doi", "action", "field", "originalValue", "enrichedValue"]
+        );
+    }
+
+    #[test]
+    fn key_is_a_positional_array_with_null_for_absent_fields() {
+        let rec = json!({
+            "doi": "10.1/a",
+            "field": "types",
+            "originalValue": {"b": 1, "a": 2},
+            "enrichedValue": {"ignored": true}
+        });
+        assert_eq!(
+            key_compact(&rec),
+            r#"["10.1/a",null,"types",{"a":2,"b":1}]"#
+        );
+    }
+
+    #[test]
+    fn enriched_value_is_canonical_and_null_when_absent() {
+        assert_eq!(enriched_compact(&json!({"doi": "10.1/a"})), "null");
+        let rec = json!({"enrichedValue": {"b": 1, "a": {"d": 2, "c": 3}}});
+        assert_eq!(enriched_compact(&rec), r#"{"a":{"c":3,"d":2},"b":1}"#);
     }
 }
