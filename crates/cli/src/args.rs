@@ -25,10 +25,10 @@ pub struct IoArgs {
     #[arg(
         long = "source-id",
         value_name = "ID",
-        value_parser = parse_source_id,
+        value_parser = EnrichmentTemplate::new,
         help_heading = "Input/output"
     )]
-    pub source_id: String,
+    pub source_id: EnrichmentTemplate,
 
     /// Release date of a data source, as name=YYYY-MM-DD (repeatable), e.g. datacite=2024-01-01.
     #[arg(
@@ -54,14 +54,10 @@ impl IoArgs {
         }
     }
 
-    /// Build the record template from `--source-id`.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the source ID does not match DOI name syntax, such as
-    /// `10.1234/example`. Unreachable after argument parsing, which applies the same check.
-    pub fn template(&self) -> Result<EnrichmentTemplate> {
-        EnrichmentTemplate::new(&self.source_id)
+    /// Record template parsed from `--source-id`.
+    #[must_use]
+    pub fn template(&self) -> &EnrichmentTemplate {
+        &self.source_id
     }
 
     /// Build the manifest `sources` map.
@@ -86,14 +82,6 @@ impl IoArgs {
         }
         Ok(sources)
     }
-}
-
-/// Parse `--source-id`, rejecting values that do not match DOI name syntax, such
-/// as `10.1234/example`.
-fn parse_source_id(s: &str) -> Result<String, String> {
-    EnrichmentTemplate::new(s)
-        .map(|t| t.source_id().to_owned())
-        .map_err(|e| e.to_string())
 }
 
 /// Parse `name=YYYY-MM-DD`.
@@ -368,33 +356,11 @@ mod tests {
     }
 
     #[test]
-    fn parse_source_id_delegates_to_core() {
-        assert_eq!(
-            parse_source_id("10.500.100/UPPER CASE").unwrap(),
-            "10.500.100/UPPER CASE"
-        );
-        assert_err_contains(parse_source_id(" 10.1/x"), "must be a DOI");
-        assert_err_contains(parse_source_id("10.1/x "), "must be a DOI");
-        assert_err_contains(parse_source_id("not-a-doi"), "must be a DOI");
-    }
-
-    #[test]
-    fn io_args_template_carries_source_id() {
-        let io = IoArgs {
-            input: PathBuf::from("input"),
-            output: PathBuf::from("output"),
-            source_id: "10.82461/bpzr-jd55".to_owned(),
-            source_release_date: Vec::new(),
-        };
-        assert_eq!(io.template().unwrap().source_id(), "10.82461/bpzr-jd55");
-    }
-
-    #[test]
     fn io_args_run_options_copies_io_and_run_values() {
         let io = IoArgs {
             input: PathBuf::from("input"),
             output: PathBuf::from("output"),
-            source_id: "10.82461/bpzr-jd55".to_owned(),
+            source_id: EnrichmentTemplate::new("10.82461/bpzr-jd55").unwrap(),
             source_release_date: Vec::new(),
         };
         let run = run_args(true, None);

@@ -251,6 +251,7 @@ fn affiliations_pipeline_writes_lookup_manifest() {
     let meta = RunMeta {
         method_name: "affiliations".to_owned(),
         method_version: env!("CARGO_PKG_VERSION"),
+        source_id: SOURCE_ID.to_owned(),
         sources,
     };
     Manifest::from_report(&meta, "success", report, HashInfo::from(HashBits::Bits64))
@@ -262,6 +263,7 @@ fn affiliations_pipeline_writes_lookup_manifest() {
 
     assert_eq!(m["schema_version"], json!(1));
     assert_eq!(m["method"]["name"], json!("affiliations"));
+    assert_eq!(m["source_id"], json!(SOURCE_ID));
     assert_eq!(m["hash"]["algorithm"], json!("xxh3"));
     assert_eq!(m["hash"]["bits"], json!(64));
     assert_eq!(m["exit_status"], json!("success"));

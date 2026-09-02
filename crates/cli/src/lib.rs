@@ -12,9 +12,8 @@ use anyhow::Result;
 use args::{IoArgs, LookupArgs, RunArgs, StageArg, init_logging};
 use clap::{CommandFactory, Parser, Subcommand, ValueHint};
 use comet_enrich_core::{
-    EnrichmentMethod, EnrichmentTemplate, HashInfo, LookupConfig, Manifest, MarpleClient, MatchHit,
-    MatchService, RunMeta, RunStats, Stage, StageTimings, exit_status, pipeline_complete,
-    run_staged,
+    EnrichmentMethod, HashInfo, LookupConfig, Manifest, MarpleClient, MatchHit, MatchService,
+    RunMeta, RunStats, Stage, StageTimings, exit_status, pipeline_complete, run_staged,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -140,7 +139,7 @@ pub fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
         Command::ResourceTypeGeneral(a) => {
-            let template = setup(&a.run, &a.io)?;
+            init_logging(a.run.log_level)?;
             let method = rtg::ResourceTypeGeneral::try_new(rtg::Config {
                 rules: a.rules.clone(),
             })?;
@@ -150,12 +149,11 @@ pub fn run(cli: Cli) -> Result<()> {
                 &method,
                 &a.io,
                 &a.run,
-                &template,
                 &["not_in_scope", "malformed_types"],
             )
         }
         Command::Affiliations(a) => {
-            let template = setup(&a.run, &a.io)?;
+            init_logging(a.run.log_level)?;
             let method = affiliations::Affiliations::try_new((&a.lookup).into())?;
             run_lookup_method(
                 "affiliations",
@@ -163,28 +161,21 @@ pub fn run(cli: Cli) -> Result<()> {
                 &a.io,
                 &a.lookup,
                 &a.run,
-                &template,
                 "affiliation",
                 a.stage,
             )
         }
         Command::Funders(a) => {
-            let template = setup(&a.run, &a.io)?;
+            init_logging(a.run.log_level)?;
             let method = funders::Funders::try_new(funders::Config {
                 lookup: (&a.lookup).into(),
                 ror_file: a.ror_file.clone(),
             })?;
             run_lookup_method(
-                "funders", &method, &a.io, &a.lookup, &a.run, &template, "funder", a.stage,
+                "funders", &method, &a.io, &a.lookup, &a.run, "funder", a.stage,
             )
         }
     }
-}
-
-/// Initialise logging and build the record template.
-fn setup(run: &RunArgs, io: &IoArgs) -> Result<EnrichmentTemplate> {
-    init_logging(run.log_level)?;
-    io.template()
 }
 
 /// Run a transform method and write its manifest.
@@ -197,7 +188,6 @@ fn run_method<M: EnrichmentMethod>(
     method: &M,
     io: &IoArgs,
     run: &RunArgs,
-    template: &EnrichmentTemplate,
     out_of_scope: &[&str],
 ) -> Result<()> {
     let validator = run.validator()?;
@@ -205,12 +195,18 @@ fn run_method<M: EnrichmentMethod>(
     let sources = io.sources()?;
 
     let started = Instant::now();
-    let stats = comet_enrich_core::run(method, &io.run_options(run), template, validator.as_ref())?;
+    let stats = comet_enrich_core::run(
+        method,
+        &io.run_options(run),
+        io.template(),
+        validator.as_ref(),
+    )?;
     let total_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
 
     let meta = RunMeta {
         method_name: name.to_owned(),
         method_version: env!("CARGO_PKG_VERSION"),
+        source_id: io.template().source_id().to_owned(),
         sources,
     };
     let timings = StageTimings {
@@ -230,14 +226,12 @@ fn run_method<M: EnrichmentMethod>(
 /// # Errors
 /// Propagates any error from schema compilation, source validation, building the
 /// match client, the staged run itself, or writing the manifest.
-#[allow(clippy::too_many_arguments)]
 fn run_lookup_method<M>(
     name: &str,
     method: &M,
     io: &IoArgs,
     lookup: &LookupArgs,
     run: &RunArgs,
-    template: &EnrichmentTemplate,
     task: &str,
     stage: Option<StageArg>,
 ) -> Result<()>
@@ -259,7 +253,7 @@ where
         &io.run_options(run),
         &cfg,
         &svc,
-        template,
+        io.template(),
         validator.as_ref(),
         task,
         only_stage,
@@ -268,6 +262,7 @@ where
     let meta = RunMeta {
         method_name: name.to_owned(),
         method_version: env!("CARGO_PKG_VERSION"),
+        source_id: io.template().source_id().to_owned(),
         sources,
     };
     // Mark partial for data loss or incomplete staged runs.
@@ -534,6 +529,32 @@ mod tests {
             panic!("expected resource-type-general");
         };
         a
+    }
+
+    #[test]
+    fn source_id_parses_into_the_template() {
+        let cli = parse_rtg(&[]).unwrap();
+        assert_eq!(rtg_args(cli).io.template().source_id(), "10.1/x");
+    }
+
+    #[test]
+    fn malformed_source_id_is_rejected_at_parse_time() {
+        let err = parse(&[
+            "comet-enrich",
+            "resource-type-general",
+            "-i",
+            "in",
+            "-o",
+            "out",
+            "--source-id",
+            "not-a-doi",
+            "--rules",
+            "r.yaml",
+        ])
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("--source-id"), "got: {err}");
+        assert!(err.contains("not-a-doi"), "got: {err}");
     }
 
     #[test]

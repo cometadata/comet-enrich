@@ -146,6 +146,7 @@ fn reclassifier_writes_run_manifest() {
     let meta = RunMeta {
         method_name: "resource-type-general".to_owned(),
         method_version: env!("CARGO_PKG_VERSION"),
+        source_id: SOURCE_ID.to_owned(),
         sources,
     };
     let timings = StageTimings {
@@ -163,6 +164,7 @@ fn reclassifier_writes_run_manifest() {
     assert_eq!(m["schema_version"], json!(1));
     assert_eq!(m["method"]["name"], json!("resource-type-general"));
     assert_eq!(m["method"]["version"], json!(env!("CARGO_PKG_VERSION")));
+    assert_eq!(m["source_id"], json!(SOURCE_ID));
     assert_eq!(
         m["sources"]["datacite"]["release_date"],
         json!("2024-01-01")

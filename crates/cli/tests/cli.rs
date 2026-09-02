@@ -174,6 +174,7 @@ fn cli_resource_type_general_runs_and_writes_manifest() {
     let manifest: Value =
         serde_json::from_str(&fs::read_to_string(output.join("manifest.json")).unwrap()).unwrap();
     assert_eq!(manifest["exit_status"], json!("success"));
+    assert_eq!(manifest["source_id"], json!(SOURCE_ID));
     assert_eq!(
         manifest["sources"]["datacite"]["release_date"],
         json!("2024-01-01")
@@ -183,7 +184,7 @@ fn cli_resource_type_general_runs_and_writes_manifest() {
 }
 
 #[test]
-fn cli_rejects_malformed_source_id_before_method_files() {
+fn cli_rejects_malformed_source_id_at_parse_time() {
     cli()
         .args([
             "resource-type-general",
@@ -199,8 +200,7 @@ fn cli_rejects_malformed_source_id_before_method_files() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("--source-id"))
-        .stderr(predicate::str::contains("not-a-doi"))
-        .stderr(predicate::str::contains("reading r.yaml").not());
+        .stderr(predicate::str::contains("not-a-doi"));
 }
 
 #[test]
