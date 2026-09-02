@@ -53,7 +53,9 @@ Use these options to change the validation behaviour:
 
 Every enrichment record carries a `sourceId` identifying the enrichment project that produced it.
 
-Pass it with the `--source-id <ID>` command-line argument. The value must be a DOI name, such as `10.1234/example`. ASCII letters in it are case-insensitive, and it is written to each record in ASCII lowercase; non-ASCII characters are kept as given.
+Pass it with the `--source-id <ID>` command-line argument. The value must be a DOI name, such as `10.1234/example`.
+ASCII letters in it are case-insensitive, and it is written to each record in ASCII lowercase;
+non-ASCII characters are kept as given.
 
 ## Global options
 
