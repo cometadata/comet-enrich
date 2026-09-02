@@ -128,7 +128,7 @@ pub struct FundersArgs {
 /// Run the selected subcommand.
 pub fn run(cli: Cli) -> Result<()> {
     match cli.command {
-        // Completions write the script to stdout and skip logging and template setup.
+        // Completions write the script to stdout and skip logging.
         Command::Completions(a) => {
             clap_complete::generate(
                 a.shell,

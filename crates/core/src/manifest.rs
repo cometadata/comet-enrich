@@ -199,7 +199,8 @@ pub struct StageTimings {
 pub struct RunMeta {
     pub method_name: String,
     pub method_version: &'static str,
-    /// DOI name of the enrichment project, as given by `--source-id`.
+    /// DOI name of the enrichment project, in the ASCII-lowercase form written
+    /// to every record's `sourceId`.
     pub source_id: String,
     pub sources: BTreeMap<String, SourceRelease>,
 }

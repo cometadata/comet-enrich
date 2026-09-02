@@ -53,7 +53,7 @@ Use these options to change the validation behaviour:
 
 Every enrichment record carries a `sourceId` identifying the enrichment project that produced it.
 
-Pass it with the `--source-id <ID>` command-line argument. The value must be a DOI name, such as `10.1234/example`. It is case-insensitive and is written to each record in lowercase.
+Pass it with the `--source-id <ID>` command-line argument. The value must be a DOI name, such as `10.1234/example`. ASCII letters in it are case-insensitive, and it is written to each record in ASCII lowercase; non-ASCII characters are kept as given.
 
 ## Global options
 
@@ -63,7 +63,7 @@ These flags are shared by every method:
 |--------------------------------|------------|--------------------------------------------------------------------------------------------|
 | `-i, --input <DIR>`            | _required_ | Input directory of DataCite `*.jsonl.gz` files, searched recursively                       |
 | `-o, --output <DIR>`           | _required_ | Output directory; writes `enrichments/part_NNNN.jsonl.gz` (and `enrichments.failed.jsonl`) |
-| `--source-id <ID>`             | _required_ | DOI name, such as `10.1234/example`; case-insensitive, written lowercase to `sourceId`     |
+| `--source-id <ID>`             | _required_ | DOI name like `10.1234/example`; ASCII case-insensitive, written lowercase to `sourceId`   |
 | `-t, --threads <N>`            | `0`        | Worker threads; `0` uses all available CPUs                                                |
 | `-b, --batch-size <N>`         | `5000`     | Enrichment records per internal batch                                                      |
 | `--output-part-size-mib <MIB>` | `256`      | Target compressed MiB per final enrichment part                                            |
