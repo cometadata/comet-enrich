@@ -222,6 +222,7 @@ manifest records:
 
 - method name and version;
 - source release dates supplied on the command line;
+- the source id given by `--source-id`, the same value written to every record's `sourceId`;
 - output paths;
 - counters for files, records, malformed lines, emitted records, schema failures, and skipped
   reasons;
