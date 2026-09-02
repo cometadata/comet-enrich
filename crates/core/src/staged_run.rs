@@ -127,8 +127,13 @@ where
     // been deleted or rotated away. A corpus that is present must still match
     // the fingerprint: reconcile would otherwise rebuild from the extractions
     // of a different snapshot and the manifest would describe data the run
-    // never read.
-    let restamp_without_corpus = restamp_from.is_some() && !io.input.exists();
+    // never read. Only a missing path counts as absent; a path that cannot be
+    // inspected, such as one without read permission, is an error.
+    let restamp_without_corpus = restamp_from.is_some()
+        && !io
+            .input
+            .try_exists()
+            .with_context(|| format!("inspecting input path {}", io.input.display()))?;
 
     // Validate the input corpus before clearing any artifacts, so a mistyped
     // input path cannot destroy a previous run's outputs.
