@@ -13,7 +13,12 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
 
-/// DataCite Metadata Schema 4.6 `resourceTypeGeneral` values.
+/// DataCite Metadata Schema 4.7 `resourceTypeGeneral` values.
+///
+/// Source: <https://github.com/datacite/schema/blob/master/source/meta/kernel-4.7/include/datacite-resourceType-v4.xsd>
+///
+/// This list is maintained by hand and must be updated when DataCite publishes a
+/// new schema version.
 const RESOURCE_TYPE_GENERAL: &[&str] = &[
     "Audiovisual",
     "Award",
@@ -113,6 +118,7 @@ fn validate_rules(cfg: &RulesConfig) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
     #[test]
     fn load_rules_parses_sample_yaml() {
@@ -176,6 +182,19 @@ scope:
 ";
         let cfg: RulesConfig = serde_yaml_ng::from_str(yaml).unwrap();
         assert!(validate_rules(&cfg).is_err());
+    }
+
+    #[test]
+    fn resource_type_general_vocabulary_has_expected_size_and_no_duplicates() {
+        assert_eq!(
+            RESOURCE_TYPE_GENERAL.len(),
+            34,
+            "DataCite Metadata Schema 4.7 defines 34 resourceTypeGeneral values"
+        );
+        let mut seen = HashSet::new();
+        for value in RESOURCE_TYPE_GENERAL {
+            assert!(seen.insert(*value), "duplicate entry {value:?}");
+        }
     }
 
     #[test]
