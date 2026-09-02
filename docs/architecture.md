@@ -147,8 +147,9 @@ Resume checks keep staged artifacts and public output in sync:
   records the relative path, compressed size, and gzip trailer CRC32. A normal resume stops if the
   input files have changed.
 - `reconcile.stats.json` records the source id used to write the output. A normal resume with a
-  different `--source-id` reruns only reconcile. This re-stamp reads only work artifacts, so it
-  does not need the input corpus.
+  different `--source-id` reruns only reconcile, rebuilding the output from the existing work
+  artifacts without re-reading the corpus. The input directory may therefore be absent, but when
+  it is present it must still match the fingerprint, so a replaced corpus is rejected.
 
 `--from-scratch` clears the work directory and starts again. A single stage can also be rerun, for
 example `comet-enrich affiliations --stage query`, but only if the previous stage files already exist.

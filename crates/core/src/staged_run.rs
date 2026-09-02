@@ -113,20 +113,30 @@ where
 
     // A complete pipeline whose recorded source id differs from the requested
     // one is re-stamped by rerunning reconcile alone.
-    let restamp_for_source_id =
-        only_stage.is_none() && stages.is_empty() && source_id_changed(work_path, template)?;
-    if restamp_for_source_id {
+    let restamp_from = if only_stage.is_none() && stages.is_empty() {
+        recorded_source_id_if_changed(work_path, template)?
+    } else {
+        None
+    };
+    if restamp_from.is_some() {
         stages.push(Stage::Reconcile);
     }
+
+    // A re-stamp rebuilds the output from the existing work artifacts without
+    // re-reading the corpus, so it may proceed when the input directory has
+    // been deleted or rotated away. A corpus that is present must still match
+    // the fingerprint: reconcile would otherwise rebuild from the extractions
+    // of a different snapshot and the manifest would describe data the run
+    // never read.
+    let restamp_without_corpus = restamp_from.is_some() && !io.input.exists();
 
     // Validate the input corpus before clearing any artifacts, so a mistyped
     // input path cannot destroy a previous run's outputs.
     if stages.contains(&Stage::Extract) {
         input_files(&io.input)?;
-    } else if only_stage.is_none() && !restamp_for_source_id {
+    } else if only_stage.is_none() && !restamp_without_corpus {
         // When extract is skipped, verify the input still matches the saved
-        // fingerprint. Single-stage runs and source-id re-stamps only use
-        // existing work artifacts, so they do not need the corpus.
+        // fingerprint. Single-stage runs only use existing work artifacts.
         fingerprint::validate_input_fingerprint(work_path, &io.input)?;
     }
 
@@ -141,6 +151,12 @@ where
     // Pin the hash width on the first run, or refuse a resume that asks for a
     // different one (a width mismatch silently breaks the hash join).
     planning::pin_or_validate_hash_bits(work_path, cfg.hash_bits, cfg.from_scratch)?;
+
+    // Every guard that can still abort the run has passed, so the re-stamp
+    // is announced only when it is actually about to happen.
+    if let Some(recorded) = &restamp_from {
+        warn_source_id_restamp(recorded, template.source_id());
+    }
 
     let mut timings = StageTimings::default();
     let run_start = Instant::now();
@@ -171,26 +187,36 @@ where
     report::build_report(work_path, &wd, timings)
 }
 
-/// Whether a completed run's recorded source id differs from the requested
-/// one, warning about the mismatch when it does.
-fn source_id_changed(work_path: &Path, template: &EnrichmentTemplate) -> Result<bool> {
+/// The recorded source id of a completed run when it differs from the
+/// requested one, meaning the output must be re-stamped. The value is empty
+/// for a sidecar written before 0.3.
+fn recorded_source_id_if_changed(
+    work_path: &Path,
+    template: &EnrichmentTemplate,
+) -> Result<Option<String>> {
     let recorded = report::read_reconcile_stats(work_path, true)?.source_id;
-    let requested = template.source_id();
-    if recorded == requested {
-        return Ok(false);
-    }
+    Ok((recorded != template.source_id()).then_some(recorded))
+}
+
+/// Appended to every re-stamp warning.
+const RESTAMP_NOTE: &str =
+    "the input corpus is not re-read; output is rebuilt from the existing work artifacts";
+
+/// Announce a re-stamp. Call only after every guard that could still abort
+/// the run has passed, so the warning never describes a rebuild that does
+/// not happen.
+fn warn_source_id_restamp(recorded: &str, requested: &str) {
     if recorded.is_empty() {
         log::warn!(
             "{RECONCILE_STATS_FILE} has no recorded source id (written by a build before 0.3); \
-             rerunning reconcile to stamp the output with source id `{requested}`"
+             rerunning reconcile to stamp the output with source id `{requested}` ({RESTAMP_NOTE})"
         );
     } else {
         log::warn!(
-            "source id changed from `{recorded}` to `{requested}`; \
-             rerunning reconcile and replacing the existing enrichment output"
+            "source id changed from `{recorded}` to `{requested}`; rerunning reconcile and \
+             replacing the existing enrichment output ({RESTAMP_NOTE})"
         );
     }
-    Ok(true)
 }
 
 /// Read non-empty JSONL rows from an optional file.
