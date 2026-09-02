@@ -147,7 +147,8 @@ Resume checks keep staged artifacts and public output in sync:
   records the relative path, compressed size, and gzip trailer CRC32. A normal resume stops if the
   input files have changed.
 - `reconcile.stats.json` records the source id used to write the output. A normal resume with a
-  different `--source-id` reruns only reconcile.
+  different `--source-id` reruns only reconcile. This re-stamp reads only work artifacts, so it
+  does not need the input corpus.
 
 `--from-scratch` clears the work directory and starts again. A single stage can also be rerun, for
 example `comet-enrich affiliations --stage query`, but only if the previous stage files already exist.
@@ -212,7 +213,7 @@ flowchart LR
 
 Every record carries a `sourceId` identifying the enrichment project that produced it.
 It is provided via the `--source-id` command-line argument and is copied into each record.
-The value must be a DOI name, such as `10.1234/example`.
+The value must be a DOI name, such as `10.1234/example`, and is stored in ASCII lowercase.
 
 ## Manifest and status
 

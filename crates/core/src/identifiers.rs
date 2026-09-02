@@ -39,9 +39,12 @@ static DOI_RE: LazyLock<Regex> =
 
 /// Check whether a value is a valid DOI name, such as `10.1234/example`.
 ///
+/// Surrounding whitespace and control characters anywhere in the value are
+/// rejected. The suffix is otherwise opaque: internal spaces and non-ASCII
+/// characters are accepted.
 #[must_use]
 pub fn is_valid_doi_name(s: &str) -> bool {
-    s.trim() == s && DOI_RE.is_match(s)
+    s.trim() == s && !s.chars().any(char::is_control) && DOI_RE.is_match(s)
 }
 
 /// Validate a bare ROR ID: `0` + 6 Crockford base32 chars + a 2-digit
@@ -281,6 +284,13 @@ mod tests {
     fn is_valid_doi_name_rejects_surrounding_whitespace() {
         assert!(!is_valid_doi_name(" 10.1/x"));
         assert!(!is_valid_doi_name("10.1/x "));
+    }
+
+    #[test]
+    fn is_valid_doi_name_rejects_control_characters() {
+        for bad in ["10.1/a\tb", "10.1/a\rb", "10.1/a\x00b", "10.1/\x1b"] {
+            assert!(!is_valid_doi_name(bad), "accepted {bad:?}");
+        }
     }
 
     #[test]

@@ -618,6 +618,10 @@ fn resume_with_mismatched_hash_width_errors() {
     );
 }
 
+fn reconcile_stats(t: &TestRun) -> Value {
+    serde_json::from_str(&fs::read_to_string(t.work().join(RECONCILE_STATS_FILE)).unwrap()).unwrap()
+}
+
 #[test]
 fn rerun_of_complete_pipeline_keeps_truthful_manifest() {
     let t = TestRun::new();
@@ -637,11 +641,19 @@ fn rerun_of_complete_pipeline_keeps_truthful_manifest() {
     );
     assert_eq!(again.coverage.records_enriched, 2);
     assert_eq!(again.match_.unwrap().matched, 2);
+    assert_eq!(reconcile_stats(&t)["source_id"], template().source_id());
+}
 
-    let stats: Value =
-        serde_json::from_str(&fs::read_to_string(t.work().join(RECONCILE_STATS_FILE)).unwrap())
-            .unwrap();
-    assert_eq!(stats["source_id"], template().source_id());
+#[test]
+fn rerun_of_complete_pipeline_with_removed_input_errors() {
+    let t = TestRun::new();
+    t.run(true).unwrap();
+
+    // An unchanged source id is an ordinary rerun, which still needs the corpus.
+    fs::remove_dir_all(&t.input).unwrap();
+
+    assert_err_contains(t.run(false), "input path is not a directory");
+    assert_eq!(read_output_dois(&t.output).len(), 2);
 }
 
 #[test]
@@ -649,7 +661,7 @@ fn resume_with_changed_source_id_reruns_only_reconcile() {
     let t = TestRun::new();
     t.run(true).unwrap();
 
-    let changed_source_id = "10.82461/BPZR-JD55";
+    let changed_source_id = "10.82461/other-run";
     let changed = EnrichmentTemplate::new(changed_source_id).unwrap();
     let report = t
         .run_with_template(&changed, &cfg(HashBits::Bits64, false), None, None)
@@ -664,10 +676,51 @@ fn resume_with_changed_source_id_reruns_only_reconcile() {
     for record in records {
         assert_eq!(record["sourceId"], changed_source_id);
     }
-    let stats: Value =
-        serde_json::from_str(&fs::read_to_string(t.work().join(RECONCILE_STATS_FILE)).unwrap())
-            .unwrap();
-    assert_eq!(stats["source_id"], changed_source_id);
+    assert_eq!(reconcile_stats(&t)["source_id"], changed_source_id);
+}
+
+#[test]
+fn resume_with_uppercase_variant_of_source_id_is_a_noop() {
+    let t = TestRun::new();
+    t.run(true).unwrap();
+    let before = read_enrichment_parts(&t.output);
+
+    // DOI names are case-insensitive, so this is the same source id.
+    let same = EnrichmentTemplate::new("10.82461/BPZR-JD55").unwrap();
+    let report = t
+        .run_with_template(&same, &cfg(HashBits::Bits64, false), None, None)
+        .unwrap();
+
+    assert!(report.stage_timings_ms.extract.is_none());
+    assert!(report.stage_timings_ms.query.is_none());
+    assert!(report.stage_timings_ms.reconcile.is_none());
+    assert_eq!(read_enrichment_parts(&t.output), before);
+    assert_eq!(reconcile_stats(&t)["source_id"], template().source_id());
+}
+
+#[test]
+fn resume_with_changed_source_id_does_not_need_input_corpus() {
+    let t = TestRun::new();
+    t.run(true).unwrap();
+
+    // Re-stamping reads only work artifacts, so a rotated corpus must not
+    // block it.
+    fs::remove_dir_all(&t.input).unwrap();
+
+    let changed_source_id = "10.82461/other-run";
+    let changed = EnrichmentTemplate::new(changed_source_id).unwrap();
+    let report = t
+        .run_with_template(&changed, &cfg(HashBits::Bits64, false), None, None)
+        .unwrap();
+
+    assert!(report.stage_timings_ms.extract.is_none());
+    assert!(report.stage_timings_ms.query.is_none());
+    assert!(report.stage_timings_ms.reconcile.is_some());
+    let records = read_enrichment_parts(&t.output);
+    assert_eq!(records.len(), 2);
+    for record in records {
+        assert_eq!(record["sourceId"], changed_source_id);
+    }
 }
 
 #[test]

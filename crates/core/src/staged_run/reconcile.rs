@@ -23,9 +23,13 @@ use std::sync::Mutex;
 pub(super) struct ReconcileStats {
     pub(super) emitted: u64,
     pub(super) schema_failures: u64,
+    /// Source id stamped on the output. Absent from sidecars written before
+    /// 0.3, where the empty default never equals a validated DOI name, so a
+    /// resume of such a run reruns reconcile to stamp the requested id.
     #[serde(default)]
     pub(super) source_id: String,
 }
+
 /// Join lookups onto extractions and write enrichment records.
 pub(super) fn run_reconcile<M>(
     method: &M,

@@ -111,20 +111,22 @@ where
         stages_to_run(work_path, cfg.from_scratch)
     };
 
-    if only_stage.is_none() && stages.is_empty() {
-        let reconciled = report::read_reconcile_stats(work_path, true)?;
-        if reconciled.source_id != template.source_id() {
-            stages.push(Stage::Reconcile);
-        }
+    // A complete pipeline whose recorded source id differs from the requested
+    // one is re-stamped by rerunning reconcile alone.
+    let restamp_for_source_id =
+        only_stage.is_none() && stages.is_empty() && source_id_changed(work_path, template)?;
+    if restamp_for_source_id {
+        stages.push(Stage::Reconcile);
     }
 
     // Validate the input corpus before clearing any artifacts, so a mistyped
     // input path cannot destroy a previous run's outputs.
     if stages.contains(&Stage::Extract) {
         input_files(&io.input)?;
-    } else if only_stage.is_none() {
+    } else if only_stage.is_none() && !restamp_for_source_id {
         // When extract is skipped, verify the input still matches the saved
-        // fingerprint. Single-stage runs only use existing work artifacts.
+        // fingerprint. Single-stage runs and source-id re-stamps only use
+        // existing work artifacts, so they do not need the corpus.
         fingerprint::validate_input_fingerprint(work_path, &io.input)?;
     }
 
@@ -167,6 +169,28 @@ where
     timings.total = Some(planning::elapsed_ms(run_start));
     // Read sidecars so resumed runs report stages skipped this invocation.
     report::build_report(work_path, &wd, timings)
+}
+
+/// Whether a completed run's recorded source id differs from the requested
+/// one, warning about the mismatch when it does.
+fn source_id_changed(work_path: &Path, template: &EnrichmentTemplate) -> Result<bool> {
+    let recorded = report::read_reconcile_stats(work_path, true)?.source_id;
+    let requested = template.source_id();
+    if recorded == requested {
+        return Ok(false);
+    }
+    if recorded.is_empty() {
+        log::warn!(
+            "{RECONCILE_STATS_FILE} has no recorded source id (written by a build before 0.3); \
+             rerunning reconcile to stamp the output with source id `{requested}`"
+        );
+    } else {
+        log::warn!(
+            "source id changed from `{recorded}` to `{requested}`; \
+             rerunning reconcile and replacing the existing enrichment output"
+        );
+    }
+    Ok(true)
 }
 
 /// Read non-empty JSONL rows from an optional file.

@@ -16,7 +16,9 @@ pub struct EnrichmentTemplate {
 
 impl EnrichmentTemplate {
     /// Build a template from the DOI name of the enrichment project, such as
-    /// `10.1234/example`.
+    /// `10.1234/example`. DOI names are case-insensitive, so the value is
+    /// stored in ASCII lowercase, the form DataCite uses; non-ASCII characters
+    /// are kept as given.
     ///
     /// # Errors
     ///
@@ -29,12 +31,12 @@ impl EnrichmentTemplate {
             ));
         }
         Ok(Self {
-            source_id: source_id.to_owned(),
+            source_id: source_id.to_ascii_lowercase(),
         })
     }
 
     /// DOI name of the enrichment project that produced the records, such as
-    /// `10.1234/example`.
+    /// `10.1234/example`, in ASCII lowercase.
     #[must_use]
     pub fn source_id(&self) -> &str {
         &self.source_id
@@ -43,7 +45,7 @@ impl EnrichmentTemplate {
 
 /// Build one enrichment record.
 ///
-/// Key order matches the enrichment schema and is covered by tests.
+/// Key order is fixed and covered by tests.
 #[must_use]
 pub fn build_enrichment_record(template: &EnrichmentTemplate, parts: EnrichmentParts) -> Value {
     let mut m = serde_json::Map::with_capacity(6);
@@ -70,6 +72,18 @@ mod tests {
     #[test]
     fn new_preserves_the_source_doi_name() {
         assert_eq!(template().source_id(), SOURCE_ID);
+    }
+
+    #[test]
+    fn new_lowercases_ascii_letters_in_the_source_id() {
+        let t = EnrichmentTemplate::new("10.82461/BPZR-JD55").unwrap();
+        assert_eq!(t.source_id(), SOURCE_ID);
+    }
+
+    #[test]
+    fn new_leaves_non_ascii_letters_in_the_source_id_untouched() {
+        let t = EnrichmentTemplate::new("10.1234/ÜBER-Ab").unwrap();
+        assert_eq!(t.source_id(), "10.1234/Über-ab");
     }
 
     #[test]
