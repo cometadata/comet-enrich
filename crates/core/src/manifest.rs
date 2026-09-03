@@ -26,6 +26,8 @@ pub struct Manifest {
     /// the transform path leaves it unset.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hash: Option<HashInfo>,
+    /// DOI name of the enrichment project, written to every record as `sourceId`.
+    pub source_id: String,
     pub sources: BTreeMap<String, SourceRelease>,
     pub exit_status: String,
     pub artifact_paths: ArtifactPaths,
@@ -197,6 +199,9 @@ pub struct StageTimings {
 pub struct RunMeta {
     pub method_name: String,
     pub method_version: &'static str,
+    /// DOI name of the enrichment project, in the ASCII-lowercase form written
+    /// to every record's `sourceId`.
+    pub source_id: String,
     pub sources: BTreeMap<String, SourceRelease>,
 }
 
@@ -241,6 +246,7 @@ impl Manifest {
                 version: meta.method_version,
             },
             hash,
+            source_id: meta.source_id.clone(),
             sources: meta.sources.clone(),
             exit_status: exit_status.to_owned(),
             artifact_paths: ArtifactPaths {
@@ -268,7 +274,7 @@ impl Manifest {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use comet_enrich_test_support::assert_close;
+    use comet_enrich_test_support::{SOURCE_ID, assert_close};
     use serde_json::json;
 
     #[test]
@@ -300,6 +306,7 @@ mod tests {
         let meta = RunMeta {
             method_name: "affiliations".to_owned(),
             method_version: "test-version",
+            source_id: SOURCE_ID.to_owned(),
             sources,
         };
         let report = Report {
@@ -326,6 +333,7 @@ mod tests {
         let value = serde_json::to_value(manifest).unwrap();
 
         assert_eq!(value["method"]["name"], json!("affiliations"));
+        assert_eq!(value["source_id"], json!(SOURCE_ID));
         assert_eq!(
             value["sources"]["datacite"]["release_date"],
             json!("2024-01-01")

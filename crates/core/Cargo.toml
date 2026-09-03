@@ -16,10 +16,10 @@ num_cpus = "1"
 rayon = "1"
 serde = { workspace = true }
 serde_json = { workspace = true }
-serde_yaml_ng = { workspace = true }
 xxhash-rust = { workspace = true }
 tokio = { workspace = true }
 reqwest = { workspace = true }
+regex = { workspace = true }
 async-trait = { workspace = true }
 walkdir = "2"
 

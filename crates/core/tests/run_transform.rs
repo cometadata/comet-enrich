@@ -2,9 +2,11 @@
 
 use comet_enrich_core::{
     EnrichmentAction, EnrichmentMethod, EnrichmentParts, EnrichmentTemplate, Extracted, Lookups,
-    RunOptions, run,
+    RunOptions, SCHEMA, run, schema,
 };
-use comet_enrich_test_support::{config_path, read_enrichment_parts, write_gz_lines};
+use comet_enrich_test_support::{
+    SOURCE_ID, enrichment_template, read_enrichment_parts, write_gz_lines,
+};
 use serde_json::{Value, json};
 use std::fs;
 
@@ -51,29 +53,11 @@ impl EnrichmentMethod for DatasetTagger {
     }
 }
 
-const ENRICHMENT_YAML: &str = r#"
-contributors:
-  - name: COMET
-    nameType: Organizational
-    contributorType: Producer
-resources:
-  - relatedIdentifier: "10.82461/bpzr-jd55"
-    relatedIdentifierType: DOI
-    relationType: IsDocumentedBy
-    resourceTypeGeneral: Project
-  - relatedIdentifier: "https://huggingface.co/datasets/cometadata/example"
-    relatedIdentifierType: URL
-    relationType: IsDerivedFrom
-    resourceTypeGeneral: Dataset
-"#;
-
-/// Write the shared provenance file into `dir` and build default run options over
-/// its `input`/`out` layout: one thread, batch 100, one 256 MiB writer lane.
+/// Build the shared record template and default run options over the `dir`
+/// `input`/`out` layout: one thread, batch 100, one 256 MiB writer lane.
 /// Tests that vary threads, lanes, or part size mutate the returned options.
 fn transform_setup(dir: &tempfile::TempDir) -> (EnrichmentTemplate, RunOptions) {
-    let provenance = dir.path().join("enrichment.yaml");
-    fs::write(&provenance, ENRICHMENT_YAML).unwrap();
-    let template = comet_enrich_core::load_template(&provenance).unwrap();
+    let template = enrichment_template();
     let opts = RunOptions {
         input: dir.path().join("input"),
         output: dir.path().join("out"),
@@ -125,9 +109,7 @@ fn run_drives_transform_end_to_end() {
     let (template, opts) = transform_setup(&dir);
 
     // Validate records using the same schema check as a normal run.
-    let validator =
-        comet_enrich_core::schema::compile(&config_path("schema/enrichment_input_schema.json"))
-            .unwrap();
+    let validator = schema::compile_str(SCHEMA).unwrap();
     let stats = run(&DatasetTagger, &opts, &template, Some(&validator)).unwrap();
 
     assert_eq!(stats.files_processed, 1);
@@ -148,6 +130,7 @@ fn run_drives_transform_end_to_end() {
             json!("Dataset")
         );
         assert!(rec["doi"].as_str().unwrap().starts_with("10.1/"));
+        assert_eq!(rec["sourceId"], json!(SOURCE_ID));
     }
 }
 

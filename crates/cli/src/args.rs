@@ -3,8 +3,8 @@
 use anyhow::{Result, bail};
 use clap::{Args, ValueEnum, ValueHint};
 use comet_enrich_core::{
-    DEFAULT_OUTPUT_PART_SIZE_MIB, DEFAULT_OUTPUT_WRITER_LANES, HashBits, LookupConfig, RunOptions,
-    SCHEMA, SourceRelease, Stage, schema,
+    DEFAULT_OUTPUT_PART_SIZE_MIB, DEFAULT_OUTPUT_WRITER_LANES, EnrichmentTemplate, HashBits,
+    LookupConfig, RunOptions, SCHEMA, SourceRelease, Stage, schema,
 };
 use log::LevelFilter;
 use std::collections::BTreeMap;
@@ -21,9 +21,14 @@ pub struct IoArgs {
     #[arg(short, long, value_name = "DIR", value_hint = ValueHint::DirPath, help_heading = "Input/output")]
     pub output: PathBuf,
 
-    /// YAML provenance metadata for the enrichment records.
-    #[arg(long, value_name = "FILE", value_hint = ValueHint::FilePath, help_heading = "Input/output")]
-    pub provenance: PathBuf,
+    /// Source ID written to every enrichment record. The value must be a DOI name, such as 10.1234/example.
+    #[arg(
+        long = "source-id",
+        value_name = "ID",
+        value_parser = EnrichmentTemplate::new,
+        help_heading = "Input/output"
+    )]
+    pub source_id: EnrichmentTemplate,
 
     /// Release date of a data source, as name=YYYY-MM-DD (repeatable), e.g. datacite=2024-01-01.
     #[arg(
@@ -47,6 +52,12 @@ impl IoArgs {
             output_part_size_bytes: run.output_part_size_mib.saturating_mul(1024 * 1024),
             output_writer_lanes: run.output_writer_lanes,
         }
+    }
+
+    /// Record template parsed from `--source-id`.
+    #[must_use]
+    pub fn template(&self) -> &EnrichmentTemplate {
+        &self.source_id
     }
 
     /// Build the manifest `sources` map.
@@ -349,7 +360,7 @@ mod tests {
         let io = IoArgs {
             input: PathBuf::from("input"),
             output: PathBuf::from("output"),
-            provenance: PathBuf::from("prov.yaml"),
+            source_id: EnrichmentTemplate::new("10.82461/bpzr-jd55").unwrap(),
             source_release_date: Vec::new(),
         };
         let run = run_args(true, None);

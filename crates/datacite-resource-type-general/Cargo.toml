@@ -9,7 +9,7 @@ rust-version.workspace = true
 [dependencies]
 anyhow = { workspace = true }
 comet-enrich-core = { workspace = true }
-regex = "1"
+regex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml_ng = { workspace = true }

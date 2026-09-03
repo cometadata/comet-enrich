@@ -22,7 +22,7 @@ the rules file ([`configs/reclassification_rules.yaml`](../../configs/reclassifi
 ```text
 comet-enrich resource-type-general \
   --input <DIR> --output <DIR> \
-  --rules <FILE> --provenance <FILE> [OPTIONS]
+  --rules <FILE> --source-id <ID> [OPTIONS]
 ```
 
 ## Options
@@ -40,7 +40,7 @@ comet-enrich resource-type-general \
   --input      /data/datacite/DataCite_Public_Data_File_2024 \
   --output     ./out \
   --rules      configs/reclassification_rules.yaml \
-  --provenance configs/provenance/resource_type_general.yaml
+  --source-id  10.1234/example
 ```
 
 Each output record uses `action: update` and `field: types`.

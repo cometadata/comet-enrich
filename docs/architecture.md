@@ -4,7 +4,7 @@
 [DataCite Public Data File](https://datafiles.datacite.org/). It is a Rust workspace with one
 binary. The binary reads a directory of DataCite `*.jsonl.gz` files, runs one enrichment method,
 and writes records that match the DataCite enrichment input schema
-(`configs/schema/enrichment_input_schema.json`). ROR matching uses
+(`configs/enrichment_input_schema.json`). ROR matching uses
 [Marple](https://gitlab.com/jdiprose/marple), on the `feature/comet-marple-enhancements` branch.
 
 In the COMET pipeline, Airflow and AWS Batch decide when jobs run, where the input data lives, and
@@ -32,19 +32,19 @@ See [usage.md](usage.md) for the command line.
 
 ## Workspace layout
 
-| Crate                                   | Purpose                                                                        |
-|-----------------------------------------|--------------------------------------------------------------------------------|
-| `crates/cli`                            | The `comet-enrich` binary: one subcommand per method, plus completions         |
-| `crates/core`                           | Shared runners, writer, validation, provenance, manifests, dedup, match client |
-| `crates/datacite-resource-type-general` | Transform method: reclassify free-text resource types                          |
-| `crates/datacite-affiliations`          | Lookup method: affiliation strings to ROR IDs                                  |
-| `crates/datacite-funders`               | Lookup method: funder names to ROR IDs                                         |
-| `crates/test-support`                   | Test fixtures and assertions shared across crates                              |
+| Crate                                   | Purpose                                                                             |
+|-----------------------------------------|-------------------------------------------------------------------------------------|
+| `crates/cli`                            | The `comet-enrich` binary: one subcommand per method, plus completions              |
+| `crates/core`                           | Shared runners, writer, validation, record template, manifests, dedup, match client |
+| `crates/datacite-resource-type-general` | Transform method: reclassify free-text resource types                               |
+| `crates/datacite-affiliations`          | Lookup method: affiliation strings to ROR IDs                                       |
+| `crates/datacite-funders`               | Lookup method: funder names to ROR IDs                                              |
+| `crates/test-support`                   | Test fixtures and assertions shared across crates                                   |
 
 The method crates hold the parsing and mapping rules that are specific to each enrichment. Core
 handles the work that is the same for every method: reading input files, deduplicating lookup
-inputs, running staged lookups, adding provenance, validating records, writing output, and writing
-the manifest. A new method should usually be a new crate, not a change to the core runner.
+inputs, running staged lookups, adding the source id, validating records, writing output, and
+writing the manifest. A new method should usually be a new crate, not a change to the core runner.
 
 ```mermaid
 flowchart TD
@@ -77,8 +77,8 @@ An enrichment change contains an action (`update`, `updateChild`, `insert`, or `
 DataCite field to update, and the original and enriched values. The field is set on each output
 record; this matters for `affiliations`, which can update either `creators` or `contributors`.
 
-Methods return only the value part of the enrichment. Core adds provenance, validates the complete
-record, and writes it.
+Methods return only the value part of the enrichment. Core adds the `sourceId`, validates the
+complete record, and writes it.
 
 ## Transform path
 
@@ -139,13 +139,17 @@ run in the same output directory starts at the first missing marker. If a stage 
 rerun from the beginning. There is no checkpoint inside a stage, which avoids treating half-written
 query output as complete.
 
-Two checks keep the extraction and lookup files in sync:
+Resume checks keep staged artifacts and public output in sync:
 
 - The hash width, 64 or 128 bits, is fixed for the run and saved in `.work/hash.bits`. A resume
   with a different hash width is rejected because the hashes would not join.
 - The input files are fingerprinted after extract in `.work/inputs.fingerprint.json`. Each entry
   records the relative path, compressed size, and gzip trailer CRC32. A normal resume stops if the
   input files have changed.
+- `reconcile.stats.json` records the source id used to write the output. A normal resume with a
+  different `--source-id` reruns only reconcile, rebuilding the output from the existing work
+  artifacts without re-reading the corpus. The input directory may therefore be absent, but when
+  it is present it must still match the fingerprint, so a replaced corpus is rejected.
 
 `--from-scratch` clears the work directory and starts again. A single stage can also be rerun, for
 example `comet-enrich affiliations --stage query`, but only if the previous stage files already exist.
@@ -206,15 +210,11 @@ flowchart LR
 
 `.work/` is only needed for staged lookup runs and local resume. The Batch upload can exclude it.
 
-## Provenance
+## Source ID
 
-Each method has a provenance YAML file under `configs/provenance/`. The file is loaded before the
-run starts. Unknown fields are rejected, and controlled-vocabulary values are checked against the
-DataCite lists and required COMET entries. That means a bad provenance file fails before the run
-starts instead of being copied into every output record.
-
-The validated provenance template is rendered once and then copied into each enrichment record by
-`build_enrichment_record`. Method code does not build provenance blocks itself.
+Every record carries a `sourceId` identifying the enrichment project that produced it.
+It is provided via the `--source-id` command-line argument and is copied into each record.
+The value must be a DOI name, such as `10.1234/example`, and is stored in ASCII lowercase.
 
 ## Manifest and status
 
@@ -223,6 +223,7 @@ manifest records:
 
 - method name and version;
 - source release dates supplied on the command line;
+- the source id given by `--source-id`, the same value written to every record's `sourceId`;
 - output paths;
 - counters for files, records, malformed lines, emitted records, schema failures, and skipped
   reasons;

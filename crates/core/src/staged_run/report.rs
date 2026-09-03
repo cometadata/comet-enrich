@@ -27,11 +27,7 @@ pub(super) fn build_report(work: &Path, wd: &WorkDir, timings: StageTimings) -> 
         "extract.stats.json",
         wd.is_complete(Stage::Extract),
     )?;
-    let reconcile: ReconcileStats = read_stats(
-        &work.join(RECONCILE_STATS_FILE),
-        "reconcile.stats.json",
-        wd.is_complete(Stage::Reconcile),
-    )?;
+    let reconcile = read_reconcile_stats(work, wd.is_complete(Stage::Reconcile))?;
 
     let counters = RunStats {
         files_processed: extract.files_processed,
@@ -56,6 +52,14 @@ pub(super) fn build_report(work: &Path, wd: &WorkDir, timings: StageTimings) -> 
         validation: Validation::new(reconcile.emitted, reconcile.schema_failures),
         stage_timings_ms: timings,
     })
+}
+
+pub(super) fn read_reconcile_stats(work: &Path, required: bool) -> Result<ReconcileStats> {
+    read_stats(
+        &work.join(RECONCILE_STATS_FILE),
+        "reconcile.stats.json",
+        required,
+    )
 }
 
 /// Read a persisted stats sidecar, defaulting to empty when the stage hasn't run.

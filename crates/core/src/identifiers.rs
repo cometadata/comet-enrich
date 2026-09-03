@@ -1,4 +1,7 @@
-//! Normalize and validate ROR and Crossref Funder IDs.
+//! Normalize and validate ROR, Crossref Funder, and DOI identifiers.
+
+use regex::Regex;
+use std::sync::LazyLock;
 
 /// Scheme URI for ROR identifiers in DataCite records.
 pub const ROR_SCHEME_URI: &str = "https://ror.org";
@@ -29,6 +32,19 @@ pub fn normalize_fundref(s: &str) -> Option<String> {
     };
 
     (!digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())).then(|| digits.to_owned())
+}
+
+static DOI_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\A10\.[0-9]+(?:\.[0-9]+)*/.+\z").expect("DOI regex compiles"));
+
+/// Check whether a value is a valid DOI name, such as `10.1234/example`.
+///
+/// Surrounding whitespace and control characters anywhere in the value are
+/// rejected. The suffix is otherwise opaque: internal spaces and non-ASCII
+/// characters are accepted.
+#[must_use]
+pub fn is_valid_doi_name(s: &str) -> bool {
+    s.trim() == s && !s.chars().any(char::is_control) && DOI_RE.is_match(s)
 }
 
 /// Validate a bare ROR ID: `0` + 6 Crockford base32 chars + a 2-digit
@@ -154,7 +170,7 @@ mod tests {
 
     #[test]
     fn crockford_value_rejects_excluded_chars() {
-        for c in [b'i', b'l', b'o', b'u', b'A', b'|', b'!', b' '] {
+        for c in *b"ilouA|! " {
             assert_eq!(crockford_value(c), None, "{}", c as char);
         }
     }
@@ -250,6 +266,59 @@ mod tests {
             "abc",
         ] {
             assert_eq!(normalize_fundref(value), None, "{value:?}");
+        }
+    }
+
+    #[test]
+    fn is_valid_doi_name_accepts_numeric_prefixes() {
+        for value in [
+            "10.23/x",
+            "10.82461/bpzr-jd55",
+            "10.500.100/segmented-prefix",
+        ] {
+            assert!(is_valid_doi_name(value), "rejected {value:?}");
+        }
+    }
+
+    #[test]
+    fn is_valid_doi_name_rejects_surrounding_whitespace() {
+        assert!(!is_valid_doi_name(" 10.1/x"));
+        assert!(!is_valid_doi_name("10.1/x "));
+    }
+
+    #[test]
+    fn is_valid_doi_name_rejects_control_characters() {
+        for bad in ["10.1/a\tb", "10.1/a\rb", "10.1/a\x00b", "10.1/\x1b"] {
+            assert!(!is_valid_doi_name(bad), "accepted {bad:?}");
+        }
+    }
+
+    #[test]
+    fn is_valid_doi_name_treats_suffix_as_opaque() {
+        for value in [
+            "10.23/F72B-0103-B361-071E-08F3",
+            "10.1234/日本語",
+            "10.1234/with internal spaces",
+            "10.1002/(sici)37:3/4<197::aid-hrm2>3.0.co;2-#",
+        ] {
+            assert!(is_valid_doi_name(value), "rejected {value:?}");
+        }
+    }
+
+    #[test]
+    fn is_valid_doi_name_rejects_other_shapes() {
+        for bad in [
+            "",
+            "   ",
+            "10.82461",
+            "10.82461/",
+            "10.x/y",
+            "10./y",
+            "10.123..456/x",
+            "https://doi.org/10.1/x",
+            "doi:10.1/x",
+        ] {
+            assert!(!is_valid_doi_name(bad), "accepted {bad:?}");
         }
     }
 }

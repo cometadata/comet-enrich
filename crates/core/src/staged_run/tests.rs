@@ -6,7 +6,7 @@ use crate::manifest::{MANIFEST_FILE, MatchFailureTaxonomy, Report};
 use crate::match_service::{FakeMatchService, MatchError, MatchOutcome, RorLookup};
 use crate::method::{EnrichmentAction, EnrichmentMethod, EnrichmentParts, Extracted, Lookups};
 use crate::options::RunOptions;
-use crate::provenance::EnrichmentTemplate;
+use crate::template::EnrichmentTemplate;
 use crate::{ENRICHMENTS_DIR, ENRICHMENTS_FAILED_FILE};
 
 use anyhow::Result;
@@ -21,7 +21,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 struct TestMethod {
     hash_bits: HashBits,
@@ -81,10 +81,7 @@ impl EnrichmentMethod for TestMethod {
 }
 
 fn template() -> EnrichmentTemplate {
-    EnrichmentTemplate {
-        contributors: json!([]),
-        resources: json!([]),
-    }
+    EnrichmentTemplate::new("10.82461/bpzr-jd55").unwrap()
 }
 
 fn fake_service() -> Arc<dyn MatchService> {
@@ -186,12 +183,22 @@ impl TestRun {
         validator: Option<&jsonschema::Validator>,
         only_stage: Option<Stage>,
     ) -> Result<Report> {
+        self.run_with_template(&self.tmpl, cfg, validator, only_stage)
+    }
+
+    fn run_with_template(
+        &self,
+        template: &EnrichmentTemplate,
+        cfg: &LookupConfig,
+        validator: Option<&jsonschema::Validator>,
+        only_stage: Option<Stage>,
+    ) -> Result<Report> {
         run_staged(
             &self.method,
             &self.opts(),
             cfg,
             &self.svc,
-            &self.tmpl,
+            template,
             validator,
             "funder",
             only_stage,
@@ -611,6 +618,47 @@ fn resume_with_mismatched_hash_width_errors() {
     );
 }
 
+fn reconcile_stats(t: &TestRun) -> Value {
+    serde_json::from_str(&fs::read_to_string(t.work().join(RECONCILE_STATS_FILE)).unwrap()).unwrap()
+}
+
+/// Warnings captured from the `log` facade. The buffer is shared by every
+/// test in the binary, so search it for the ids a test uses rather than
+/// asserting on its length.
+static WARNINGS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+struct WarningCapture;
+
+impl log::Log for WarningCapture {
+    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+        metadata.level() <= log::Level::Warn
+    }
+
+    fn log(&self, record: &log::Record<'_>) {
+        if self.enabled(record.metadata()) {
+            WARNINGS.lock().unwrap().push(record.args().to_string());
+        }
+    }
+
+    fn flush(&self) {}
+}
+
+/// Install the warning capture; later calls are no-ops.
+fn capture_warnings() {
+    log::set_logger(&WarningCapture).ok();
+    log::set_max_level(log::LevelFilter::Warn);
+}
+
+fn warnings_mentioning(needle: &str) -> Vec<String> {
+    WARNINGS
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|line| line.contains(needle))
+        .cloned()
+        .collect()
+}
+
 #[test]
 fn rerun_of_complete_pipeline_keeps_truthful_manifest() {
     let t = TestRun::new();
@@ -619,6 +667,9 @@ fn rerun_of_complete_pipeline_keeps_truthful_manifest() {
 
     let again = t.run(false).unwrap();
 
+    assert!(again.stage_timings_ms.extract.is_none());
+    assert!(again.stage_timings_ms.query.is_none());
+    assert!(again.stage_timings_ms.reconcile.is_none());
     assert_eq!(again.counters.emitted, first.counters.emitted);
     assert_eq!(again.counters.emitted, 2);
     assert_eq!(
@@ -627,6 +678,172 @@ fn rerun_of_complete_pipeline_keeps_truthful_manifest() {
     );
     assert_eq!(again.coverage.records_enriched, 2);
     assert_eq!(again.match_.unwrap().matched, 2);
+    assert_eq!(reconcile_stats(&t)["source_id"], template().source_id());
+}
+
+#[test]
+fn rerun_of_complete_pipeline_with_removed_input_errors() {
+    let t = TestRun::new();
+    t.run(true).unwrap();
+
+    // An unchanged source id is an ordinary rerun, which still needs the corpus.
+    fs::remove_dir_all(&t.input).unwrap();
+
+    assert_err_contains(t.run(false), "input path is not a directory");
+    assert_eq!(read_output_dois(&t.output).len(), 2);
+}
+
+#[test]
+fn resume_with_changed_source_id_reruns_only_reconcile() {
+    capture_warnings();
+    let t = TestRun::new();
+    t.run(true).unwrap();
+
+    let changed_source_id = "10.82461/other-run";
+    let changed = EnrichmentTemplate::new(changed_source_id).unwrap();
+    let report = t
+        .run_with_template(&changed, &cfg(HashBits::Bits64, false), None, None)
+        .unwrap();
+
+    assert!(report.stage_timings_ms.extract.is_none());
+    assert!(report.stage_timings_ms.query.is_none());
+    assert!(report.stage_timings_ms.reconcile.is_some());
+    assert_eq!(report.counters.emitted, 2);
+    let records = read_enrichment_parts(&t.output);
+    assert_eq!(records.len(), 2);
+    for record in records {
+        assert_eq!(record["sourceId"], changed_source_id);
+    }
+    assert_eq!(reconcile_stats(&t)["source_id"], changed_source_id);
+    let warnings = warnings_mentioning(changed_source_id);
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(
+        warnings[0].contains("source id changed from `10.82461/bpzr-jd55` to `10.82461/other-run`"),
+        "{warnings:?}"
+    );
+    assert!(
+        warnings[0].contains("the input corpus is not re-read"),
+        "{warnings:?}"
+    );
+}
+
+#[test]
+fn resume_with_uppercase_variant_of_source_id_is_a_noop() {
+    capture_warnings();
+    let t = TestRun::new();
+    let lower = EnrichmentTemplate::new("10.82461/noop-case").unwrap();
+    t.run_with_template(&lower, &cfg(HashBits::Bits64, true), None, None)
+        .unwrap();
+    let before = read_enrichment_parts(&t.output);
+
+    // DOI names are case-insensitive, so this is the same source id.
+    let upper = EnrichmentTemplate::new("10.82461/NOOP-CASE").unwrap();
+    let report = t
+        .run_with_template(&upper, &cfg(HashBits::Bits64, false), None, None)
+        .unwrap();
+
+    assert!(report.stage_timings_ms.extract.is_none());
+    assert!(report.stage_timings_ms.query.is_none());
+    assert!(report.stage_timings_ms.reconcile.is_none());
+    assert_eq!(read_enrichment_parts(&t.output), before);
+    assert_eq!(reconcile_stats(&t)["source_id"], "10.82461/noop-case");
+    assert_eq!(warnings_mentioning("noop-case"), Vec::<String>::new());
+}
+
+#[test]
+fn resume_with_changed_source_id_does_not_need_input_corpus() {
+    let t = TestRun::new();
+    t.run(true).unwrap();
+
+    // Re-stamping reads only work artifacts, so a deleted corpus must not
+    // block it.
+    fs::remove_dir_all(&t.input).unwrap();
+
+    let changed_source_id = "10.82461/no-corpus";
+    let changed = EnrichmentTemplate::new(changed_source_id).unwrap();
+    let report = t
+        .run_with_template(&changed, &cfg(HashBits::Bits64, false), None, None)
+        .unwrap();
+
+    assert!(report.stage_timings_ms.extract.is_none());
+    assert!(report.stage_timings_ms.query.is_none());
+    assert!(report.stage_timings_ms.reconcile.is_some());
+    let records = read_enrichment_parts(&t.output);
+    assert_eq!(records.len(), 2);
+    for record in records {
+        assert_eq!(record["sourceId"], changed_source_id);
+    }
+}
+
+#[test]
+fn resume_with_changed_source_id_and_replaced_corpus_errors() {
+    capture_warnings();
+    let t = TestRun::new();
+    t.run(true).unwrap();
+    let before = read_enrichment_parts(&t.output);
+
+    // A corpus that is present must still match the fingerprint: reconcile
+    // would otherwise rebuild from the extractions of a different snapshot
+    // and the manifest would describe data the run never read.
+    write_gz_lines(
+        &t.input.join("updated_2024-01/part_0000.jsonl.gz"),
+        &[r#"{"id":"10.1/mit","attributes":{"name":"MIT"}}"#],
+    );
+
+    let changed = EnrichmentTemplate::new("10.82461/replaced-corpus").unwrap();
+    assert_err_contains(
+        t.run_with_template(&changed, &cfg(HashBits::Bits64, false), None, None),
+        "does not match",
+    );
+    assert_eq!(read_enrichment_parts(&t.output), before);
+    assert_eq!(reconcile_stats(&t)["source_id"], template().source_id());
+    // The re-stamp never happens, so it must not be announced.
+    assert_eq!(warnings_mentioning("replaced-corpus"), Vec::<String>::new());
+}
+
+#[test]
+fn resume_with_changed_source_id_and_mismatched_hash_width_errors_without_warning() {
+    capture_warnings();
+    let t = TestRun::new();
+    t.run(true).unwrap();
+
+    let changed = EnrichmentTemplate::new("10.82461/width-mismatch").unwrap();
+    assert_err_contains(
+        t.run_with_template(&changed, &cfg(HashBits::Bits128, false), None, None),
+        "hash-width mismatch",
+    );
+    // The re-stamp never happens, so it must not be announced.
+    assert_eq!(warnings_mentioning("width-mismatch"), Vec::<String>::new());
+}
+
+#[test]
+fn resume_with_legacy_reconcile_stats_reruns_reconcile() {
+    capture_warnings();
+    let t = TestRun::new();
+    t.run(true).unwrap();
+
+    let path = t.work().join(RECONCILE_STATS_FILE);
+    let mut stats: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    stats.as_object_mut().unwrap().remove("source_id");
+    fs::write(&path, serde_json::to_string(&stats).unwrap()).unwrap();
+
+    let report = t.run(false).unwrap();
+
+    assert!(report.stage_timings_ms.extract.is_none());
+    assert!(report.stage_timings_ms.query.is_none());
+    assert!(report.stage_timings_ms.reconcile.is_some());
+    let refreshed: Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+    assert_eq!(refreshed["source_id"], template().source_id());
+    let warnings = warnings_mentioning("has no recorded source id");
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(
+        warnings[0].contains("to stamp the output with source id `10.82461/bpzr-jd55`"),
+        "{warnings:?}"
+    );
+    assert!(
+        warnings[0].contains("the input corpus is not re-read"),
+        "{warnings:?}"
+    );
 }
 
 #[test]

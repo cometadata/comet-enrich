@@ -3,6 +3,7 @@
 // JSONL, gzip, and DataCite are names, not Rust identifiers.
 #![allow(clippy::doc_markdown)]
 
+use comet_enrich_core::EnrichmentTemplate;
 pub use comet_enrich_core::FakeMatchService;
 
 use std::fs::{self, File};
@@ -17,6 +18,15 @@ use tempfile::TempDir;
 
 /// Input subdirectory used by the DataCite snapshot layout the runners expect.
 const INPUT_SUBDIR: &str = "updated_2024-01";
+
+/// Source id used by every fixture-driven test.
+pub const SOURCE_ID: &str = "10.82461/bpzr-jd55";
+
+/// Record template built from [`SOURCE_ID`].
+#[must_use]
+pub fn enrichment_template() -> EnrichmentTemplate {
+    EnrichmentTemplate::new(SOURCE_ID).unwrap()
+}
 
 /// Write `records` as newline-delimited JSON into a gzip part at `path`.
 ///

@@ -49,10 +49,14 @@ Lead with the unit under test so related tests sort together.
 Default `RunOptions` to single-threaded with `batch_size: 100`, `output_writer_lanes: 1`,
 and a large `output_part_size_bytes` unless the test is specifically exercising output rolling.
 
-Use `config_path("provenance/…")` for committed config files instead of re-inlining
-YAML or building manifest-relative paths.
+Use `config_path("…")` for committed config files such as the reclassification rules instead of
+re-inlining them or building manifest-relative paths. Validate output against the embedded
+schema with `schema::compile_str(SCHEMA)`, as the CLI does, rather than reading the file from disk.
 
-Inline YAML should only be used in tests that check provenance or rules parsing.
+Use `enrichment_template()` / `SOURCE_ID` from `comet-enrich-test-support` for the record template
+in integration tests.
+
+Inline YAML should only be used in tests that check rules parsing.
 
 ### Mocks
 
