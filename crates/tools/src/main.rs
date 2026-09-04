@@ -1,13 +1,9 @@
 //! comet-enrich developer tooling.
 //!
-//! A single `tools` binary with two subcommands:
-//! - `compare`: diff comet-enrich enrichment output against a re-run of the
-//!   original standalone tools.
-//! - `bench`: closed-loop throughput/latency load test for a Marple match
-//!   endpoint.
+//! Commands for benchmarking matches and inspecting source duplicates.
 
 mod bench;
-mod compare;
+mod duplicate_dois;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -27,8 +23,8 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Compare enrichment output between the new and original systems.
-    Compare(compare::Args),
+    /// Find repeated DOIs and their source months in one snapshot.
+    DuplicateDois(duplicate_dois::Args),
     /// Benchmark a Marple match endpoint (throughput and latency).
     Bench(bench::Args),
 }
@@ -41,7 +37,7 @@ fn main() -> Result<()> {
         .context("initialising logger")?;
 
     match cli.command {
-        Command::Compare(args) => compare::run(&args),
+        Command::DuplicateDois(args) => duplicate_dois::run(&args),
         Command::Bench(args) => {
             // Only the benchmark needs an async runtime.
             let rt = tokio::runtime::Builder::new_multi_thread()

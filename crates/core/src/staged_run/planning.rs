@@ -69,6 +69,15 @@ impl WorkDir {
     pub fn all_complete(&self) -> bool {
         Stage::ALL.iter().all(|&s| self.is_complete(s))
     }
+
+    /// The crate version recorded in a completed stage's marker. `None` when
+    /// the stage has not completed or its marker predates 0.4 and is empty.
+    #[must_use]
+    pub fn stage_version(&self, stage: Stage) -> Option<String> {
+        let body = fs::read_to_string(self.marker_path(stage)).ok()?;
+        let version = body.trim();
+        (!version.is_empty()).then(|| version.to_owned())
+    }
 }
 
 /// Return the stages that should run.

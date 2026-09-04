@@ -38,6 +38,10 @@ impl EnrichmentMethod for TestMethod {
     type Extraction = TestExtraction;
     type Lookup = RorLookup;
 
+    fn name(&self) -> &'static str {
+        "test-method"
+    }
+
     fn extract(&self, record: &Value) -> Extracted<Self::Extraction> {
         let doi = record.get("id").and_then(Value::as_str).unwrap_or("");
         let name = record
@@ -155,6 +159,8 @@ impl TestRun {
     }
 
     fn opts(&self) -> RunOptions {
+        // The in-crate test cannot use test-support's helper: that crate links a
+        // separate copy of this library, so its `RunOptions` is a different type.
         RunOptions {
             input: self.input.clone(),
             output: self.output.clone(),
@@ -367,7 +373,13 @@ fn corrupt_input_file_is_counted_failed_not_hung() {
     );
     assert_eq!(read_output_dois(&t.output), vec!["10.1/mit".to_owned()]);
     assert_eq!(
-        crate::exit_status(report.counters.files_failed, 0, 0, true),
+        crate::exit_status(
+            report.counters.files_failed,
+            0,
+            0,
+            true,
+            report.counters.emitted
+        ),
         "partial"
     );
 }
@@ -776,6 +788,44 @@ fn resume_with_changed_source_id_does_not_need_input_corpus() {
 }
 
 #[test]
+fn resume_reusing_stage_from_another_version_warns_and_reports_it() {
+    capture_warnings();
+    let t = TestRun::new();
+    t.run(true).unwrap();
+
+    // A marker written before 0.4 is empty; make extract look like one and
+    // force reconcile to rerun.
+    fs::write(t.work().join("extract.done"), "").unwrap();
+    fs::remove_file(t.work().join("reconcile.done")).unwrap();
+
+    let report = t.run(false).unwrap();
+
+    assert!(!warnings_mentioning("reusing extract artifacts").is_empty());
+    assert!(warnings_mentioning("reusing query artifacts").is_empty());
+    let versions = report.stage_versions.unwrap();
+    assert_eq!(versions.extract, None);
+    assert_eq!(versions.query.as_deref(), Some(env!("CARGO_PKG_VERSION")));
+    assert_eq!(
+        versions.reconcile.as_deref(),
+        Some(env!("CARGO_PKG_VERSION"))
+    );
+}
+
+#[test]
+fn standalone_stage_does_not_need_input_corpus() {
+    let t = TestRun::new();
+    t.run(true).unwrap();
+
+    // A single stage reads only work artifacts, so a deleted corpus must not
+    // block it.
+    fs::remove_dir_all(&t.input).unwrap();
+
+    let report = t.run_stage(Stage::Reconcile).unwrap();
+    assert!(report.stage_timings_ms.reconcile.is_some());
+    assert_eq!(read_enrichment_parts(&t.output).len(), 2);
+}
+
+#[test]
 fn resume_with_changed_source_id_and_replaced_corpus_errors() {
     capture_warnings();
     let t = TestRun::new();
@@ -880,7 +930,13 @@ fn rejecting_validator_surfaces_schema_failures() {
     assert_eq!(report.validation.schema_failures, 2);
     assert!(t.output.join(ENRICHMENTS_FAILED_FILE).exists());
     assert_eq!(
-        crate::exit_status(0, report.counters.schema_failures, 0, true),
+        crate::exit_status(
+            0,
+            report.counters.schema_failures,
+            0,
+            true,
+            report.counters.emitted
+        ),
         "partial"
     );
 }
@@ -902,6 +958,7 @@ fn batch_error_is_recorded_not_certified_as_success() {
         0,
         m.failure_taxonomy.lost(),
         true,
+        report.counters.emitted,
     );
     assert_eq!(status, "partial");
 }
@@ -918,7 +975,13 @@ fn batch_timeout_is_lost_data_not_success() {
     assert_eq!(m.failure_taxonomy.timeout, 3);
     assert_eq!(m.failure_taxonomy.error, 0);
     assert_eq!(m.failure_taxonomy.lost(), 3);
-    let status = crate::exit_status(0, 0, m.failure_taxonomy.lost(), true);
+    let status = crate::exit_status(
+        0,
+        0,
+        m.failure_taxonomy.lost(),
+        true,
+        report.counters.emitted,
+    );
     assert_eq!(status, "partial");
 }
 
@@ -951,7 +1014,13 @@ fn item_error_is_recorded_not_certified_as_no_match() {
     assert_eq!(m.failure_taxonomy.error, 1);
     assert_eq!(m.failure_taxonomy.no_match, 0);
     assert_eq!(m.failure_taxonomy.lost(), 1);
-    let status = crate::exit_status(0, 0, m.failure_taxonomy.lost(), true);
+    let status = crate::exit_status(
+        0,
+        0,
+        m.failure_taxonomy.lost(),
+        true,
+        report.counters.emitted,
+    );
     assert_eq!(status, "partial");
 }
 
@@ -1013,11 +1082,12 @@ fn classify_failure_bins_by_kind_not_message() {
 
 #[test]
 fn exit_status_is_success_only_when_clean_and_complete() {
-    assert_eq!(crate::exit_status(0, 0, 0, true), "success");
-    assert_eq!(crate::exit_status(1, 0, 0, true), "partial");
-    assert_eq!(crate::exit_status(0, 1, 0, true), "partial");
-    assert_eq!(crate::exit_status(0, 0, 1, true), "partial");
-    assert_eq!(crate::exit_status(0, 0, 0, false), "partial");
+    assert_eq!(crate::exit_status(0, 0, 0, true, 1), "success");
+    assert_eq!(crate::exit_status(1, 0, 0, true, 1), "partial");
+    assert_eq!(crate::exit_status(0, 1, 0, true, 1), "partial");
+    assert_eq!(crate::exit_status(0, 0, 1, true, 1), "partial");
+    assert_eq!(crate::exit_status(0, 0, 0, false, 1), "partial");
+    assert_eq!(crate::exit_status(0, 0, 0, true, 0), "partial");
 }
 
 #[test]

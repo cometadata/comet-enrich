@@ -4,18 +4,18 @@
 #![allow(clippy::doc_markdown)]
 
 use comet_enrich_core::{
-    HashBits, HashInfo, LookupConfig, Manifest, MatchService, Report, RunMeta, RunOptions, SCHEMA,
-    SourceRelease, run_staged, schema,
+    EnrichmentAction, HashBits, HashInfo, LookupConfig, Manifest, MatchService, Report, RunMeta,
+    SCHEMA, SourceRelease, run_staged, schema,
 };
 use comet_enrich_datacite_funders::{Config, Funders};
 use comet_enrich_test_support::{
-    FakeMatchService, SOURCE_ID, assert_close, enrichment_template, gz_input_fixture,
-    read_enrichment_parts,
+    FakeMatchService, SOURCE_ID, assert_close, assert_record_key, enrichment_template,
+    gz_input_fixture, read_enrichment_parts, records_by_doi, run_options,
 };
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 const NSF_ROR: &str = "https://ror.org/021nxhr62";
@@ -54,6 +54,10 @@ fn input_records() -> Vec<Value> {
             {"funderName": "NSF"},
             {"funderName": "Mystery Trust"}
         ]}}),
+        json!({"id": "10.x/repeated", "attributes": {"fundingReferences": [
+            {"funderName": "NSF", "awardNumber": "R-1"},
+            {"funderName": "NSF", "awardNumber": "R-1"}
+        ]}}),
         json!({"id": "10.x/no-refs", "attributes": {"titles": [{"title": "No funding"}]}}),
         json!({"attributes": {"fundingReferences": [{"funderName": "NSF"}]}}),
     ]
@@ -88,14 +92,7 @@ fn run_pipeline() -> (tempfile::TempDir, PathBuf, Report) {
     let (dir, input, output) = gz_input_fixture(&input_records());
     let ror_file = dir.path().join("ror.json");
     fs::write(&ror_file, MINIMAL_ROR_DUMP).unwrap();
-    let opts = RunOptions {
-        input,
-        output: output.clone(),
-        threads: 1,
-        batch_size: 100,
-        output_part_size_bytes: 256 * 1024 * 1024,
-        output_writer_lanes: 1,
-    };
+    let opts = run_options(input, output.clone(), 1);
 
     let method = Funders::try_new(Config {
         lookup: cfg(),
@@ -120,13 +117,6 @@ fn run_pipeline() -> (tempfile::TempDir, PathBuf, Report) {
     (dir, output, report)
 }
 
-fn records_by_doi(output: &Path) -> HashMap<String, Value> {
-    read_enrichment_parts(output)
-        .into_iter()
-        .map(|rec| (rec["doi"].as_str().unwrap().to_owned(), rec))
-        .collect()
-}
-
 #[test]
 fn funders_staged_pipeline_matches_golden_outcomes() {
     let (_dir, output, report) = run_pipeline();
@@ -136,17 +126,18 @@ fn funders_staged_pipeline_matches_golden_outcomes() {
     }
 
     // Coverage is per funding reference.
-    assert_eq!(report.counters.records_scanned, 8);
+    assert_eq!(report.counters.records_scanned, 9);
     assert_eq!(
         report.counters.skipped.get("no_funding_references"),
         Some(&1)
     );
     assert_eq!(report.counters.skipped.get("no_doi"), Some(&1));
-    assert_eq!(report.counters.emitted, 3);
+    assert_eq!(report.counters.emitted, 4);
+    assert_eq!(report.counters.duplicate_enrichments, 1);
     assert_eq!(report.counters.schema_failures, 0);
-    assert_eq!(report.coverage.records_in_scope, 7);
-    assert_eq!(report.coverage.records_enriched, 3);
-    assert_close(report.coverage.coverage_rate, 3.0 / 7.0);
+    assert_eq!(report.coverage.records_in_scope, 9);
+    assert_eq!(report.coverage.records_enriched, 4);
+    assert_close(report.coverage.coverage_rate, 4.0 / 9.0);
 
     // NSF is deduplicated; excluded names are still queried.
     let m = report.match_.expect("match block present");
@@ -182,7 +173,10 @@ fn funders_staged_pipeline_matches_golden_outcomes() {
     );
 
     let records = records_by_doi(&output);
-    assert_eq!(records.len(), 3);
+    assert_eq!(records.len(), 4);
+    for rec in records.values() {
+        assert_record_key(rec, "funders", EnrichmentAction::UpdateChild);
+    }
     // Already-resolved and unmatched references do not emit.
     assert!(!records.contains_key("10.x/asserted"));
     assert!(!records.contains_key("10.x/crosswalk"));
@@ -233,6 +227,13 @@ fn funders_staged_pipeline_matches_golden_outcomes() {
     assert_eq!(multi["originalValue"], json!({"funderName": "NSF"}));
     assert_eq!(multi["enrichedValue"]["funderName"], json!("NSF"));
     assert_eq!(multi["enrichedValue"]["funderIdentifier"], json!(NSF_ROR));
+
+    // Two identical references in one record emit once.
+    let all: Vec<Value> = read_enrichment_parts(&output);
+    assert_eq!(
+        all.iter().filter(|r| r["doi"] == "10.x/repeated").count(),
+        1
+    );
 }
 
 #[test]
@@ -267,6 +268,6 @@ fn funders_pipeline_writes_lookup_manifest() {
     assert_eq!(m["exit_status"], json!("success"));
     assert_eq!(m["report"]["match"]["unique_inputs"], json!(5));
     assert_eq!(m["report"]["match"]["matched"], json!(3));
-    assert_eq!(m["report"]["validation"]["emitted"], json!(3));
+    assert_eq!(m["report"]["validation"]["emitted"], json!(4));
     assert_eq!(m["report"]["validation"]["schema_failures"], json!(0));
 }

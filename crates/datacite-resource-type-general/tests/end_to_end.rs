@@ -9,12 +9,12 @@
 #![allow(clippy::doc_markdown)]
 
 use comet_enrich_core::{
-    Manifest, RunMeta, RunOptions, RunStats, SCHEMA, SourceRelease, StageTimings, run, schema,
+    EnrichmentAction, Manifest, RunMeta, RunStats, SCHEMA, SourceRelease, StageTimings, run, schema,
 };
 use comet_enrich_datacite_resource_type_general::{Config, ResourceTypeGeneral};
 use comet_enrich_test_support::{
-    SOURCE_ID, assert_close, config_path, enrichment_template, read_enrichment_parts,
-    write_gz_lines,
+    SOURCE_ID, assert_close, assert_record_key, config_path, enrichment_template,
+    read_enrichment_parts, run_options, write_gz_lines,
 };
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap};
@@ -69,14 +69,7 @@ fn run_reclassifier() -> (tempfile::TempDir, PathBuf, RunStats) {
     );
 
     let output = dir.path().join("out");
-    let opts = RunOptions {
-        input: dir.path().join("input"),
-        output: output.clone(),
-        threads: 1,
-        batch_size: 100,
-        output_part_size_bytes: 256 * 1024 * 1024,
-        output_writer_lanes: 1,
-    };
+    let opts = run_options(dir.path().join("input"), output.clone(), 1);
 
     let template = enrichment_template();
     let method = ResourceTypeGeneral::try_new(Config {
@@ -113,6 +106,7 @@ fn reclassifier_matches_golden_outcomes() {
         assert_eq!(rec["field"], json!("types"));
         assert_eq!(rec["action"], json!("update"));
         assert_eq!(rec["sourceId"], json!(SOURCE_ID));
+        assert_record_key(rec, "resource-type-general", EnrichmentAction::Update);
         let doi = rec["doi"].as_str().unwrap().to_string();
         let rtg = rec["enrichedValue"]["resourceTypeGeneral"]
             .as_str()

@@ -49,8 +49,8 @@ impl IoArgs {
             output: self.output.clone(),
             threads: run.threads,
             batch_size: run.batch_size,
-            output_part_size_bytes: run.output_part_size_mib.saturating_mul(1024 * 1024),
-            output_writer_lanes: run.output_writer_lanes,
+            output_part_size_bytes: run.writer.part_size_bytes(),
+            output_writer_lanes: run.writer.output_writer_lanes,
         }
     }
 
@@ -119,6 +119,38 @@ fn parse_positive<T: TryFrom<u64>>(s: &str) -> Result<T, String> {
     T::try_from(n).map_err(|_| format!("value out of range: `{s}`"))
 }
 
+/// Rolling gzip writer options shared by the run and diff commands.
+#[derive(Args, Debug, Clone)]
+pub struct WriterArgs {
+    /// Target compressed size in MiB for each output part.
+    #[arg(
+        long,
+        default_value_t = DEFAULT_OUTPUT_PART_SIZE_MIB,
+        value_name = "MIB",
+        value_parser = parse_positive::<u64>,
+        help_heading = "Options"
+    )]
+    pub output_part_size_mib: u64,
+
+    /// Parallel writer lanes for output. Records route to lanes by DOI hash.
+    #[arg(
+        long,
+        default_value_t = DEFAULT_OUTPUT_WRITER_LANES,
+        value_name = "N",
+        value_parser = parse_positive::<usize>,
+        help_heading = "Options"
+    )]
+    pub output_writer_lanes: usize,
+}
+
+impl WriterArgs {
+    /// The part size in bytes.
+    #[must_use]
+    pub fn part_size_bytes(&self) -> u64 {
+        self.output_part_size_mib.saturating_mul(1024 * 1024)
+    }
+}
+
 /// Run and validation options used by every method.
 #[derive(Args, Debug, Clone)]
 pub struct RunArgs {
@@ -142,25 +174,8 @@ pub struct RunArgs {
     )]
     pub batch_size: usize,
 
-    /// Target compressed size in MiB for each final enrichment output part.
-    #[arg(
-        long,
-        default_value_t = DEFAULT_OUTPUT_PART_SIZE_MIB,
-        value_name = "MIB",
-        value_parser = parse_positive::<u64>,
-        help_heading = "Options"
-    )]
-    pub output_part_size_mib: u64,
-
-    /// Parallel writer lanes for final enrichment output. Records route to lanes by DOI hash.
-    #[arg(
-        long,
-        default_value_t = DEFAULT_OUTPUT_WRITER_LANES,
-        value_name = "N",
-        value_parser = parse_positive::<usize>,
-        help_heading = "Options"
-    )]
-    pub output_writer_lanes: usize,
+    #[command(flatten)]
+    pub writer: WriterArgs,
 
     /// Validate output against this JSON Schema instead of the built-in schema.
     #[arg(
@@ -329,8 +344,10 @@ mod tests {
         RunArgs {
             threads: 2,
             batch_size: 7,
-            output_part_size_mib: 3,
-            output_writer_lanes: 4,
+            writer: WriterArgs {
+                output_part_size_mib: 3,
+                output_writer_lanes: 4,
+            },
             schema,
             no_validate,
             log_level: LevelFilter::Off,

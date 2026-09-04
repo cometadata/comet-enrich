@@ -1,4 +1,4 @@
-//! The single-pass transform run path.
+//! The transform run path, with DOI deduplication before enrichment.
 //!
 //! [`run`] finds `*.jsonl.gz` files under the input directory and processes them in
 //! parallel: each record is extracted and mapped straight to enrichment records,
@@ -7,22 +7,21 @@
 //! validated at the write boundary when a schema validator is provided.
 
 use crate::artifact_lifecycle as lifecycle;
+use crate::doi_dedup::find_duplicate_lines;
 use crate::fanout::{
-    FileError, input_files, make_pool, own_skips, progress_bar, scan_jsonl_records,
+    FileError, input_files, make_pool, open_gz, own_skips, progress_bar, scan_jsonl_records,
 };
 use crate::method::{EnrichmentMethod, Extracted, Lookups};
 use crate::options::{RunOptions, RunStats};
 use crate::template::{EnrichmentTemplate, build_enrichment_record};
 use crate::writer::{
     ENRICHMENTS_DIR, ENRICHMENTS_FAILED_FILE, FailureSink, ParallelRollingWriter, RecordBatcher,
+    Validation,
 };
 
 use anyhow::Result;
-use flate2::read::GzDecoder;
 use rayon::prelude::*;
 use std::collections::{BTreeMap, HashMap};
-use std::fs::File;
-use std::io::BufReader;
 use std::path::Path;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -31,6 +30,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 struct Counters {
     records_scanned: AtomicU64,
     lines_malformed: AtomicU64,
+    duplicate_records: AtomicU64,
+    duplicate_enrichments: AtomicU64,
     files_failed: AtomicU64,
 }
 
@@ -58,6 +59,9 @@ pub fn run<M: EnrichmentMethod>(
     log::info!("found {} input files", files.len());
 
     let enrich_dir = opts.output.join(ENRICHMENTS_DIR);
+    lifecycle::ensure_disjoint(&opts.output, &[("input", &opts.input)])?;
+    let pool = make_pool(opts.threads)?;
+    let skip_lines = find_duplicate_lines(&files, &pool)?;
     lifecycle::clear_run_outputs(&opts.output)?;
     let failed_path = opts.output.join(ENRICHMENTS_FAILED_FILE);
     // Shared sink for schema-validation failures.
@@ -65,8 +69,10 @@ pub fn run<M: EnrichmentMethod>(
 
     let writer = ParallelRollingWriter::create(
         &enrich_dir,
-        validator,
-        &failures,
+        validator.map(|validator| Validation {
+            validator,
+            failures: &failures,
+        }),
         opts.output_part_size_bytes,
         opts.output_writer_lanes,
     )?;
@@ -76,35 +82,38 @@ pub fn run<M: EnrichmentMethod>(
     let counters = Counters::default();
     let skipped: Mutex<BTreeMap<&'static str, u64>> = Mutex::new(BTreeMap::new());
 
-    let pool = make_pool(opts.threads)?;
     // Workers scan input files in parallel and send emitted records to the rolling
     // output writer. A read failure is counted and the run continues; a write/flush
     // failure is fatal, so `try_for_each` short-circuits and the error propagates.
     pool.install(|| {
-        files.par_iter().try_for_each(|path| -> Result<()> {
-            pb.set_message(format!(
-                "processing {}",
-                path.file_name().unwrap().to_string_lossy()
-            ));
-            match process_file(
-                path,
-                &writer,
-                opts.batch_size,
-                method,
-                template,
-                &counters,
-                &skipped,
-            ) {
-                Ok(()) => {}
-                Err(FileError::Read(e)) => {
-                    log::error!("file error {}: {e}", path.display());
-                    counters.files_failed.fetch_add(1, Ordering::Relaxed);
+        files
+            .par_iter()
+            .enumerate()
+            .try_for_each(|(idx, path)| -> Result<()> {
+                pb.set_message(format!(
+                    "processing {}",
+                    path.file_name().unwrap().to_string_lossy()
+                ));
+                match process_file(
+                    path,
+                    &skip_lines[idx],
+                    &writer,
+                    opts.batch_size,
+                    method,
+                    template,
+                    &counters,
+                    &skipped,
+                ) {
+                    Ok(()) => {}
+                    Err(FileError::Read(e)) => {
+                        log::error!("file error {}: {e}", path.display());
+                        counters.files_failed.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Err(FileError::Fatal(e)) => return Err(e),
                 }
-                Err(FileError::Fatal(e)) => return Err(e),
-            }
-            pb.inc(1);
-            Ok(())
-        })
+                pb.inc(1);
+                Ok(())
+            })
     })?;
 
     let emitted = writer.finish()?;
@@ -118,14 +127,18 @@ pub fn run<M: EnrichmentMethod>(
         files_failed,
         records_scanned: counters.records_scanned.load(Ordering::Relaxed),
         lines_malformed: counters.lines_malformed.load(Ordering::Relaxed),
+        duplicate_records: counters.duplicate_records.load(Ordering::Relaxed),
+        duplicate_enrichments: counters.duplicate_enrichments.load(Ordering::Relaxed),
         emitted,
         schema_failures: failures.lock().unwrap().records_failed,
         skipped: own_skips(skipped.into_inner().unwrap()),
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn process_file<M: EnrichmentMethod>(
     path: &Path,
+    skip_lines: &[u64],
     writer: &ParallelRollingWriter<'_>,
     batch_size: usize,
     method: &M,
@@ -133,8 +146,7 @@ fn process_file<M: EnrichmentMethod>(
     counters: &Counters,
     skipped: &Mutex<BTreeMap<&'static str, u64>>,
 ) -> Result<(), FileError> {
-    let f = File::open(path).map_err(|e| FileError::Read(e.into()))?;
-    let reader = BufReader::new(GzDecoder::new(f));
+    let reader = open_gz(path).map_err(|e| FileError::Read(e.into()))?;
 
     let mut local_skips: BTreeMap<&'static str, u64> = BTreeMap::new();
 
@@ -142,8 +154,8 @@ fn process_file<M: EnrichmentMethod>(
     let lookups: Lookups<M::Lookup> = HashMap::new();
     let mut batcher = RecordBatcher::new(writer, batch_size);
 
-    let tally = scan_jsonl_records(reader, |rec| {
-        match method.extract(rec) {
+    let tally = scan_jsonl_records(reader, skip_lines, |rec| {
+        match method.extract(&rec) {
             Extracted::Skip(reason) => {
                 *local_skips.entry(reason).or_default() += 1;
             }
@@ -151,7 +163,7 @@ fn process_file<M: EnrichmentMethod>(
                 for item in items {
                     for parts in method.map_back(item, &lookups) {
                         batcher
-                            .push(build_enrichment_record(template, parts))
+                            .push(build_enrichment_record(template, method.name(), parts))
                             .map_err(FileError::Fatal)?;
                     }
                 }
@@ -160,13 +172,19 @@ fn process_file<M: EnrichmentMethod>(
         Ok(())
     })?;
 
-    batcher.finish().map_err(FileError::Fatal)?;
+    let duplicate_enrichments = batcher.finish().map_err(FileError::Fatal)?;
+    counters
+        .duplicate_enrichments
+        .fetch_add(duplicate_enrichments, Ordering::Relaxed);
     counters
         .records_scanned
         .fetch_add(tally.scanned, Ordering::Relaxed);
     counters
         .lines_malformed
         .fetch_add(tally.malformed, Ordering::Relaxed);
+    counters
+        .duplicate_records
+        .fetch_add(tally.skipped_lines, Ordering::Relaxed);
     merge_skips(skipped, local_skips);
     Ok(())
 }

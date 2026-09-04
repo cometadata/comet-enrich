@@ -45,16 +45,31 @@ impl EnrichmentTemplate {
 
 /// Build one enrichment record.
 ///
-/// Key order is fixed and covered by tests.
+/// The method name is hashed into the record's identity key, so it must be the
+/// stable name from [`crate::method::EnrichmentMethod::name`]. Key order is
+/// fixed and covered by tests.
 #[must_use]
-pub fn build_enrichment_record(template: &EnrichmentTemplate, parts: EnrichmentParts) -> Value {
-    let mut m = serde_json::Map::with_capacity(6);
+pub fn build_enrichment_record(
+    template: &EnrichmentTemplate,
+    method_name: &str,
+    parts: EnrichmentParts,
+) -> Value {
+    let key = crate::key::enrichment_key(
+        method_name,
+        &parts.doi,
+        parts.field,
+        parts.action,
+        &parts.original,
+        &parts.enriched,
+    );
+    let mut m = serde_json::Map::with_capacity(7);
     m.insert("doi".into(), Value::String(parts.doi));
     m.insert("action".into(), json!(parts.action.as_str()));
     m.insert("field".into(), json!(parts.field));
     m.insert("originalValue".into(), parts.original);
     m.insert("enrichedValue".into(), parts.enriched);
     m.insert("sourceId".into(), Value::String(template.source_id.clone()));
+    m.insert("key".into(), Value::String(key));
     Value::Object(m)
 }
 
@@ -113,7 +128,11 @@ mod tests {
 
     #[test]
     fn record_keys_are_in_declared_order() {
-        let rec = build_enrichment_record(&template(), parts(json!({"a":1}), json!({"a":2})));
+        let rec = build_enrichment_record(
+            &template(),
+            "test-method",
+            parts(json!({"a":1}), json!({"a":2})),
+        );
         let s = serde_json::to_string(&rec).unwrap();
         let order = [
             "doi",
@@ -122,6 +141,7 @@ mod tests {
             "originalValue",
             "enrichedValue",
             "sourceId",
+            "key",
         ];
         let positions: Vec<_> = order
             .iter()
@@ -139,8 +159,32 @@ mod tests {
 
     #[test]
     fn record_source_id_comes_from_template() {
-        let rec = build_enrichment_record(&template(), parts(json!({"a":1}), json!({"a":2})));
+        let rec = build_enrichment_record(
+            &template(),
+            "test-method",
+            parts(json!({"a":1}), json!({"a":2})),
+        );
         assert_eq!(rec["sourceId"], json!(SOURCE_ID));
+    }
+
+    #[test]
+    fn record_key_matches_the_key_module() {
+        let original = json!({"resourceTypeGeneral": "Text"});
+        let enriched = json!({"resourceTypeGeneral": "Dataset"});
+        let rec = build_enrichment_record(
+            &template(),
+            "test-method",
+            parts(original.clone(), enriched.clone()),
+        );
+        let want = crate::key::enrichment_key(
+            "test-method",
+            "10.5281/x",
+            "types",
+            EnrichmentAction::Update,
+            &original,
+            &enriched,
+        );
+        assert_eq!(rec["key"], json!(want));
     }
 
     #[test]
@@ -155,7 +199,11 @@ mod tests {
         });
         let mut enriched = original.clone();
         enriched["resourceTypeGeneral"] = json!("JournalArticle");
-        let rec = build_enrichment_record(&template(), parts(original.clone(), enriched));
+        let rec = build_enrichment_record(
+            &template(),
+            "test-method",
+            parts(original.clone(), enriched),
+        );
         for k in ["resourceType", "bibtex", "citeproc", "schemaOrg", "ris"] {
             assert_eq!(rec["originalValue"][k], original[k]);
             assert_eq!(rec["enrichedValue"][k], original[k]);

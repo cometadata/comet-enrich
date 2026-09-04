@@ -3,24 +3,88 @@
 // JSONL, gzip, and DataCite are names, not Rust identifiers.
 #![allow(clippy::doc_markdown)]
 
-use comet_enrich_core::EnrichmentTemplate;
 pub use comet_enrich_core::FakeMatchService;
+use comet_enrich_core::{EnrichmentAction, EnrichmentTemplate, RunOptions, enrichment_key};
 
+use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use flate2::Compression;
-use flate2::read::GzDecoder;
+use flate2::read::MultiGzDecoder;
 use flate2::write::GzEncoder;
-use serde_json::Value;
+use serde_json::{Value, json};
 use tempfile::TempDir;
 
 /// Input subdirectory used by the DataCite snapshot layout the runners expect.
-const INPUT_SUBDIR: &str = "updated_2024-01";
+pub const INPUT_SUBDIR: &str = "updated_2024-01";
 
 /// Source id used by every fixture-driven test.
 pub const SOURCE_ID: &str = "10.82461/bpzr-jd55";
+
+/// Method name used by fixture-driven diff tests.
+pub const METHOD: &str = "test-method";
+
+/// Run options every fixture-driven test uses: one writer lane and a small batch.
+#[must_use]
+pub fn run_options(input: PathBuf, output: PathBuf, threads: usize) -> RunOptions {
+    RunOptions {
+        input,
+        output,
+        threads,
+        batch_size: 100,
+        output_part_size_bytes: 256 * 1024 * 1024,
+        output_writer_lanes: 1,
+    }
+}
+
+/// A keyed enrichment record for `doi`, as a run would write it.
+#[must_use]
+pub fn keyed_record(
+    method: &str,
+    doi: &str,
+    field: &str,
+    action: EnrichmentAction,
+    original: &Value,
+    enriched: &Value,
+) -> Value {
+    let key = enrichment_key(method, doi, field, action, original, enriched);
+    json!({
+        "doi": doi,
+        "action": action.as_str(),
+        "field": field,
+        "originalValue": original,
+        "enrichedValue": enriched,
+        "sourceId": SOURCE_ID,
+        "key": key,
+    })
+}
+
+/// Write a completed run directory: one `enrichments/part_NNNN.jsonl.gz` per
+/// record slice plus a `manifest.json` for [`METHOD`], with `exit_status` when
+/// given.
+pub fn write_run_dir(dir: &Path, parts: &[&[Value]], exit_status: Option<&str>) {
+    let enrich = dir.join("enrichments");
+    fs::create_dir_all(&enrich).unwrap();
+    for (idx, records) in parts.iter().enumerate() {
+        write_gz_part(&enrich.join(format!("part_{idx:04}.jsonl.gz")), records);
+    }
+    let mut manifest = json!({
+        "schema_version": 1,
+        "method": {"name": METHOD, "version": "0.0.0"},
+        "source_id": SOURCE_ID,
+        "sources": {"datacite": {"release_date": "2026-01-02"}},
+    });
+    if let Some(status) = exit_status {
+        manifest["exit_status"] = json!(status);
+    }
+    fs::write(
+        dir.join("manifest.json"),
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+}
 
 /// Record template built from [`SOURCE_ID`].
 #[must_use]
@@ -88,7 +152,7 @@ pub fn gz_parts_fixture(parts: &[&[Value]]) -> (TempDir, PathBuf, PathBuf) {
 #[must_use]
 pub fn read_gz_string(path: &Path) -> String {
     let mut s = String::new();
-    GzDecoder::new(File::open(path).unwrap())
+    MultiGzDecoder::new(File::open(path).unwrap())
         .read_to_string(&mut s)
         .unwrap();
     s
@@ -112,6 +176,41 @@ pub fn read_enrichment_parts(output: &Path) -> Vec<Value> {
         );
     }
     recs
+}
+
+/// Enrichment records under `<output>/enrichments/`, keyed by DOI.
+///
+/// Panics if two records share a DOI, so tests stay one record per DOI.
+#[must_use]
+pub fn records_by_doi(output: &Path) -> HashMap<String, Value> {
+    let mut by_doi = HashMap::new();
+    for rec in read_enrichment_parts(output) {
+        let doi = rec["doi"].as_str().unwrap().to_owned();
+        assert!(
+            by_doi.insert(doi.clone(), rec).is_none(),
+            "duplicate doi {doi}"
+        );
+    }
+    by_doi
+}
+
+/// Assert a record's `key` is the frozen identity key for `method` and `action`.
+#[track_caller]
+pub fn assert_record_key(rec: &Value, method: &str, action: EnrichmentAction) {
+    let want = enrichment_key(
+        method,
+        rec["doi"].as_str().unwrap(),
+        rec["field"].as_str().unwrap(),
+        action,
+        &rec["originalValue"],
+        &rec["enrichedValue"],
+    );
+    assert_eq!(
+        rec["key"],
+        json!(want),
+        "key mismatch for doi {}",
+        rec["doi"]
+    );
 }
 
 /// Absolute path to a file under the workspace `configs/` directory.

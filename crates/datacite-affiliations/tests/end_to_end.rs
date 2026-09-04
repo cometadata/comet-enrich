@@ -4,18 +4,18 @@
 #![allow(clippy::doc_markdown)]
 
 use comet_enrich_core::{
-    HashBits, HashInfo, LookupConfig, Manifest, MatchService, Report, RunMeta, RunOptions, SCHEMA,
-    SourceRelease, run_staged, schema,
+    EnrichmentAction, HashBits, HashInfo, LookupConfig, Manifest, MatchService, Report, RunMeta,
+    SCHEMA, SourceRelease, run_staged, schema,
 };
 use comet_enrich_datacite_affiliations::Affiliations;
 use comet_enrich_test_support::{
-    FakeMatchService, SOURCE_ID, assert_close, enrichment_template, gz_input_fixture,
-    read_enrichment_parts,
+    FakeMatchService, SOURCE_ID, assert_close, assert_record_key, enrichment_template,
+    gz_input_fixture, read_enrichment_parts, records_by_doi, run_options,
 };
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 const MIT_ROR: &str = "https://ror.org/042nb2s44";
@@ -95,14 +95,7 @@ fn cfg() -> LookupConfig {
 
 fn run_pipeline() -> (tempfile::TempDir, PathBuf, Report) {
     let (dir, input, output) = gz_input_fixture(&input_records());
-    let opts = RunOptions {
-        input,
-        output: output.clone(),
-        threads: 1,
-        batch_size: 100,
-        output_part_size_bytes: 256 * 1024 * 1024,
-        output_writer_lanes: 1,
-    };
+    let opts = run_options(input, output.clone(), 1);
 
     let method = Affiliations::try_new(cfg()).unwrap();
     let svc = fake_service();
@@ -121,13 +114,6 @@ fn run_pipeline() -> (tempfile::TempDir, PathBuf, Report) {
     )
     .unwrap();
     (dir, output, report)
-}
-
-fn records_by_doi(output: &Path) -> HashMap<String, Value> {
-    read_enrichment_parts(output)
-        .into_iter()
-        .map(|rec| (rec["doi"].as_str().unwrap().to_owned(), rec))
-        .collect()
 }
 
 #[test]
@@ -183,6 +169,9 @@ fn affiliations_staged_pipeline_matches_golden_outcomes() {
 
     let records = records_by_doi(&output);
     assert_eq!(records.len(), 3);
+    for rec in records.values() {
+        assert_record_key(rec, "affiliations", EnrichmentAction::UpdateChild);
+    }
     assert!(!records.contains_key("10.x/existing-only"));
     assert!(!records.contains_key("10.x/unmatched"));
 
@@ -271,4 +260,99 @@ fn affiliations_pipeline_writes_lookup_manifest() {
     assert_eq!(m["report"]["match"]["matched"], json!(3));
     assert_eq!(m["report"]["validation"]["emitted"], json!(3));
     assert_eq!(m["report"]["validation"]["schema_failures"], json!(0));
+}
+
+#[test]
+fn affiliations_selects_whole_source_records_and_resumes_existing_parts() {
+    use comet_enrich_test_support::{INPUT_SUBDIR, write_gz_lines};
+
+    let person = |name: &str, affiliation: &str| {
+        json!({
+            "name": name, "affiliation": [{"name": affiliation}]
+        })
+    };
+    let records = [
+        json!({"id":"10.1/people","attributes":{
+            "updated":"2026-09-01T00:00:00Z",
+            "creators":[person("Discarded", "Obsolete Institute")]
+        }}),
+        json!({"id":"10.1/people","attributes":{
+            "updated":"2026-09-01T00:00:00Z",
+            "creators":[person("One", "MIT"), person("Two", "MIT"), person("Three", "MIT")]
+        }}),
+        json!({"id":"10.1/removed","attributes":{
+            "updated":"2026-08-01T00:00:00Z",
+            "creators":[person("Removed", "Obsolete Institute")]
+        }}),
+        json!({"id":"10.1/removed","attributes":{
+            "updated":"2026-09-01T00:00:00Z", "creators":[]
+        }}),
+    ];
+    let (_dir, input, output) = gz_input_fixture(&records);
+    let mut lines: Vec<String> = records.iter().map(Value::to_string).collect();
+    lines.insert(1, String::new());
+    lines.insert(2, "{invalid json".to_owned());
+    write_gz_lines(
+        &input.join(INPUT_SUBDIR).join("part_0000.jsonl.gz"),
+        &lines.iter().map(String::as_str).collect::<Vec<_>>(),
+    );
+    let opts = run_options(input, output.clone(), 2);
+    let method = Affiliations::try_new(cfg()).unwrap();
+    let service = fake_service();
+    let template = enrichment_template();
+    let mut config = cfg();
+    let report = run_staged(
+        &method,
+        &opts,
+        &config,
+        &service,
+        &template,
+        None,
+        "affiliation",
+        None,
+    )
+    .unwrap();
+    let path = output.join(".work/extractions/part_0000.jsonl");
+    let part = fs::read_to_string(&path).unwrap();
+    let rows: Vec<Value> = part
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let expected: Vec<Value> = ["One", "Two", "Three"]
+        .into_iter()
+        .enumerate()
+        .map(|(idx, name)| {
+            json!({
+                "doi":"10.1/people", "field":"creators", "idx":idx,
+                "source_raw":{"name":name},
+                "affiliations":[{
+                    "affiliation":"MIT",
+                    "affiliation_hash":"57c3834cafabbb94",
+                    "affiliation_raw":{"name":"MIT"}
+                }]
+            })
+        })
+        .collect();
+    assert_eq!(rows, expected);
+    assert_eq!(report.counters.records_scanned, 4);
+    assert_eq!(report.counters.lines_malformed, 1);
+    assert_eq!(report.counters.duplicate_records, 2);
+    assert_eq!(report.coverage.records_in_scope, 3);
+    assert_eq!(report.match_.unwrap().unique_inputs, 1);
+    assert_eq!(read_enrichment_parts(&output).len(), 3);
+
+    config.from_scratch = false;
+    let resumed = run_staged(
+        &method,
+        &opts,
+        &config,
+        &service,
+        &template,
+        None,
+        "affiliation",
+        None,
+    )
+    .unwrap();
+    assert_eq!(resumed.counters.duplicate_records, 2);
+    assert_eq!(fs::read_to_string(path).unwrap(), part);
 }

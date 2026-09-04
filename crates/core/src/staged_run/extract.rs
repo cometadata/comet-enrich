@@ -2,19 +2,19 @@ use super::fingerprint::{compute_input_fingerprint, write_input_fingerprint};
 use super::{EXTRACT_STATS_FILE, EXTRACTIONS_DIR, INPUTS_FILE};
 use crate::artifact_lifecycle as lifecycle;
 use crate::dedup::{DedupStore, HashBits};
+use crate::doi_dedup::find_duplicate_lines;
 use crate::fanout::{
-    FileError, input_files, make_pool, own_skips, progress_bar, scan_jsonl_records,
+    FileError, input_files, make_pool, open_gz, own_skips, progress_bar, scan_jsonl_records,
 };
 use crate::method::EnrichmentMethod;
 use crate::options::RunOptions;
 
 use anyhow::{Context, Result};
-use flate2::read::GzDecoder;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::{self, File};
-use std::io::{BufReader, BufWriter, Write};
+use std::io::{BufWriter, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -25,6 +25,8 @@ pub(super) struct ExtractStats {
     pub(super) files_failed: u64,
     pub(super) records_scanned: u64,
     pub(super) lines_malformed: u64,
+    #[serde(default)]
+    pub(super) duplicate_records: u64,
     pub(super) in_scope_units: u64,
     pub(super) skipped: BTreeMap<String, u64>,
 }
@@ -35,6 +37,7 @@ struct ExtractAgg {
     dedup: DedupStore,
     records_scanned: u64,
     lines_malformed: u64,
+    duplicate_records: u64,
     in_scope_units: u64,
     skipped: BTreeMap<&'static str, u64>,
 }
@@ -44,6 +47,7 @@ impl ExtractAgg {
         self.dedup.merge(other.dedup);
         self.records_scanned += other.records_scanned;
         self.lines_malformed += other.lines_malformed;
+        self.duplicate_records += other.duplicate_records;
         self.in_scope_units += other.in_scope_units;
         for (reason, n) in other.skipped {
             *self.skipped.entry(reason).or_default() += n;
@@ -70,9 +74,10 @@ where
     fs::create_dir_all(&extractions_dir)
         .with_context(|| format!("creating {}", extractions_dir.display()))?;
 
+    let pool = make_pool(io.threads)?;
+    let skip_lines = find_duplicate_lines(&files, &pool)?;
     let files_failed = AtomicU64::new(0);
     let pb = progress_bar(files.len() as u64)?;
-    let pool = make_pool(io.threads)?;
     let agg = pool.install(|| {
         files
             .par_iter()
@@ -82,7 +87,13 @@ where
                     "extract: {}",
                     path.file_name().unwrap().to_string_lossy()
                 ));
-                let agg = match stream_extract_file(idx, path, &extractions_dir, method) {
+                let agg = match stream_extract_file(
+                    idx,
+                    path,
+                    &extractions_dir,
+                    method,
+                    &skip_lines[idx],
+                ) {
                     Ok(agg) => Ok(agg),
                     Err(FileError::Read(e)) => {
                         log::error!("file error {}: {e}", path.display());
@@ -108,6 +119,7 @@ where
         files_failed,
         records_scanned: agg.records_scanned,
         lines_malformed: agg.lines_malformed,
+        duplicate_records: agg.duplicate_records,
         in_scope_units: agg.in_scope_units,
         skipped: own_skips(agg.skipped),
     };
@@ -128,13 +140,13 @@ fn stream_extract_file<M>(
     path: &Path,
     extractions_dir: &Path,
     method: &M,
+    skip_lines: &[u64],
 ) -> Result<ExtractAgg, FileError>
 where
     M: EnrichmentMethod,
     M::Extraction: Serialize,
 {
-    let f = File::open(path).map_err(|e| FileError::Read(e.into()))?;
-    let reader = BufReader::new(GzDecoder::new(f));
+    let reader = open_gz(path).map_err(|e| FileError::Read(e.into()))?;
 
     let part_path = extractions_dir.join(format!("part_{idx:04}.jsonl"));
     let file = File::create(&part_path)
@@ -146,8 +158,8 @@ where
     let mut in_scope_units: u64 = 0;
     let mut skipped: BTreeMap<&'static str, u64> = BTreeMap::new();
 
-    let scanned = scan_jsonl_records(reader, |rec| {
-        match method.extract(rec) {
+    let scanned = scan_jsonl_records(reader, skip_lines, |rec| {
+        match method.extract(&rec) {
             crate::method::Extracted::Skip(reason) => {
                 *skipped.entry(reason).or_default() += 1;
             }
@@ -186,6 +198,7 @@ where
         dedup,
         records_scanned: tally.scanned,
         lines_malformed: tally.malformed,
+        duplicate_records: tally.skipped_lines,
         in_scope_units,
         skipped,
     })

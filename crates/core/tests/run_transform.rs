@@ -5,7 +5,8 @@ use comet_enrich_core::{
     RunOptions, SCHEMA, run, schema,
 };
 use comet_enrich_test_support::{
-    SOURCE_ID, enrichment_template, read_enrichment_parts, write_gz_lines,
+    SOURCE_ID, enrichment_template, read_enrichment_parts, run_options, write_gz_lines,
+    write_gz_part,
 };
 use serde_json::{Value, json};
 use std::fs;
@@ -16,6 +17,10 @@ struct DatasetTagger;
 impl EnrichmentMethod for DatasetTagger {
     type Extraction = EnrichmentParts;
     type Lookup = ();
+
+    fn name(&self) -> &'static str {
+        "dataset-tagger"
+    }
 
     fn extract(&self, record: &Value) -> Extracted<Self::Extraction> {
         let Some(types) = record.get("attributes").and_then(|a| a.get("types")) else {
@@ -35,13 +40,20 @@ impl EnrichmentMethod for DatasetTagger {
         };
         let mut enriched = types.clone();
         enriched["resourceTypeGeneral"] = json!("Dataset");
-        Extracted::Items(vec![EnrichmentParts {
+        let parts = || EnrichmentParts {
             doi: doi.to_string(),
             action: EnrichmentAction::Update,
             field: "types",
             original: types.clone(),
-            enriched,
-        }])
+            enriched: enriched.clone(),
+        };
+        // A record flagged `duplicate` stands in for one whose items repeat.
+        let repeat = record.pointer("/attributes/duplicate") == Some(&json!(true));
+        Extracted::Items(if repeat {
+            vec![parts(), parts()]
+        } else {
+            vec![parts()]
+        })
     }
 
     fn map_back(
@@ -58,14 +70,7 @@ impl EnrichmentMethod for DatasetTagger {
 /// Tests that vary threads, lanes, or part size mutate the returned options.
 fn transform_setup(dir: &tempfile::TempDir) -> (EnrichmentTemplate, RunOptions) {
     let template = enrichment_template();
-    let opts = RunOptions {
-        input: dir.path().join("input"),
-        output: dir.path().join("out"),
-        threads: 1,
-        batch_size: 100,
-        output_part_size_bytes: 256 * 1024 * 1024,
-        output_writer_lanes: 1,
-    };
+    let opts = run_options(dir.path().join("input"), dir.path().join("out"), 1);
     (template, opts)
 }
 
@@ -359,4 +364,122 @@ fn empty_input_rerun_errors_and_leaves_outputs_untouched() {
         "got: {err}"
     );
     assert_eq!(read_enrichment_parts(&output).len(), 1);
+}
+
+#[test]
+fn output_equal_to_input_is_refused_and_input_survives() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input");
+    let part = input.join("part_0000.jsonl.gz");
+    write_gz_lines(
+        &part,
+        &[r#"{"id":"10.1/a","attributes":{"types":{"resourceType":"Spreadsheet"}}}"#],
+    );
+    let (template, mut opts) = transform_setup(&dir);
+    opts.output = input.clone();
+
+    let err = format!(
+        "{:#}",
+        run(&DatasetTagger, &opts, &template, None).unwrap_err()
+    );
+
+    assert!(err.contains("--output overlaps --input"), "got: {err}");
+    assert!(part.is_file(), "input part was deleted");
+}
+
+#[test]
+fn run_drops_repeated_keys_within_one_record() {
+    let dir = tempfile::tempdir().unwrap();
+    let (template, opts) = transform_setup(&dir);
+    write_gz_lines(
+        &opts.input.join("part_0000.jsonl.gz"),
+        &[
+            &json!({"id": "10.1/twice", "attributes": {"duplicate": true, "types": {"resourceType": "x"}}})
+                .to_string(),
+            &json!({"id": "10.1/once", "attributes": {"types": {"resourceType": "y"}}}).to_string(),
+        ],
+    );
+
+    let stats = run(&DatasetTagger, &opts, &template, None).unwrap();
+
+    assert_eq!(stats.emitted, 2);
+    assert_eq!(stats.duplicate_enrichments, 1);
+    let mut dois: Vec<String> = read_enrichment_parts(&opts.output)
+        .iter()
+        .map(|rec| rec["doi"].as_str().unwrap().to_owned())
+        .collect();
+    dois.sort();
+    assert_eq!(dois, ["10.1/once", "10.1/twice"]);
+}
+
+#[test]
+fn run_selects_source_winners_and_excludes_duplicates_from_coverage() {
+    use comet_enrich_core::{Manifest, RunMeta, StageTimings};
+
+    let dir = tempfile::tempdir().unwrap();
+    let (template, mut opts) = transform_setup(&dir);
+    opts.threads = 2;
+    let record = |updated: &str, label: &str| {
+        json!({
+            "id": "10.1/a",
+            "attributes": {"updated": updated, "types": {"resourceType": label}}
+        })
+        .to_string()
+    };
+    write_gz_lines(
+        &opts.input.join("part_0000.jsonl.gz"),
+        &[&record("2026-09-02T00:00:00Z", "first")],
+    );
+    write_gz_lines(
+        &opts.input.join("part_0001.jsonl.gz"),
+        &[
+            &record("2026-09-01T00:00:00Z", "older"),
+            &record("2026-09-02T00:00:00Z", "last"),
+            &json!({"id":"10.1/empty","attributes":{"types":{}}}).to_string(),
+        ],
+    );
+
+    let stats = run(&DatasetTagger, &opts, &template, None).unwrap();
+    let output = read_enrichment_parts(&opts.output);
+    assert_eq!(output.len(), 1);
+    assert_eq!(output[0]["originalValue"]["resourceType"], "last");
+    assert_eq!(stats.records_scanned, 4);
+    assert_eq!(stats.duplicate_records, 2);
+    let meta = RunMeta {
+        method_name: "dataset-tagger".to_owned(),
+        method_version: "test",
+        source_id: SOURCE_ID.to_owned(),
+        sources: std::collections::BTreeMap::new(),
+    };
+    let manifest = Manifest::build(
+        &stats,
+        &meta,
+        &["no_resource_type"],
+        &StageTimings::default(),
+        "success",
+    );
+    assert_eq!(manifest.report.coverage.records_in_scope, 1);
+    assert_eq!(manifest.report.coverage.records_enriched, 1);
+}
+
+#[test]
+fn run_reads_every_member_of_a_concatenated_gzip_part() {
+    let dir = tempfile::tempdir().unwrap();
+    let (template, opts) = transform_setup(&dir);
+    let record =
+        |doi: &str| json!({"id": doi, "attributes": {"types": {"resourceType": "Dataset"}}});
+    let members = [dir.path().join("a.gz"), dir.path().join("b.gz")];
+    write_gz_part(&members[0], &[record("10.1/a")]);
+    write_gz_part(&members[1], &[record("10.1/b"), record("10.1/c")]);
+    let bytes = [
+        fs::read(&members[0]).unwrap(),
+        fs::read(&members[1]).unwrap(),
+    ]
+    .concat();
+    fs::create_dir_all(&opts.input).unwrap();
+    fs::write(opts.input.join("part_0000.jsonl.gz"), bytes).unwrap();
+
+    let stats = run(&DatasetTagger, &opts, &template, None).unwrap();
+    assert_eq!(stats.records_scanned, 3);
+    assert_eq!(read_enrichment_parts(&opts.output).len(), 3);
 }

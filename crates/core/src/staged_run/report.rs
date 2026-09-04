@@ -7,7 +7,8 @@ use super::{
     for_each_jsonl,
 };
 use crate::manifest::{
-    Coverage, HistogramBucket, MatchFailureTaxonomy, MatchSummary, Report, StageTimings, Validation,
+    Coverage, HistogramBucket, MatchFailureTaxonomy, MatchSummary, Report, StageTimings,
+    StageVersions, Validation,
 };
 use crate::options::RunStats;
 
@@ -34,6 +35,8 @@ pub(super) fn build_report(work: &Path, wd: &WorkDir, timings: StageTimings) -> 
         files_failed: extract.files_failed,
         records_scanned: extract.records_scanned,
         lines_malformed: extract.lines_malformed,
+        duplicate_records: extract.duplicate_records,
+        duplicate_enrichments: reconcile.duplicate_enrichments,
         emitted: reconcile.emitted,
         schema_failures: reconcile.schema_failures,
         skipped: extract.skipped,
@@ -50,6 +53,11 @@ pub(super) fn build_report(work: &Path, wd: &WorkDir, timings: StageTimings) -> 
         coverage: Coverage::new(extract.in_scope_units, reconcile.emitted),
         match_,
         validation: Validation::new(reconcile.emitted, reconcile.schema_failures),
+        stage_versions: Some(StageVersions {
+            extract: wd.stage_version(Stage::Extract),
+            query: wd.stage_version(Stage::Query),
+            reconcile: wd.stage_version(Stage::Reconcile),
+        }),
         stage_timings_ms: timings,
     })
 }
