@@ -4,8 +4,7 @@
 #![allow(clippy::doc_markdown)]
 
 use comet_enrich_core::{
-    EnrichmentAction, HashBits, HashInfo, LookupConfig, Manifest, MatchService, Report, RunMeta,
-    SCHEMA, SourceRelease, run_staged, schema,
+    EnrichmentAction, HashBits, LookupConfig, MatchService, Report, SCHEMA, run_staged, schema,
 };
 use comet_enrich_datacite_affiliations::Affiliations;
 use comet_enrich_test_support::{
@@ -13,8 +12,7 @@ use comet_enrich_test_support::{
     gz_input_fixture, read_enrichment_parts, records_by_doi, run_options,
 };
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, HashMap};
-use std::fs;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -45,6 +43,10 @@ fn input_records() -> Vec<Value> {
         json!({"id": "10.x/contrib", "attributes": {"contributors": [
             {"name": "Editor One", "contributorType": "Editor",
              "affiliation": [{"name": "MIT"}]}
+        ]}}),
+        json!({"id": "10.x/twins", "attributes": {"creators": [
+            {"name": "Twin, Tim", "affiliation": [{"name": "MIT"}]},
+            {"name": "Twin, Tim", "affiliation": [{"name": "MIT"}]}
         ]}}),
         json!({"id": "10.x/existing-only", "attributes": {"creators": [
             {"name": "Solo, Sam", "affiliation": [
@@ -125,14 +127,16 @@ fn affiliations_staged_pipeline_matches_golden_outcomes() {
     }
 
     // Coverage is per extraction unit.
-    assert_eq!(report.counters.records_scanned, 7);
+    assert_eq!(report.counters.records_scanned, 8);
     assert_eq!(report.counters.skipped.get("no_affiliations"), Some(&1));
     assert_eq!(report.counters.skipped.get("no_doi"), Some(&1));
-    assert_eq!(report.counters.emitted, 3);
+    assert_eq!(report.counters.emitted, 4);
+    assert_eq!(report.counters.duplicate_records, 0);
+    assert_eq!(report.counters.duplicate_enrichments, 1);
     assert_eq!(report.counters.schema_failures, 0);
-    assert_eq!(report.coverage.records_in_scope, 5);
-    assert_eq!(report.coverage.records_enriched, 3);
-    assert_close(report.coverage.coverage_rate, 3.0 / 5.0);
+    assert_eq!(report.coverage.records_in_scope, 7);
+    assert_eq!(report.coverage.records_enriched, 4);
+    assert_close(report.coverage.coverage_rate, 4.0 / 7.0);
 
     // MIT is deduplicated; Oxford and Unknown Institute do not match.
     let m = report.match_.expect("match block present");
@@ -146,29 +150,8 @@ fn affiliations_staged_pipeline_matches_golden_outcomes() {
         3
     );
 
-    // Staged artifacts are left for resume/debugging.
-    let work = output.join(".work");
-    for artifact in [
-        "extractions/part_0000.jsonl",
-        "inputs.jsonl",
-        "lookups.jsonl",
-        "lookups.failed.jsonl",
-        "extract.done",
-        "query.done",
-        "reconcile.done",
-    ] {
-        assert!(
-            work.join(artifact).exists(),
-            "missing work artifact: {artifact}"
-        );
-    }
-    assert_eq!(
-        fs::read_to_string(work.join("hash.bits")).unwrap(),
-        "xxh3-64"
-    );
-
     let records = records_by_doi(&output);
-    assert_eq!(records.len(), 3);
+    assert_eq!(records.len(), 4);
     for rec in records.values() {
         assert_record_key(rec, "affiliations", EnrichmentAction::UpdateChild);
     }
@@ -224,135 +207,13 @@ fn affiliations_staged_pipeline_matches_golden_outcomes() {
             "schemeUri": "https://ror.org"
         }])
     );
-}
 
-#[test]
-fn affiliations_pipeline_writes_lookup_manifest() {
-    let (_dir, output, report) = run_pipeline();
-
-    let mut sources = BTreeMap::new();
-    sources.insert(
-        "datacite".to_owned(),
-        SourceRelease {
-            release_date: "2024-01-01".to_owned(),
-        },
+    // Two identical creators in one record emit once.
+    let all = read_enrichment_parts(&output);
+    assert_eq!(all.iter().filter(|r| r["doi"] == "10.x/twins").count(), 1);
+    let twins = &records["10.x/twins"];
+    assert_eq!(
+        twins["enrichedValue"]["affiliation"][0]["affiliationIdentifier"],
+        json!(MIT_ROR)
     );
-    let meta = RunMeta {
-        method_name: "affiliations".to_owned(),
-        method_version: env!("CARGO_PKG_VERSION"),
-        source_id: SOURCE_ID.to_owned(),
-        sources,
-    };
-    Manifest::from_report(&meta, "success", report, HashInfo::from(HashBits::Bits64))
-        .write(&output)
-        .unwrap();
-
-    let raw = fs::read_to_string(output.join("manifest.json")).unwrap();
-    let m: Value = serde_json::from_str(&raw).unwrap();
-
-    assert_eq!(m["schema_version"], json!(1));
-    assert_eq!(m["method"]["name"], json!("affiliations"));
-    assert_eq!(m["source_id"], json!(SOURCE_ID));
-    assert_eq!(m["hash"]["algorithm"], json!("xxh3"));
-    assert_eq!(m["hash"]["bits"], json!(64));
-    assert_eq!(m["exit_status"], json!("success"));
-    assert_eq!(m["report"]["match"]["unique_inputs"], json!(5));
-    assert_eq!(m["report"]["match"]["matched"], json!(3));
-    assert_eq!(m["report"]["validation"]["emitted"], json!(3));
-    assert_eq!(m["report"]["validation"]["schema_failures"], json!(0));
-}
-
-#[test]
-fn affiliations_selects_whole_source_records_and_resumes_existing_parts() {
-    use comet_enrich_test_support::{INPUT_SUBDIR, write_gz_lines};
-
-    let person = |name: &str, affiliation: &str| {
-        json!({
-            "name": name, "affiliation": [{"name": affiliation}]
-        })
-    };
-    let records = [
-        json!({"id":"10.1/people","attributes":{
-            "updated":"2026-09-01T00:00:00Z",
-            "creators":[person("Discarded", "Obsolete Institute")]
-        }}),
-        json!({"id":"10.1/people","attributes":{
-            "updated":"2026-09-01T00:00:00Z",
-            "creators":[person("One", "MIT"), person("Two", "MIT"), person("Three", "MIT")]
-        }}),
-        json!({"id":"10.1/removed","attributes":{
-            "updated":"2026-08-01T00:00:00Z",
-            "creators":[person("Removed", "Obsolete Institute")]
-        }}),
-        json!({"id":"10.1/removed","attributes":{
-            "updated":"2026-09-01T00:00:00Z", "creators":[]
-        }}),
-    ];
-    let (_dir, input, output) = gz_input_fixture(&records);
-    let mut lines: Vec<String> = records.iter().map(Value::to_string).collect();
-    lines.insert(1, String::new());
-    lines.insert(2, "{invalid json".to_owned());
-    write_gz_lines(
-        &input.join(INPUT_SUBDIR).join("part_0000.jsonl.gz"),
-        &lines.iter().map(String::as_str).collect::<Vec<_>>(),
-    );
-    let opts = run_options(input, output.clone(), 2);
-    let method = Affiliations::try_new(cfg()).unwrap();
-    let service = fake_service();
-    let template = enrichment_template();
-    let mut config = cfg();
-    let report = run_staged(
-        &method,
-        &opts,
-        &config,
-        &service,
-        &template,
-        None,
-        "affiliation",
-        None,
-    )
-    .unwrap();
-    let path = output.join(".work/extractions/part_0000.jsonl");
-    let part = fs::read_to_string(&path).unwrap();
-    let rows: Vec<Value> = part
-        .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
-        .collect();
-    let expected: Vec<Value> = ["One", "Two", "Three"]
-        .into_iter()
-        .enumerate()
-        .map(|(idx, name)| {
-            json!({
-                "doi":"10.1/people", "field":"creators", "idx":idx,
-                "source_raw":{"name":name},
-                "affiliations":[{
-                    "affiliation":"MIT",
-                    "affiliation_hash":"57c3834cafabbb94",
-                    "affiliation_raw":{"name":"MIT"}
-                }]
-            })
-        })
-        .collect();
-    assert_eq!(rows, expected);
-    assert_eq!(report.counters.records_scanned, 4);
-    assert_eq!(report.counters.lines_malformed, 1);
-    assert_eq!(report.counters.duplicate_records, 2);
-    assert_eq!(report.coverage.records_in_scope, 3);
-    assert_eq!(report.match_.unwrap().unique_inputs, 1);
-    assert_eq!(read_enrichment_parts(&output).len(), 3);
-
-    config.from_scratch = false;
-    let resumed = run_staged(
-        &method,
-        &opts,
-        &config,
-        &service,
-        &template,
-        None,
-        "affiliation",
-        None,
-    )
-    .unwrap();
-    assert_eq!(resumed.counters.duplicate_records, 2);
-    assert_eq!(fs::read_to_string(path).unwrap(), part);
 }

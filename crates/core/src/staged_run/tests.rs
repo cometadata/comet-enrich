@@ -12,8 +12,8 @@ use crate::{ENRICHMENTS_DIR, ENRICHMENTS_FAILED_FILE};
 use anyhow::Result;
 use async_trait::async_trait;
 use comet_enrich_test_support::{
-    assert_close, assert_err_contains, gz_input_fixture, gz_parts_fixture, read_enrichment_parts,
-    write_gz_lines,
+    INPUT_SUBDIR, assert_close, assert_err_contains, gz_input_fixture, gz_parts_fixture,
+    read_enrichment_parts, write_gz_lines,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -27,7 +27,7 @@ struct TestMethod {
     hash_bits: HashBits,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct TestExtraction {
     doi: String,
     name: String,
@@ -51,11 +51,14 @@ impl EnrichmentMethod for TestMethod {
         if doi.is_empty() || name.is_empty() {
             return Extracted::Skip("no_name");
         }
-        Extracted::Items(vec![TestExtraction {
+        let item = TestExtraction {
             doi: doi.to_owned(),
             name: name.to_owned(),
             name_hash: crate::dedup::hash_input(name, self.hash_bits),
-        }])
+        };
+        // A record flagged `duplicate` stands in for one whose items repeat.
+        let repeat = record.pointer("/attributes/duplicate") == Some(&json!(true));
+        Extracted::Items(vec![item; if repeat { 2 } else { 1 }])
     }
 
     fn inputs(&self, extraction: &Self::Extraction) -> Vec<String> {
@@ -272,6 +275,94 @@ fn read_output_dois(output: &Path) -> Vec<String> {
             rec["doi"].as_str().unwrap().to_owned()
         })
         .collect()
+}
+
+#[test]
+fn staged_runner_dedups_dois_and_enrichments_and_resumes_byte_identically() {
+    let dup = |updated: &str, name: &str| {
+        json!({"id": "10.1/dup", "attributes": {"updated": updated, "name": name}}).to_string()
+    };
+    let t = TestRun::new();
+    let lines = [
+        dup("2026-09-01T00:00:00Z", "NSF"),
+        String::new(),
+        "{invalid json".to_owned(),
+        dup("2026-09-02T00:00:00Z", "MIT"),
+        json!({"id": "10.1/twice", "attributes": {"duplicate": true, "name": "NSF"}}).to_string(),
+    ];
+    write_gz_lines(
+        &t.input.join(INPUT_SUBDIR).join("part_0000.jsonl.gz"),
+        &lines.iter().map(String::as_str).collect::<Vec<_>>(),
+    );
+
+    let report = t.run(true).unwrap();
+    assert_eq!(report.counters.records_scanned, 3);
+    assert_eq!(report.counters.lines_malformed, 1);
+    assert_eq!(report.counters.duplicate_records, 1);
+    assert_eq!(report.counters.duplicate_enrichments, 1);
+    assert_eq!(report.counters.emitted, 2);
+    // The duplicated item counts as a unit; the losing DOI occurrence does not.
+    assert_eq!(report.coverage.records_in_scope, 3);
+    assert_eq!(report.coverage.records_enriched, 2);
+
+    // The newer occurrence wins, and the repeated item emits once.
+    let recs = read_enrichment_parts(&t.output);
+    assert_eq!(recs.len(), 2);
+    let winner = recs.iter().find(|r| r["doi"] == "10.1/dup").unwrap();
+    assert_eq!(
+        winner["enrichedValue"]["funderIdentifier"],
+        "https://ror.org/042nb2s44"
+    );
+    assert_eq!(recs.iter().filter(|r| r["doi"] == "10.1/twice").count(), 1);
+
+    let part = t.work().join("extractions/part_0000.jsonl");
+    let extracted = fs::read_to_string(&part).unwrap();
+    let resumed = t.run(false).unwrap();
+    assert_eq!(resumed.counters.duplicate_records, 1);
+    assert_eq!(fs::read_to_string(&part).unwrap(), extracted);
+}
+
+#[test]
+fn newer_empty_record_suppresses_older_enrichable_occurrence() {
+    let records = [
+        json!({"id": "10.1/removed", "attributes": {
+            "updated": "2026-09-01T00:00:00Z", "name": "MIT"
+        }}),
+        json!({"id": "10.1/removed", "attributes": {
+            "updated": "2026-09-02T00:00:00Z"
+        }}),
+        json!({"id": "10.1/control", "attributes": {"name": "NSF"}}),
+    ];
+    let t = TestRun::from_fixture(gz_input_fixture(&records));
+
+    let report = t.run(true).unwrap();
+    assert_eq!(report.counters.records_scanned, 3);
+    assert_eq!(report.counters.duplicate_records, 1);
+    assert_eq!(report.counters.skipped.get("no_name"), Some(&1));
+    assert_eq!(report.counters.emitted, 1);
+    assert_eq!(report.counters.duplicate_enrichments, 0);
+    assert_eq!(report.coverage.records_in_scope, 1);
+    assert_eq!(report.coverage.records_enriched, 1);
+    let matches = report.match_.expect("match block present");
+    assert_eq!(matches.unique_inputs, 1);
+    assert_eq!(matches.matched, 1);
+
+    // Selecting the newer empty record must discard the older record's data.
+    let part = fs::read_to_string(t.work().join("extractions/part_0000.jsonl")).unwrap();
+    let extractions: Vec<TestExtraction> = part
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(extractions.len(), 1);
+    assert_eq!(extractions[0].doi, "10.1/control");
+
+    let recs = read_enrichment_parts(&t.output);
+    assert_eq!(recs.len(), 1);
+    assert_eq!(recs[0]["doi"], "10.1/control");
+    assert_eq!(
+        recs[0]["enrichedValue"]["funderIdentifier"],
+        "https://ror.org/021nxhr62"
+    );
 }
 
 #[test]

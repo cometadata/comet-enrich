@@ -93,6 +93,10 @@ fn reclassifier_matches_golden_outcomes() {
     assert_eq!(stats.records_scanned, 12);
     assert_eq!(stats.lines_malformed, 0);
     assert_eq!(stats.emitted, 9);
+    // The fixture has no repeated DOIs, and the method emits at most one
+    // enrichment per record, so duplicates cannot occur.
+    assert_eq!(stats.duplicate_records, 0);
+    assert_eq!(stats.duplicate_enrichments, 0);
     assert_eq!(stats.schema_failures, 0);
     assert_eq!(stats.skipped.get("not_in_scope"), Some(&1));
     assert_eq!(stats.skipped.get("redundant"), Some(&1));

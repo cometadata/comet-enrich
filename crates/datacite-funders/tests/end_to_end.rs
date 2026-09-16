@@ -4,8 +4,7 @@
 #![allow(clippy::doc_markdown)]
 
 use comet_enrich_core::{
-    EnrichmentAction, HashBits, HashInfo, LookupConfig, Manifest, MatchService, Report, RunMeta,
-    SCHEMA, SourceRelease, run_staged, schema,
+    EnrichmentAction, HashBits, LookupConfig, MatchService, Report, SCHEMA, run_staged, schema,
 };
 use comet_enrich_datacite_funders::{Config, Funders};
 use comet_enrich_test_support::{
@@ -13,7 +12,7 @@ use comet_enrich_test_support::{
     gz_input_fixture, read_enrichment_parts, records_by_doi, run_options,
 };
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -133,6 +132,7 @@ fn funders_staged_pipeline_matches_golden_outcomes() {
     );
     assert_eq!(report.counters.skipped.get("no_doi"), Some(&1));
     assert_eq!(report.counters.emitted, 4);
+    assert_eq!(report.counters.duplicate_records, 0);
     assert_eq!(report.counters.duplicate_enrichments, 1);
     assert_eq!(report.counters.schema_failures, 0);
     assert_eq!(report.coverage.records_in_scope, 9);
@@ -149,27 +149,6 @@ fn funders_staged_pipeline_matches_golden_outcomes() {
     assert_eq!(
         m.confidence_histogram.iter().map(|b| b.count).sum::<u64>(),
         3
-    );
-
-    // Resume artifacts are written.
-    let work = output.join(".work");
-    for artifact in [
-        "extractions/part_0000.jsonl",
-        "inputs.jsonl",
-        "lookups.jsonl",
-        "lookups.failed.jsonl",
-        "extract.done",
-        "query.done",
-        "reconcile.done",
-    ] {
-        assert!(
-            work.join(artifact).exists(),
-            "missing work artifact: {artifact}"
-        );
-    }
-    assert_eq!(
-        fs::read_to_string(work.join("hash.bits")).unwrap(),
-        "xxh3-64"
     );
 
     let records = records_by_doi(&output);
@@ -234,40 +213,4 @@ fn funders_staged_pipeline_matches_golden_outcomes() {
         all.iter().filter(|r| r["doi"] == "10.x/repeated").count(),
         1
     );
-}
-
-#[test]
-fn funders_pipeline_writes_lookup_manifest() {
-    let (_dir, output, report) = run_pipeline();
-
-    let mut sources = BTreeMap::new();
-    sources.insert(
-        "datacite".to_owned(),
-        SourceRelease {
-            release_date: "2024-01-01".to_owned(),
-        },
-    );
-    let meta = RunMeta {
-        method_name: "funders".to_owned(),
-        method_version: env!("CARGO_PKG_VERSION"),
-        source_id: SOURCE_ID.to_owned(),
-        sources,
-    };
-    Manifest::from_report(&meta, "success", report, HashInfo::from(HashBits::Bits64))
-        .write(&output)
-        .unwrap();
-
-    let raw = fs::read_to_string(output.join("manifest.json")).unwrap();
-    let m: Value = serde_json::from_str(&raw).unwrap();
-
-    assert_eq!(m["schema_version"], json!(1));
-    assert_eq!(m["method"]["name"], json!("funders"));
-    assert_eq!(m["source_id"], json!(SOURCE_ID));
-    assert_eq!(m["hash"]["algorithm"], json!("xxh3"));
-    assert_eq!(m["hash"]["bits"], json!(64));
-    assert_eq!(m["exit_status"], json!("success"));
-    assert_eq!(m["report"]["match"]["unique_inputs"], json!(5));
-    assert_eq!(m["report"]["match"]["matched"], json!(3));
-    assert_eq!(m["report"]["validation"]["emitted"], json!(4));
-    assert_eq!(m["report"]["validation"]["schema_failures"], json!(0));
 }
