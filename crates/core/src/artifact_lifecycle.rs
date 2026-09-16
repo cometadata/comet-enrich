@@ -5,7 +5,7 @@ use crate::writer::{ENRICHMENTS_DIR, ENRICHMENTS_FAILED_FILE};
 use anyhow::{Context, Result, bail};
 use std::fs;
 use std::io::ErrorKind;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// Clear public outputs from a previous run.
 pub(crate) fn clear_run_outputs(output: &Path) -> Result<()> {
@@ -44,13 +44,14 @@ pub(crate) fn recreate_dir(path: &Path) -> Result<()> {
 /// Every run clears its output before reading its inputs, so an output that
 /// aliases an input would destroy the data about to be read. Paths are compared
 /// in canonical form so symlinks and `..` segments cannot hide an overlap. Each
-/// input must exist; `output` need not, in which case its nearest existing
-/// ancestor is canonicalized and the remainder re-appended.
+/// input must exist; `output` need not, in which case symlinks and `..` are
+/// still resolved through its non-existent tail.
 ///
 /// `inputs` pairs each path with its CLI flag name (without the leading dashes)
 /// so the error names both sides, e.g. `--output overlaps --new`.
 pub(crate) fn ensure_disjoint(output: &Path, inputs: &[(&str, &Path)]) -> Result<()> {
-    let output_canon = canonicalize_lenient(output)?;
+    let output_canon = soft_canonicalize::soft_canonicalize(output)
+        .with_context(|| format!("resolving --output {}", output.display()))?;
     let mut inputs_canon = Vec::with_capacity(inputs.len());
     for (label, path) in inputs {
         let canon = fs::canonicalize(path)
@@ -75,40 +76,6 @@ pub(crate) fn ensure_disjoint(output: &Path, inputs: &[(&str, &Path)]) -> Result
         }
     }
     Ok(())
-}
-
-/// Canonicalize `path`, tolerating a tail that does not exist yet.
-///
-/// The longest existing ancestor is canonicalized and the missing remainder is
-/// appended unchanged.
-fn canonicalize_lenient(path: &Path) -> Result<PathBuf> {
-    let mut existing = path;
-    let mut remainder = Vec::new();
-    loop {
-        match fs::canonicalize(existing) {
-            Ok(canon) => {
-                let mut out = canon;
-                for part in remainder.iter().rev() {
-                    out.push(part);
-                }
-                return Ok(out);
-            }
-            Err(e) if e.kind() == ErrorKind::NotFound => {
-                let name = existing
-                    .file_name()
-                    .with_context(|| format!("resolving {}", path.display()))?;
-                remainder.push(name.to_owned());
-                existing = match existing.parent() {
-                    Some(parent) if !parent.as_os_str().is_empty() => parent,
-                    // A bare relative name resolves against the current directory.
-                    _ => Path::new("."),
-                };
-            }
-            Err(e) => {
-                return Err(e).with_context(|| format!("resolving {}", path.display()));
-            }
-        }
-    }
 }
 
 /// Publish a marker file via temporary file and rename. The body is the crate
@@ -213,6 +180,18 @@ mod tests {
         std::os::unix::fs::symlink(&a, &link).unwrap();
         // The output does not exist yet; only its symlinked parent does.
         let out = link.join("out");
+
+        assert_err_contains(
+            ensure_disjoint(&out, &[("old", &a), ("new", &b)]),
+            "--output overlaps --old",
+        );
+    }
+
+    #[test]
+    fn ensure_disjoint_resolves_dotdot_in_a_missing_output_tail() {
+        let (_root, a, b) = inputs();
+        // "a/missing/.." resolves back to "a" even though "missing" does not exist.
+        let out = a.join("missing").join("..");
 
         assert_err_contains(
             ensure_disjoint(&out, &[("old", &a), ("new", &b)]),
