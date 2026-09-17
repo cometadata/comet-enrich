@@ -83,7 +83,7 @@ Methods return only the value part of the enrichment. Core adds the `sourceId` a
 
 ## DOI deduplication
 
-Before extraction, records are de-duplicated to guard against multiple records written with 
+Before extraction, records are de-duplicated to guard against multiple records written with
 different updated dates (which could have differing metadata), and also exact copies of records.
 The DataCite files are scanned with the DOI and `attributes.updated` parsed and tracking the file
 index and line number. For each DOI, the record with the latest timestamp is kept. When timestamps
@@ -95,7 +95,7 @@ line numbers are recorded and skipped during extraction.
 Even when records are de-duplicated, enrichment methods can produce duplicate enrichments when
 repeated items within a list are enriched, such as two identical funding references or
 two creators with the same name and affiliations. Each repeat produces an enrichment record
-with the same `key` and sane `enrichedValue`. Before enrichments are written, duplicates are 
+with the same `key` and sane `enrichedValue`. Before enrichments are written, duplicates are
 removed for each DOI. If an enrichment has the same `key` and sane `enrichedValue` as one already
 accepted for that DOI, it is skipped. If the same `key` has a different `enrichedValue`, the run fails
 because the conflicting results indicate a possible logic error.
@@ -158,7 +158,7 @@ flowchart TD
 
 ### Resume and safety
 
-Each completed stage writes a marker: `extract.done`, `query.done`, or `reconcile.done`. The 
+Each completed stage writes a marker: `extract.done`, `query.done`, or `reconcile.done`. The
 comet-enrich version that completed the stage is written into the marker from version 0.4 onwards.
 A later run in the same output directory starts at the first missing marker. If a stage was written
 by a different version, a warning is logged. If a stage needs to run, it is rerun from the beginning.
@@ -270,7 +270,7 @@ records labeled with one of the three events:
 - `retracted`: the key appears only in the old run.
 - `superseded`: the key appears in both runs, but its `enrichedValue` has changed.
 
-Unchanged enrichments produce no output. 
+Unchanged enrichments produce no output.
 See [commands/diff.md](commands/diff.md) for command usage and output details.
 
 The diff command makes three passes. First, it reads the old run and stores each key alongside
