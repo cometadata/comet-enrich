@@ -2,14 +2,14 @@
 //!
 //! Both sides are read from `<dir>/enrichments/*.jsonl.gz`; `<dir>/manifest.json`
 //! supplies the method name and exit status. Both must be complete runs written
-//! by a current comet-enrich: every record carries its identity `key`, and no
-//! key appears twice on one side.
+//! by a current comet-enrich: every record carries an enrichment content `key`,
+//! and no content key appears twice on one side.
 //!
 //! Three passes: index the old side, stream the new side emitting `asserted`
 //! and `superseded`, then re-read the old side emitting `retracted`. Each
-//! index holds a key hash and a value hash per record. A missing key, a
-//! repeated key, a malformed line, or a side that is not a successful run
-//! fails the diff.
+//! index holds a content key and a canonical `enrichedValue` hash per record.
+//! A missing key, a repeated key, a malformed line, or a side that is not a
+//! successful run fails the diff.
 
 use crate::artifact_lifecycle as lifecycle;
 use crate::fanout::{FileError, list_jsonl_gz, open_gz, scan_jsonl_records};
@@ -78,7 +78,7 @@ pub struct DiffOutcome {
     pub new_manifest: SideManifest,
 }
 
-/// Key hash to value hash for one side.
+/// Content key to canonical `enrichedValue` hash for one side.
 type Index = HashMap<u128, u128>;
 
 fn read_side_manifest(dir: &Path) -> Result<SideManifest> {
@@ -180,7 +180,7 @@ fn event_record(mut rec: Value, event: DiffEvent) -> Value {
 }
 
 /// Record `rec` in `index`, failing if its key was already seen on this side.
-/// Returns the key hash and the `enrichedValue` hash.
+/// Returns the content key and the canonical `enrichedValue` hash.
 fn insert_unique(index: &mut Index, rec: &Value, side: &str, path: &Path) -> Result<(u128, u128)> {
     let key = embedded_key(rec).with_context(|| format!("in the {side} release"))?;
     let value = enriched_value_hash(rec);

@@ -1,6 +1,6 @@
-//! Identity keys and duplicate detection for enrichment records.
+//! Enrichment content keys and duplicate detection for enrichment records.
 //!
-//! See `docs/architecture.md`, sections "Identity keys" and "Duplicate enrichments".
+//! See `docs/architecture.md`, sections "Enrichment content keys" and "Duplicate enrichments".
 
 use crate::method::EnrichmentAction;
 use anyhow::{Context, Result, bail};
@@ -21,9 +21,12 @@ pub(crate) fn canonical_bytes<T: Serialize>(value: &T) -> Vec<u8> {
     serde_json_canonicalizer::to_vec(value).expect("JCS serialization of a JSON value")
 }
 
-/// Identity key for one enrichment record: 32 lowercase hexadecimal characters.
+/// Enrichment content key, encoded as 32 lowercase hexadecimal characters.
+///
+/// Scoped by method, DOI, field, and action. Uses the original value for
+/// updates and deletions, and the enriched value for inserts.
 #[must_use]
-pub fn enrichment_key(
+pub fn enrichment_content_key(
     method: &str,
     doi: &str,
     field: &str,
@@ -42,7 +45,7 @@ pub fn enrichment_key(
     format!("{:032x}", xxh3_128(&canonical_bytes(&input)))
 }
 
-/// The record's embedded `key`, parsed from its 32 hex chars.
+/// The record's embedded content `key`, parsed from its 32 hex chars.
 ///
 /// # Errors
 ///
@@ -66,7 +69,7 @@ pub(crate) fn enriched_value_hash(rec: &Value) -> u128 {
     xxh3_128(&canonical_bytes(ev))
 }
 
-/// Tracks enrichment keys and values accepted for the current DOI.
+/// Tracks content keys and enriched values accepted for the current DOI.
 ///
 /// DOI deduplication leaves one source record per DOI. Each worker processes
 /// that record's enrichments consecutively, including all its extraction rows
@@ -178,8 +181,8 @@ mod tests {
 
     /// Existing inputs must continue to produce the same keys.
     #[test]
-    fn enrichment_key_golden_value_is_frozen() {
-        let key = enrichment_key(
+    fn enrichment_content_key_golden_value_is_frozen() {
+        let key = enrichment_content_key(
             "funders",
             "10.5281/zenodo.123",
             "fundingReferences",
@@ -245,7 +248,7 @@ mod tests {
     }
 
     fn key(action: EnrichmentAction, original: &serde_json::Value) -> String {
-        enrichment_key(
+        enrichment_content_key(
             "funders",
             "10.5281/zenodo.123",
             "fundingReferences",
@@ -283,7 +286,7 @@ mod tests {
         let base = key(EnrichmentAction::UpdateChild, &json!({"funderName": "nsf"}));
         let other_original = key(EnrichmentAction::UpdateChild, &json!({"funderName": "nih"}));
         let other_action = key(EnrichmentAction::DeleteChild, &json!({"funderName": "nsf"}));
-        let other_method = enrichment_key(
+        let other_method = enrichment_content_key(
             "affiliations",
             "10.5281/zenodo.123",
             "fundingReferences",
@@ -291,7 +294,7 @@ mod tests {
             &json!({"funderName": "nsf"}),
             &json!({"funderName": "NSF"}),
         );
-        let other_doi = enrichment_key(
+        let other_doi = enrichment_content_key(
             "funders",
             "10.5281/zenodo.999",
             "fundingReferences",
@@ -306,7 +309,7 @@ mod tests {
 
     #[test]
     fn update_key_ignores_the_enriched_value() {
-        let a = enrichment_key(
+        let a = enrichment_content_key(
             "resource-type-general",
             "10.1/x",
             "types",
@@ -314,7 +317,7 @@ mod tests {
             &json!({"resourceTypeGeneral": "Text"}),
             &json!({"resourceTypeGeneral": "Dataset"}),
         );
-        let b = enrichment_key(
+        let b = enrichment_content_key(
             "resource-type-general",
             "10.1/x",
             "types",
@@ -335,7 +338,7 @@ mod tests {
         for (i, (method, doi, field, action, original, enriched)) in
             golden_inputs().iter().enumerate()
         {
-            let k = enrichment_key(method, doi, field, *action, original, enriched);
+            let k = enrichment_content_key(method, doi, field, *action, original, enriched);
             println!("vector {i}: \"{k}\"");
         }
     }
@@ -408,7 +411,7 @@ mod tests {
             golden_inputs().iter().zip(expected)
         {
             assert_eq!(
-                enrichment_key(method, doi, field, *action, original, enriched),
+                enrichment_content_key(method, doi, field, *action, original, enriched),
                 want
             );
         }
@@ -416,7 +419,7 @@ mod tests {
 
     #[test]
     fn insert_key_uses_the_enriched_value() {
-        let a = enrichment_key(
+        let a = enrichment_content_key(
             "funders",
             "10.1/x",
             "fundingReferences",
@@ -424,7 +427,7 @@ mod tests {
             &serde_json::Value::Null,
             &json!({"funderName": "NSF"}),
         );
-        let b = enrichment_key(
+        let b = enrichment_content_key(
             "funders",
             "10.1/x",
             "fundingReferences",

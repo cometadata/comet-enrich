@@ -31,7 +31,8 @@ pub struct RunStats {
     pub lines_malformed: u64,
     /// Source occurrences dropped by DOI deduplication.
     pub duplicate_records: u64,
-    /// Enrichment records dropped because their key repeated within one source record.
+    /// Enrichment records dropped because their content key and canonical enriched value
+    /// repeated within one source record.
     pub duplicate_enrichments: u64,
     pub emitted: u64,
     pub schema_failures: u64,

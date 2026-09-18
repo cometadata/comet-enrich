@@ -77,9 +77,9 @@ An enrichment change contains an action (`update`, `updateChild`, `insert`, or `
 DataCite field to update, and the original and enriched values. The field is set on each output
 record; this matters for `affiliations`, which can update either `creators` or `contributors`.
 
-Methods return only the value part of the enrichment. Core adds the `sourceId` and the identity
-`key`, validates the complete record, and writes it. Each method also exposes a frozen `name()`
-(`funders`, `affiliations`, `resource-type-general`) that is hashed into every key.
+Methods return only the value part of the enrichment. Core adds the `sourceId` and enrichment
+content `key`, validates the complete record, and writes it. Each method also exposes a frozen
+`name()` (`funders`, `affiliations`, `resource-type-general`) that is hashed into every content key.
 
 ## DOI deduplication
 
@@ -95,10 +95,11 @@ line numbers are recorded and skipped during extraction.
 Even when records are de-duplicated, enrichment methods can produce duplicate enrichments when
 repeated items within a list are enriched, such as two identical funding references or
 two creators with the same name and affiliations. Each repeat produces an enrichment record
-with the same `key` and sane `enrichedValue`. Before enrichments are written, duplicates are
-removed for each DOI. If an enrichment has the same `key` and sane `enrichedValue` as one already
-accepted for that DOI, it is skipped. If the same `key` has a different `enrichedValue`, the run fails
-because the conflicting results indicate a possible logic error.
+with the same content `key` and canonical `enrichedValue`. Before enrichments are written,
+duplicates are removed for each DOI. If an enrichment has the same content key and canonical
+`enrichedValue` as one already accepted for that DOI, it is skipped. If the same content key has
+a different canonical `enrichedValue`, the run fails because the conflicting results indicate
+a possible logic error.
 
 ## Transform path
 
@@ -242,41 +243,43 @@ Every record carries a `sourceId` identifying the enrichment project that produc
 It is provided via the `--source-id` command-line argument and is copied into each record.
 The value must be a DOI name, such as `10.1234/example`, and is stored in ASCII lowercase.
 
-## Identity keys
+## Enrichment content keys
 
-Every enrichment record carries a `key`, generated as
-`xxh3_128(JCS([method, doi, field, action, value]))` and stored as 32 lowercase
-hex characters.
+Every enrichment record carries an enrichment content key in its `key` field. This identifies
+the content being enriched, scoped by method, DOI, field, and action.
+
+The content key is generated as `xxh3_128(JCS([method, doi, field, action, value]))` and stored
+as 32 lowercase hex characters.
 
 `xxh3_128` is a fast, non-cryptographic hash function that produces a 128-bit hash. `JCS`
 produces canonical JSON according to RFC 8785, so differences such as object property
-order do not affect the key.
+order do not affect the content key.
 
-`method` is the method name, and value is `originalValue`. For an `insert` action, `value` is
-`enrichedValue`, so different values inserted into the same field have different keys.
+`method` is the method name. For updates and deletions, `value` is `originalValue`. For an
+`insert` action, `value` is `enrichedValue`, so different values inserted into the same field
+have different content keys.
 
-The `key` identifies the question enrichment answers, not the answer itself: two runs that give
-different answers to the same question shared the same key, allowing the diff to detect when
-and enrichment has been `superseded`. For example, if a new ROR release causes the same affiliation
-string to produce a different ROR match, the `key` would stay the same while the `enrichedValue`
-changes.
+For updates, changing only `enrichedValue` preserves the content key, allowing the diff to
+report the enrichment as `superseded`. For example, if the original creator or contributor
+object is unchanged, a new ROR match changes `enrichedValue` while preserving the content key.
+Changing an inserted value changes its content key, producing a retraction and an assertion.
 
 ## Diff
 
 `comet-enrich diff` compares two successful runs of the same method and writes enrichment
 records labeled with one of the three events:
 
-- `asserted`: the key appears only in the new run.
-- `retracted`: the key appears only in the old run.
-- `superseded`: the key appears in both runs, but its `enrichedValue` has changed.
+- `asserted`: the content key appears only in the new run.
+- `retracted`: the content key appears only in the old run.
+- `superseded`: the content key appears in both runs, but its `enrichedValue` has changed.
 
 Unchanged enrichments produce no output.
 See [commands/diff.md](commands/diff.md) for command usage and output details.
 
-The diff command makes three passes. First, it reads the old run and stores each key alongside
-a dash of its `enrichedValue` in memory. Next, it reads the new run, builds a similar index,
-and writes `asserted` and `superseded` events by comparing against the old index. Finally,
-it reads the old run again and writes `retracted` events for keys absent from the new index.
+The diff command makes three passes. First, it reads the old run and stores each content key
+alongside a hash of its canonical `enrichedValue` in memory. Next, it reads the new run, builds
+a similar index, and writes `asserted` and `superseded` events by comparing against the old index. Finally,
+it reads the old run again and writes `retracted` events for content keys absent from the new index.
 
 ## Manifest and status
 

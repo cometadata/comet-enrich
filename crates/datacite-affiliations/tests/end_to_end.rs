@@ -8,7 +8,7 @@ use comet_enrich_core::{
 };
 use comet_enrich_datacite_affiliations::Affiliations;
 use comet_enrich_test_support::{
-    FakeMatchService, SOURCE_ID, assert_close, assert_record_key, enrichment_template,
+    FakeMatchService, SOURCE_ID, assert_close, assert_content_key, enrichment_template,
     gz_input_fixture, read_enrichment_parts, records_by_doi, run_options,
 };
 use serde_json::{Value, json};
@@ -153,7 +153,7 @@ fn affiliations_staged_pipeline_matches_golden_outcomes() {
     let records = records_by_doi(&output);
     assert_eq!(records.len(), 4);
     for rec in records.values() {
-        assert_record_key(rec, "affiliations", EnrichmentAction::UpdateChild);
+        assert_content_key(rec, "affiliations", EnrichmentAction::UpdateChild);
     }
     assert!(!records.contains_key("10.x/existing-only"));
     assert!(!records.contains_key("10.x/unmatched"));

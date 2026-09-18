@@ -39,7 +39,8 @@ Run `comet-enrich diff --help` for the full option list.
 
 ## Output
 
-The diff writes one event per changed key:
+The diff matches enrichments by their content key (`key`) and writes an event when an
+enrichment is added, removed, or its enriched value changes:
 
 | Event        | Meaning                              | Consumer action        |
 |--------------|--------------------------------------|------------------------|
@@ -48,6 +49,11 @@ The diff writes one event per changed key:
 | `superseded` | Same key, different `enrichedValue`. | Replace it in place.   |
 
 Unchanged enrichments produce no events. Changes to `sourceId` alone do not produce events.
+
+For updates, changing only `enrichedValue` preserves the content key and produces a
+`superseded` event. Inserts use `enrichedValue` to derive their content key, so changing
+an inserted value produces a `retracted` event for the old key and an `asserted` event
+for the new key.
 
 ```text
 <output>/

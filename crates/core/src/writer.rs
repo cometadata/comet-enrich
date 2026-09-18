@@ -262,7 +262,7 @@ impl<'a> ParallelRollingWriter<'a> {
 }
 
 /// Accumulates records and flushes them in batches, dropping a record whose
-/// key already went through for the same DOI.
+/// content key and canonical `enrichedValue` were already accepted for the same DOI.
 ///
 /// One batcher serves one worker's input file or extraction part; see
 /// [`KeyWindow`] for the full set of guarantees the dedup relies on.
@@ -287,7 +287,8 @@ impl<'w, 'v> RecordBatcher<'w, 'v> {
     }
 
     /// Add one record, flushing the batch when it reaches capacity. A repeat of
-    /// a key already pushed for the same DOI is counted and not written.
+    /// a content key with the same canonical `enrichedValue` for the same DOI
+    /// is counted and not written.
     ///
     /// # Errors
     ///

@@ -234,7 +234,7 @@ fn warn_source_id_restamp(recorded: &str, requested: &str) {
 
 /// Warn for every reused stage whose marker was written by a different crate
 /// version. Artifacts from an older build may predate DOI deduplication or
-/// record keys, so the run continues but the output may not be diffable.
+/// enrichment content keys, so the run continues but the output may not be diffable.
 fn warn_stage_version_mismatch(wd: &WorkDir, running: &[Stage]) {
     let current = env!("CARGO_PKG_VERSION");
     for stage in Stage::ALL {

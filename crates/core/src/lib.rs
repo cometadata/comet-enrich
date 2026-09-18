@@ -31,7 +31,7 @@ pub use dedup::{DedupStore, HashBits, hash_input};
 pub use diff::{DiffManifest, DiffOptions, DiffOutcome, DiffStats, run_diff};
 pub use doi_dedup::{DoiOccurrence, FileScan, Occurrence, scan_doi_occurrences, winner};
 pub use fanout::{input_files, make_pool};
-pub use key::enrichment_key;
+pub use key::enrichment_content_key;
 pub use manifest::{
     EXIT_PARTIAL, EXIT_SUCCESS, HashInfo, Manifest, Report, RunMeta, SourceRelease, StageTimings,
     exit_status,

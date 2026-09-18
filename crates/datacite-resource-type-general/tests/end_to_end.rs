@@ -13,7 +13,7 @@ use comet_enrich_core::{
 };
 use comet_enrich_datacite_resource_type_general::{Config, ResourceTypeGeneral};
 use comet_enrich_test_support::{
-    SOURCE_ID, assert_close, assert_record_key, config_path, enrichment_template,
+    SOURCE_ID, assert_close, assert_content_key, config_path, enrichment_template,
     read_enrichment_parts, run_options, write_gz_lines,
 };
 use serde_json::{Value, json};
@@ -110,7 +110,7 @@ fn reclassifier_matches_golden_outcomes() {
         assert_eq!(rec["field"], json!("types"));
         assert_eq!(rec["action"], json!("update"));
         assert_eq!(rec["sourceId"], json!(SOURCE_ID));
-        assert_record_key(rec, "resource-type-general", EnrichmentAction::Update);
+        assert_content_key(rec, "resource-type-general", EnrichmentAction::Update);
         let doi = rec["doi"].as_str().unwrap().to_string();
         let rtg = rec["enrichedValue"]["resourceTypeGeneral"]
             .as_str()

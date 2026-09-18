@@ -45,8 +45,8 @@ impl EnrichmentTemplate {
 
 /// Build one enrichment record.
 ///
-/// The method name is hashed into the record's identity key, so it must be the
-/// stable name from [`crate::method::EnrichmentMethod::name`]. Key order is
+/// The method name is hashed into the enrichment content key, so it must be the
+/// stable name from [`crate::method::EnrichmentMethod::name`]. JSON property order is
 /// fixed and covered by tests.
 #[must_use]
 pub fn build_enrichment_record(
@@ -54,7 +54,7 @@ pub fn build_enrichment_record(
     method_name: &str,
     parts: EnrichmentParts,
 ) -> Value {
-    let key = crate::key::enrichment_key(
+    let key = crate::key::enrichment_content_key(
         method_name,
         &parts.doi,
         parts.field,
@@ -176,7 +176,7 @@ mod tests {
             "test-method",
             parts(original.clone(), enriched.clone()),
         );
-        let want = crate::key::enrichment_key(
+        let want = crate::key::enrichment_content_key(
             "test-method",
             "10.5281/x",
             "types",

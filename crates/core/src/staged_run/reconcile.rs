@@ -25,7 +25,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub(super) struct ReconcileStats {
     pub(super) emitted: u64,
     pub(super) schema_failures: u64,
-    /// Records dropped because their key repeated within one source record.
+    /// Records dropped because their content key and canonical enriched value
+    /// repeated within one source record.
     /// Absent from sidecars written before this counter existed.
     #[serde(default)]
     pub(super) duplicate_enrichments: u64,

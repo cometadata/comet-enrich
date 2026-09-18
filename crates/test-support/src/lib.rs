@@ -4,7 +4,7 @@
 #![allow(clippy::doc_markdown)]
 
 pub use comet_enrich_core::FakeMatchService;
-use comet_enrich_core::{EnrichmentAction, EnrichmentTemplate, RunOptions, enrichment_key};
+use comet_enrich_core::{EnrichmentAction, EnrichmentTemplate, RunOptions, enrichment_content_key};
 
 use std::collections::HashMap;
 use std::fs::{self, File};
@@ -49,7 +49,7 @@ pub fn keyed_record(
     original: &Value,
     enriched: &Value,
 ) -> Value {
-    let key = enrichment_key(method, doi, field, action, original, enriched);
+    let key = enrichment_content_key(method, doi, field, action, original, enriched);
     json!({
         "doi": doi,
         "action": action.as_str(),
@@ -194,10 +194,10 @@ pub fn records_by_doi(output: &Path) -> HashMap<String, Value> {
     by_doi
 }
 
-/// Assert a record's `key` is the frozen identity key for `method` and `action`.
+/// Assert a record's `key` is the expected enrichment content key for `method` and `action`.
 #[track_caller]
-pub fn assert_record_key(rec: &Value, method: &str, action: EnrichmentAction) {
-    let want = enrichment_key(
+pub fn assert_content_key(rec: &Value, method: &str, action: EnrichmentAction) {
+    let want = enrichment_content_key(
         method,
         rec["doi"].as_str().unwrap(),
         rec["field"].as_str().unwrap(),
