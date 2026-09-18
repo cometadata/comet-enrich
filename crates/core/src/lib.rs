@@ -11,12 +11,16 @@
 mod artifact_lifecycle;
 pub mod datacite;
 pub mod dedup;
+pub mod diff;
+pub mod doi_dedup;
 mod fanout;
 pub mod identifiers;
+pub mod key;
 pub mod manifest;
 pub mod match_service;
 pub mod method;
 pub mod options;
+pub mod progress;
 pub mod schema;
 pub mod staged_run;
 pub mod template;
@@ -24,7 +28,14 @@ pub mod transform;
 pub mod writer;
 
 pub use dedup::{DedupStore, HashBits, hash_input};
-pub use manifest::{HashInfo, Manifest, Report, RunMeta, SourceRelease, StageTimings, exit_status};
+pub use diff::{DiffManifest, DiffOptions, DiffOutcome, DiffStats, run_diff};
+pub use doi_dedup::{DoiOccurrence, FileScan, Occurrence, scan_doi_occurrences, winner};
+pub use fanout::{input_files, make_pool};
+pub use key::enrichment_content_key;
+pub use manifest::{
+    EXIT_PARTIAL, EXIT_SUCCESS, HashInfo, Manifest, Report, RunMeta, SourceRelease, StageTimings,
+    exit_status,
+};
 #[cfg(any(test, feature = "test-support"))]
 pub use match_service::FakeMatchService;
 pub use match_service::{
@@ -33,6 +44,7 @@ pub use match_service::{
 };
 pub use method::{EnrichmentAction, EnrichmentMethod, EnrichmentParts, Extracted, Lookups};
 pub use options::{RunOptions, RunStats};
+pub use progress::Progress;
 pub use schema::SCHEMA;
 pub use staged_run::{LookupConfig, Stage, WorkDir, pipeline_complete, run_staged, stages_to_run};
 pub use template::{EnrichmentTemplate, build_enrichment_record};

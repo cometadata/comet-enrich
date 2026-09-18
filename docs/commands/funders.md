@@ -37,16 +37,16 @@ comet-enrich funders \
 
 In addition to the [global options](../usage.md#global-options):
 
-| Option                    | Default                 | Description                                                                                |
-|---------------------------|-------------------------|--------------------------------------------------------------------------------------------|
-| `--ror-service-url <URL>` | `http://localhost:8000` | Base URL of the ROR match service / Marple                                                 |
-| `--ror-file <FILE>`       | _required_              | ROR registry JSON for Crossref Funder ID checks                                             |
-| `--ror-batch-size <N>`    | `50`                    | Inputs per ROR match-service bulk request                                                  |
-| `--ror-concurrency <N>`   | `50`                    | Concurrent ROR match-service requests                                                      |
-| `--ror-timeout <SECS>`    | `30`                    | ROR match-service request timeout in seconds                                               |
-| `--hash-bits <N>`         | `64`                    | Dedup hash width (`64` or `128`)                                                          |
-| `--from-scratch`          | off                     | Ignore existing stage outputs in `.work` and rerun all stages                             |
-| `--stage <STAGE>`         | all stages              | Run a single stage: `extract`, `query`, or `reconcile`                                    |
+| Option                    | Default                 | Description                                                     |
+|---------------------------|-------------------------|-----------------------------------------------------------------|
+| `--ror-service-url <URL>` | `http://localhost:8000` | Base URL of the ROR match service / Marple                      |
+| `--ror-file <FILE>`       | _required_              | ROR registry JSON for Crossref Funder ID checks                 |
+| `--ror-batch-size <N>`    | `50`                    | Inputs per ROR match-service bulk request                       |
+| `--ror-concurrency <N>`   | `50`                    | Concurrent ROR match-service requests                           |
+| `--ror-timeout <SECS>`    | `30`                    | ROR match-service request timeout in seconds                    |
+| `--hash-bits <N>`         | `64`                    | Dedup hash width (`64` or `128`)                                |
+| `--from-scratch`          | off                     | Ignore existing stage outputs in `.work` and rerun all stages   |
+| `--stage <STAGE>`         | all stages              | Run a single stage: `extract`, `query`, or `reconcile`          |
 
 ## Stages
 

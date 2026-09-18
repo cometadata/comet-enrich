@@ -122,14 +122,15 @@ where
         stages.push(Stage::Reconcile);
     }
 
-    // A re-stamp rebuilds the output from the existing work artifacts without
-    // re-reading the corpus, so it may proceed when the input directory has
-    // been deleted or rotated away. A corpus that is present must still match
-    // the fingerprint: reconcile would otherwise rebuild from the extractions
-    // of a different snapshot and the manifest would describe data the run
-    // never read. Only a missing path counts as absent; a path that cannot be
-    // inspected, such as one without read permission, is an error.
-    let restamp_without_corpus = restamp_from.is_some()
+    // A re-stamp or a standalone stage rebuilds from the existing work
+    // artifacts without re-reading the corpus, so it may proceed when the
+    // input directory has been deleted or rotated away. A corpus that is
+    // present must still match the fingerprint on a re-stamp: reconcile would
+    // otherwise rebuild from the extractions of a different snapshot and the
+    // manifest would describe data the run never read. Only a missing path
+    // counts as absent; a path that cannot be inspected, such as one without
+    // read permission, is an error.
+    let input_absent = (restamp_from.is_some() || only_stage.is_some())
         && !io
             .input
             .try_exists()
@@ -139,10 +140,16 @@ where
     // input path cannot destroy a previous run's outputs.
     if stages.contains(&Stage::Extract) {
         input_files(&io.input)?;
-    } else if only_stage.is_none() && !restamp_without_corpus {
+    } else if only_stage.is_none() && !input_absent {
         // When extract is skipped, verify the input still matches the saved
         // fingerprint. Single-stage runs only use existing work artifacts.
         fingerprint::validate_input_fingerprint(work_path, &io.input)?;
+    }
+
+    // Only check overlap while the input still exists; a missing input cannot
+    // be destroyed by clearing the output.
+    if !input_absent {
+        lifecycle::ensure_disjoint(&io.output, &[("input", &io.input)])?;
     }
 
     if cfg.from_scratch {
@@ -162,6 +169,7 @@ where
     if let Some(recorded) = &restamp_from {
         warn_source_id_restamp(recorded, template.source_id());
     }
+    warn_stage_version_mismatch(&wd, &stages);
 
     let mut timings = StageTimings::default();
     let run_start = Instant::now();
@@ -220,6 +228,29 @@ fn warn_source_id_restamp(recorded: &str, requested: &str) {
         log::warn!(
             "source id changed from `{recorded}` to `{requested}`; rerunning reconcile and \
              replacing the existing enrichment output ({RESTAMP_NOTE})"
+        );
+    }
+}
+
+/// Warn for every reused stage whose marker was written by a different crate
+/// version. Artifacts from an older build may predate DOI deduplication or
+/// enrichment content keys, so the run continues but the output may not be diffable.
+fn warn_stage_version_mismatch(wd: &WorkDir, running: &[Stage]) {
+    let current = env!("CARGO_PKG_VERSION");
+    for stage in Stage::ALL {
+        if running.contains(&stage) || !wd.is_complete(stage) {
+            continue;
+        }
+        let recorded = wd.stage_version(stage);
+        if recorded.as_deref() == Some(current) {
+            continue;
+        }
+        let recorded = recorded.as_deref().unwrap_or("a build before 0.4.0");
+        let name = stage.marker().trim_end_matches(".done");
+        log::warn!(
+            "reusing {name} artifacts written by {recorded} with comet-enrich {current}; \
+             the output may lack keys or repeat them, so rerun with --from-scratch \
+             or --stage extract before publishing"
         );
     }
 }

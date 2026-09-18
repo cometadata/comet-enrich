@@ -67,6 +67,10 @@ pub trait EnrichmentMethod: Sync {
     /// Lookup result for one unique input. Use `()` for methods without lookups.
     type Lookup: Send;
 
+    /// Stable method name, hashed into every enrichment content key. Frozen:
+    /// renaming a method changes every key it has ever produced.
+    fn name(&self) -> &'static str;
+
     /// Extract values from one input record.
     fn extract(&self, record: &Value) -> Extracted<Self::Extraction>;
 
@@ -96,6 +100,10 @@ mod tests {
     impl EnrichmentMethod for TransformOnly {
         type Extraction = ();
         type Lookup = ();
+
+        fn name(&self) -> &'static str {
+            "transform-only"
+        }
 
         fn extract(&self, _record: &Value) -> Extracted<Self::Extraction> {
             Extracted::Items(vec![()])

@@ -29,6 +29,11 @@ pub struct RunStats {
     pub files_failed: u64,
     pub records_scanned: u64,
     pub lines_malformed: u64,
+    /// Source occurrences dropped by DOI deduplication.
+    pub duplicate_records: u64,
+    /// Enrichment records dropped because their content key and canonical enriched value
+    /// repeated within one source record.
+    pub duplicate_enrichments: u64,
     pub emitted: u64,
     pub schema_failures: u64,
     pub skipped: BTreeMap<String, u64>,

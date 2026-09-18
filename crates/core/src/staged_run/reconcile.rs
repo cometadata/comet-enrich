@@ -6,6 +6,7 @@ use crate::options::RunOptions;
 use crate::template::{EnrichmentTemplate, build_enrichment_record};
 use crate::writer::{
     ENRICHMENTS_DIR, ENRICHMENTS_FAILED_FILE, FailureSink, ParallelRollingWriter, RecordBatcher,
+    Validation,
 };
 
 use anyhow::{Context, Result};
@@ -17,12 +18,18 @@ use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Reconcile-stage counters persisted for resumed runs.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub(super) struct ReconcileStats {
     pub(super) emitted: u64,
     pub(super) schema_failures: u64,
+    /// Records dropped because their content key and canonical enriched value
+    /// repeated within one source record.
+    /// Absent from sidecars written before this counter existed.
+    #[serde(default)]
+    pub(super) duplicate_enrichments: u64,
     /// Source id stamped on the output. Absent from sidecars written before
     /// 0.3, where the empty default never equals a validated DOI name, so a
     /// resume of such a run reruns reconcile to stamp the requested id.
@@ -56,21 +63,26 @@ where
     ));
     let writer = ParallelRollingWriter::create(
         &enrich_dir,
-        validator,
-        &failures,
+        validator.map(|validator| Validation {
+            validator,
+            failures: &failures,
+        }),
         io.output_part_size_bytes,
         io.output_writer_lanes,
     )?;
 
     let pb = progress_bar(parts.len() as u64)?;
     let pool = make_pool(io.threads)?;
+    let duplicate_enrichments = AtomicU64::new(0);
     pool.install(|| {
         parts.par_iter().try_for_each(|path| {
             pb.set_message(format!(
                 "reconcile: {}",
                 path.file_name().unwrap().to_string_lossy()
             ));
-            reconcile_one_part(path, &lookups, method, template, &writer, io.batch_size)?;
+            let dropped =
+                reconcile_one_part(path, &lookups, method, template, &writer, io.batch_size)?;
+            duplicate_enrichments.fetch_add(dropped, Ordering::Relaxed);
             pb.inc(1);
             Ok::<(), anyhow::Error>(())
         })
@@ -83,14 +95,16 @@ where
     let stats = ReconcileStats {
         emitted,
         schema_failures: failures.records_failed,
+        duplicate_enrichments: duplicate_enrichments.into_inner(),
         source_id: template.source_id().to_owned(),
     };
     let json = serde_json::to_string(&stats).context("serializing reconcile stats")?;
     fs::write(work.join(RECONCILE_STATS_FILE), json).context("writing reconcile.stats.json")?;
     log::info!(
-        "reconcile: {} records emitted, {} schema failures",
+        "reconcile: {} records emitted, {} schema failures, {} duplicate enrichments",
         stats.emitted,
-        stats.schema_failures
+        stats.schema_failures,
+        stats.duplicate_enrichments
     );
     Ok(())
 }
@@ -134,7 +148,7 @@ fn reconcile_one_part<M>(
     template: &EnrichmentTemplate,
     writer: &ParallelRollingWriter<'_>,
     batch_size: usize,
-) -> Result<()>
+) -> Result<u64>
 where
     M: EnrichmentMethod,
     M::Extraction: DeserializeOwned,
@@ -151,7 +165,7 @@ where
         let extraction: M::Extraction =
             serde_json::from_str(&line).context("parsing extraction row")?;
         for parts in method.map_back(extraction, lookups) {
-            batcher.push(build_enrichment_record(template, parts))?;
+            batcher.push(build_enrichment_record(template, method.name(), parts))?;
         }
     }
     batcher.finish()

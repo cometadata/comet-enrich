@@ -12,8 +12,8 @@ use crate::{ENRICHMENTS_DIR, ENRICHMENTS_FAILED_FILE};
 use anyhow::Result;
 use async_trait::async_trait;
 use comet_enrich_test_support::{
-    assert_close, assert_err_contains, gz_input_fixture, gz_parts_fixture, read_enrichment_parts,
-    write_gz_lines,
+    INPUT_SUBDIR, assert_close, assert_err_contains, gz_input_fixture, gz_parts_fixture,
+    read_enrichment_parts, write_gz_lines,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -27,7 +27,7 @@ struct TestMethod {
     hash_bits: HashBits,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct TestExtraction {
     doi: String,
     name: String,
@@ -38,6 +38,10 @@ impl EnrichmentMethod for TestMethod {
     type Extraction = TestExtraction;
     type Lookup = RorLookup;
 
+    fn name(&self) -> &'static str {
+        "test-method"
+    }
+
     fn extract(&self, record: &Value) -> Extracted<Self::Extraction> {
         let doi = record.get("id").and_then(Value::as_str).unwrap_or("");
         let name = record
@@ -47,11 +51,14 @@ impl EnrichmentMethod for TestMethod {
         if doi.is_empty() || name.is_empty() {
             return Extracted::Skip("no_name");
         }
-        Extracted::Items(vec![TestExtraction {
+        let item = TestExtraction {
             doi: doi.to_owned(),
             name: name.to_owned(),
             name_hash: crate::dedup::hash_input(name, self.hash_bits),
-        }])
+        };
+        // A record flagged `duplicate` stands in for one whose items repeat.
+        let repeat = record.pointer("/attributes/duplicate") == Some(&json!(true));
+        Extracted::Items(vec![item; if repeat { 2 } else { 1 }])
     }
 
     fn inputs(&self, extraction: &Self::Extraction) -> Vec<String> {
@@ -155,6 +162,8 @@ impl TestRun {
     }
 
     fn opts(&self) -> RunOptions {
+        // The in-crate test cannot use test-support's helper: that crate links a
+        // separate copy of this library, so its `RunOptions` is a different type.
         RunOptions {
             input: self.input.clone(),
             output: self.output.clone(),
@@ -269,6 +278,94 @@ fn read_output_dois(output: &Path) -> Vec<String> {
 }
 
 #[test]
+fn staged_runner_dedups_dois_and_enrichments_and_resumes_byte_identically() {
+    let dup = |updated: &str, name: &str| {
+        json!({"id": "10.1/dup", "attributes": {"updated": updated, "name": name}}).to_string()
+    };
+    let t = TestRun::new();
+    let lines = [
+        dup("2026-09-01T00:00:00Z", "NSF"),
+        String::new(),
+        "{invalid json".to_owned(),
+        dup("2026-09-02T00:00:00Z", "MIT"),
+        json!({"id": "10.1/twice", "attributes": {"duplicate": true, "name": "NSF"}}).to_string(),
+    ];
+    write_gz_lines(
+        &t.input.join(INPUT_SUBDIR).join("part_0000.jsonl.gz"),
+        &lines.iter().map(String::as_str).collect::<Vec<_>>(),
+    );
+
+    let report = t.run(true).unwrap();
+    assert_eq!(report.counters.records_scanned, 3);
+    assert_eq!(report.counters.lines_malformed, 1);
+    assert_eq!(report.counters.duplicate_records, 1);
+    assert_eq!(report.counters.duplicate_enrichments, 1);
+    assert_eq!(report.counters.emitted, 2);
+    // The duplicated item counts as a unit; the losing DOI occurrence does not.
+    assert_eq!(report.coverage.records_in_scope, 3);
+    assert_eq!(report.coverage.records_enriched, 2);
+
+    // The newer occurrence wins, and the repeated item emits once.
+    let recs = read_enrichment_parts(&t.output);
+    assert_eq!(recs.len(), 2);
+    let winner = recs.iter().find(|r| r["doi"] == "10.1/dup").unwrap();
+    assert_eq!(
+        winner["enrichedValue"]["funderIdentifier"],
+        "https://ror.org/042nb2s44"
+    );
+    assert_eq!(recs.iter().filter(|r| r["doi"] == "10.1/twice").count(), 1);
+
+    let part = t.work().join("extractions/part_0000.jsonl");
+    let extracted = fs::read_to_string(&part).unwrap();
+    let resumed = t.run(false).unwrap();
+    assert_eq!(resumed.counters.duplicate_records, 1);
+    assert_eq!(fs::read_to_string(&part).unwrap(), extracted);
+}
+
+#[test]
+fn newer_empty_record_suppresses_older_enrichable_occurrence() {
+    let records = [
+        json!({"id": "10.1/removed", "attributes": {
+            "updated": "2026-09-01T00:00:00Z", "name": "MIT"
+        }}),
+        json!({"id": "10.1/removed", "attributes": {
+            "updated": "2026-09-02T00:00:00Z"
+        }}),
+        json!({"id": "10.1/control", "attributes": {"name": "NSF"}}),
+    ];
+    let t = TestRun::from_fixture(gz_input_fixture(&records));
+
+    let report = t.run(true).unwrap();
+    assert_eq!(report.counters.records_scanned, 3);
+    assert_eq!(report.counters.duplicate_records, 1);
+    assert_eq!(report.counters.skipped.get("no_name"), Some(&1));
+    assert_eq!(report.counters.emitted, 1);
+    assert_eq!(report.counters.duplicate_enrichments, 0);
+    assert_eq!(report.coverage.records_in_scope, 1);
+    assert_eq!(report.coverage.records_enriched, 1);
+    let matches = report.match_.expect("match block present");
+    assert_eq!(matches.unique_inputs, 1);
+    assert_eq!(matches.matched, 1);
+
+    // Selecting the newer empty record must discard the older record's data.
+    let part = fs::read_to_string(t.work().join("extractions/part_0000.jsonl")).unwrap();
+    let extractions: Vec<TestExtraction> = part
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(extractions.len(), 1);
+    assert_eq!(extractions[0].doi, "10.1/control");
+
+    let recs = read_enrichment_parts(&t.output);
+    assert_eq!(recs.len(), 1);
+    assert_eq!(recs[0]["doi"], "10.1/control");
+    assert_eq!(
+        recs[0]["enrichedValue"]["funderIdentifier"],
+        "https://ror.org/021nxhr62"
+    );
+}
+
+#[test]
 fn only_stage_extract_runs_just_extract() {
     let t = TestRun::new();
 
@@ -367,7 +464,13 @@ fn corrupt_input_file_is_counted_failed_not_hung() {
     );
     assert_eq!(read_output_dois(&t.output), vec!["10.1/mit".to_owned()]);
     assert_eq!(
-        crate::exit_status(report.counters.files_failed, 0, 0, true),
+        crate::exit_status(
+            report.counters.files_failed,
+            0,
+            0,
+            true,
+            report.counters.emitted
+        ),
         "partial"
     );
 }
@@ -776,6 +879,44 @@ fn resume_with_changed_source_id_does_not_need_input_corpus() {
 }
 
 #[test]
+fn resume_reusing_stage_from_another_version_warns_and_reports_it() {
+    capture_warnings();
+    let t = TestRun::new();
+    t.run(true).unwrap();
+
+    // A marker written before 0.4 is empty; make extract look like one and
+    // force reconcile to rerun.
+    fs::write(t.work().join("extract.done"), "").unwrap();
+    fs::remove_file(t.work().join("reconcile.done")).unwrap();
+
+    let report = t.run(false).unwrap();
+
+    assert!(!warnings_mentioning("reusing extract artifacts").is_empty());
+    assert!(warnings_mentioning("reusing query artifacts").is_empty());
+    let versions = report.stage_versions.unwrap();
+    assert_eq!(versions.extract, None);
+    assert_eq!(versions.query.as_deref(), Some(env!("CARGO_PKG_VERSION")));
+    assert_eq!(
+        versions.reconcile.as_deref(),
+        Some(env!("CARGO_PKG_VERSION"))
+    );
+}
+
+#[test]
+fn standalone_stage_does_not_need_input_corpus() {
+    let t = TestRun::new();
+    t.run(true).unwrap();
+
+    // A single stage reads only work artifacts, so a deleted corpus must not
+    // block it.
+    fs::remove_dir_all(&t.input).unwrap();
+
+    let report = t.run_stage(Stage::Reconcile).unwrap();
+    assert!(report.stage_timings_ms.reconcile.is_some());
+    assert_eq!(read_enrichment_parts(&t.output).len(), 2);
+}
+
+#[test]
 fn resume_with_changed_source_id_and_replaced_corpus_errors() {
     capture_warnings();
     let t = TestRun::new();
@@ -880,7 +1021,13 @@ fn rejecting_validator_surfaces_schema_failures() {
     assert_eq!(report.validation.schema_failures, 2);
     assert!(t.output.join(ENRICHMENTS_FAILED_FILE).exists());
     assert_eq!(
-        crate::exit_status(0, report.counters.schema_failures, 0, true),
+        crate::exit_status(
+            0,
+            report.counters.schema_failures,
+            0,
+            true,
+            report.counters.emitted
+        ),
         "partial"
     );
 }
@@ -902,6 +1049,7 @@ fn batch_error_is_recorded_not_certified_as_success() {
         0,
         m.failure_taxonomy.lost(),
         true,
+        report.counters.emitted,
     );
     assert_eq!(status, "partial");
 }
@@ -918,7 +1066,13 @@ fn batch_timeout_is_lost_data_not_success() {
     assert_eq!(m.failure_taxonomy.timeout, 3);
     assert_eq!(m.failure_taxonomy.error, 0);
     assert_eq!(m.failure_taxonomy.lost(), 3);
-    let status = crate::exit_status(0, 0, m.failure_taxonomy.lost(), true);
+    let status = crate::exit_status(
+        0,
+        0,
+        m.failure_taxonomy.lost(),
+        true,
+        report.counters.emitted,
+    );
     assert_eq!(status, "partial");
 }
 
@@ -951,7 +1105,13 @@ fn item_error_is_recorded_not_certified_as_no_match() {
     assert_eq!(m.failure_taxonomy.error, 1);
     assert_eq!(m.failure_taxonomy.no_match, 0);
     assert_eq!(m.failure_taxonomy.lost(), 1);
-    let status = crate::exit_status(0, 0, m.failure_taxonomy.lost(), true);
+    let status = crate::exit_status(
+        0,
+        0,
+        m.failure_taxonomy.lost(),
+        true,
+        report.counters.emitted,
+    );
     assert_eq!(status, "partial");
 }
 
@@ -1013,11 +1173,12 @@ fn classify_failure_bins_by_kind_not_message() {
 
 #[test]
 fn exit_status_is_success_only_when_clean_and_complete() {
-    assert_eq!(crate::exit_status(0, 0, 0, true), "success");
-    assert_eq!(crate::exit_status(1, 0, 0, true), "partial");
-    assert_eq!(crate::exit_status(0, 1, 0, true), "partial");
-    assert_eq!(crate::exit_status(0, 0, 1, true), "partial");
-    assert_eq!(crate::exit_status(0, 0, 0, false), "partial");
+    assert_eq!(crate::exit_status(0, 0, 0, true, 1), "success");
+    assert_eq!(crate::exit_status(1, 0, 0, true, 1), "partial");
+    assert_eq!(crate::exit_status(0, 1, 0, true, 1), "partial");
+    assert_eq!(crate::exit_status(0, 0, 1, true, 1), "partial");
+    assert_eq!(crate::exit_status(0, 0, 0, false, 1), "partial");
+    assert_eq!(crate::exit_status(0, 0, 0, true, 0), "partial");
 }
 
 #[test]

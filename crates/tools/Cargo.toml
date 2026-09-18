@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-# Dev-only tooling (compare + bench); never installed (the installer copies only
+# Developer utilities; never installed (the installer copies only
 # the comet-enrich binary). Kept in the workspace so `cargo run -p ...` works.
 publish = false
 
@@ -17,7 +17,6 @@ path = "src/main.rs"
 anyhow = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 comet-enrich-core = { workspace = true }
-flate2 = { workspace = true }
 futures = "0.3"
 log = { workspace = true }
 reqwest = { workspace = true }
@@ -25,11 +24,11 @@ rlimit = "0.10"
 serde = { workspace = true }
 serde_json = { workspace = true }
 simple_logger = "5"
-time = { version = "0.3", features = ["formatting"] }
+time = { workspace = true }
 tokio = { workspace = true }
-xxhash-rust = { workspace = true }
 
 [dev-dependencies]
+comet-enrich-test-support = { workspace = true }
 tempfile = { workspace = true }
 wiremock = "0.6"
 

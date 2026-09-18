@@ -90,6 +90,10 @@ impl EnrichmentMethod for Funders {
     type Extraction = FundingExtraction;
     type Lookup = RorLookup;
 
+    fn name(&self) -> &'static str {
+        "funders"
+    }
+
     fn extract(&self, record: &Value) -> Extracted<Self::Extraction> {
         let Some(doi) = datacite::doi(record) else {
             return Extracted::Skip("no_doi");

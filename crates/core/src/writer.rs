@@ -4,6 +4,8 @@
 //! validation are diverted to a single shared failures file with their validator
 //! errors attached, so one bad record does not abort the whole run.
 
+use crate::key::KeyWindow;
+
 use anyhow::{Context, Result};
 use flate2::Compression;
 use flate2::write::GzEncoder;
@@ -48,13 +50,14 @@ impl FailureSink {
         }
     }
 
-    /// Divert a record that failed validation, recording its validator errors.
+    /// Divert a failed record, recording the failure reason and any validator
+    /// errors.
     ///
     /// # Errors
     ///
     /// Returns an error if the failures file cannot be created or written.
-    pub fn divert(&mut self, record: &Value, errors: &[String]) -> Result<()> {
-        let entry = serde_json::json!({ "record": record, "errors": errors });
+    pub fn divert(&mut self, reason: &str, record: &Value, errors: &[String]) -> Result<()> {
+        let entry = serde_json::json!({ "reason": reason, "record": record, "errors": errors });
         let w = self.ensure_failed()?;
         serde_json::to_writer(&mut *w, &entry)?;
         w.write_all(b"\n")?;
@@ -89,12 +92,18 @@ fn open_buffered(path: &Path, capacity: usize) -> Result<BufWriter<File>> {
     Ok(BufWriter::with_capacity(capacity, f))
 }
 
+/// Schema validation for written records and where failures go.
+#[derive(Clone, Copy)]
+pub struct Validation<'a> {
+    pub validator: &'a jsonschema::Validator,
+    pub failures: &'a Mutex<FailureSink>,
+}
+
 /// Writes valid enrichment records to rolling gzip parts.
 ///
 /// Temp files are published as `part_NNNN.jsonl.gz` only after all lanes finish.
 pub struct ParallelRollingWriter<'a> {
-    validator: Option<&'a jsonschema::Validator>,
-    failures: &'a Mutex<FailureSink>,
+    validation: Option<Validation<'a>>,
     lanes: Vec<Mutex<RollingLaneWriter>>,
     enrich_dir: PathBuf,
     tmp_dir: PathBuf,
@@ -111,8 +120,7 @@ impl<'a> ParallelRollingWriter<'a> {
     /// Returns an error if the temporary output directory cannot be prepared.
     pub fn create(
         enrich_dir: &Path,
-        validator: Option<&'a jsonschema::Validator>,
-        failures: &'a Mutex<FailureSink>,
+        validation: Option<Validation<'a>>,
         part_size_bytes: u64,
         writer_lanes: usize,
     ) -> Result<Self> {
@@ -137,8 +145,7 @@ impl<'a> ParallelRollingWriter<'a> {
             .collect();
 
         Ok(Self {
-            validator,
-            failures,
+            validation,
             lanes,
             enrich_dir: enrich_dir.to_path_buf(),
             tmp_dir,
@@ -191,17 +198,21 @@ impl<'a> ParallelRollingWriter<'a> {
 
     /// Validate a record and return whether it should be written.
     fn validate(&self, record: &Value) -> Result<bool> {
-        let Some(validator) = self.validator else {
+        let Some(v) = self.validation else {
             return Ok(true);
         };
-        if validator.is_valid(record) {
+        if v.validator.is_valid(record) {
             return Ok(true);
         }
-        let msgs: Vec<String> = validator
+        let msgs: Vec<String> = v
+            .validator
             .iter_errors(record)
             .map(|e| e.to_string())
             .collect();
-        self.failures.lock().unwrap().divert(record, &msgs)?;
+        v.failures
+            .lock()
+            .unwrap()
+            .divert("schema_failure", record, &msgs)?;
         Ok(false)
     }
 
@@ -250,11 +261,17 @@ impl<'a> ParallelRollingWriter<'a> {
     }
 }
 
-/// Accumulates records and flushes them in batches.
+/// Accumulates records and flushes them in batches, dropping a record whose
+/// content key and canonical `enrichedValue` were already accepted for the same DOI.
+///
+/// One batcher serves one worker's input file or extraction part; see
+/// [`KeyWindow`] for the full set of guarantees the dedup relies on.
 pub(crate) struct RecordBatcher<'w, 'v> {
     writer: &'w ParallelRollingWriter<'v>,
     batch: Vec<Value>,
     capacity: usize,
+    window: KeyWindow,
+    duplicates: u64,
 }
 
 impl<'w, 'v> RecordBatcher<'w, 'v> {
@@ -264,11 +281,24 @@ impl<'w, 'v> RecordBatcher<'w, 'v> {
             writer,
             batch: Vec::with_capacity(capacity),
             capacity,
+            window: KeyWindow::default(),
+            duplicates: 0,
         }
     }
 
-    /// Add one record, flushing the batch when it reaches capacity.
+    /// Add one record, flushing the batch when it reaches capacity. A repeat of
+    /// a content key with the same canonical `enrichedValue` for the same DOI
+    /// is counted and not written.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on a flush failure, or when a repeated key carries a
+    /// different `enrichedValue`.
     pub(crate) fn push(&mut self, record: Value) -> Result<()> {
+        if !self.window.admit(&record)? {
+            self.duplicates += 1;
+            return Ok(());
+        }
         self.batch.push(record);
         if self.batch.len() >= self.capacity {
             self.flush()?;
@@ -276,9 +306,10 @@ impl<'w, 'v> RecordBatcher<'w, 'v> {
         Ok(())
     }
 
-    /// Flush any remaining records.
-    pub(crate) fn finish(mut self) -> Result<()> {
-        self.flush()
+    /// Flush any remaining records and return how many duplicates were dropped.
+    pub(crate) fn finish(mut self) -> Result<u64> {
+        self.flush()?;
+        Ok(self.duplicates)
     }
 
     fn flush(&mut self) -> Result<()> {
@@ -444,11 +475,9 @@ mod tests {
 
     #[test]
     fn rolling_writer_writes_one_per_line() {
-        let (_dir, enrich_dir, failed, failures) = writer_fixture();
+        let (_dir, enrich_dir, failed, _) = writer_fixture();
         {
-            let w =
-                ParallelRollingWriter::create(&enrich_dir, None, &failures, 256 * 1024 * 1024, 1)
-                    .unwrap();
+            let w = ParallelRollingWriter::create(&enrich_dir, None, 256 * 1024 * 1024, 1).unwrap();
             let records = vec![json!({"doi":"10.1/a","a":1}), json!({"doi":"10.1/b","b":2})];
             w.push_batch(&records).unwrap();
             assert_eq!(w.finish().unwrap(), 2);
@@ -465,7 +494,7 @@ mod tests {
 
     #[test]
     fn push_batch_writes_every_record_across_lanes() {
-        let (_dir, enrich_dir, failed, failures) = writer_fixture();
+        let (_dir, enrich_dir, failed, _) = writer_fixture();
         let records = vec![
             json!({"doi":"10.2/a","n":1}),
             json!({"doi":"10.2/b","n":2}),
@@ -473,8 +502,7 @@ mod tests {
             json!({"doi":"10.2/d","n":4}),
         ];
 
-        let w = ParallelRollingWriter::create(&enrich_dir, None, &failures, 256 * 1024 * 1024, 4)
-            .unwrap();
+        let w = ParallelRollingWriter::create(&enrich_dir, None, 256 * 1024 * 1024, 4).unwrap();
         w.push_batch(&records).unwrap();
         assert_eq!(w.finish().unwrap(), 4);
 
@@ -503,8 +531,10 @@ mod tests {
         let records_written = {
             let w = ParallelRollingWriter::create(
                 &enrich_dir,
-                Some(&schema),
-                &failures,
+                Some(Validation {
+                    validator: &schema,
+                    failures: &failures,
+                }),
                 256 * 1024 * 1024,
                 1,
             )
@@ -523,8 +553,24 @@ mod tests {
 
         let fail = std::fs::read_to_string(&failed).unwrap();
         let entry: Value = serde_json::from_str(fail.lines().next().unwrap()).unwrap();
+        assert_eq!(entry["reason"], json!("schema_failure"));
         assert_eq!(entry["record"], json!({"doi":"10.3/b","b":2}));
         assert!(!entry["errors"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn divert_writes_reason_record_and_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("failed.jsonl");
+        let mut sink = FailureSink::create(&path);
+        sink.divert("schema_failure", &json!({"doi": "10.1/x"}), &[])
+            .unwrap();
+        sink.flush().unwrap();
+        let line = std::fs::read_to_string(&path).unwrap();
+        let entry: Value = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(entry["reason"], json!("schema_failure"));
+        assert_eq!(entry["record"]["doi"], json!("10.1/x"));
+        assert_eq!(entry["errors"], json!([]));
     }
 
     #[test]
@@ -536,8 +582,16 @@ mod tests {
         let failures = Mutex::new(FailureSink::create(&failed));
         let schema = crate::schema::compile_str(r#"{"type":"object","required":["a"]}"#).unwrap();
 
-        let w =
-            ParallelRollingWriter::create(&enrich_dir, Some(&schema), &failures, 1024, 1).unwrap();
+        let w = ParallelRollingWriter::create(
+            &enrich_dir,
+            Some(Validation {
+                validator: &schema,
+                failures: &failures,
+            }),
+            1024,
+            1,
+        )
+        .unwrap();
         assert!(w.push_batch(&[json!({"doi":"10.9/x"})]).is_err());
     }
 }

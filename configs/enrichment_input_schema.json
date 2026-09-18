@@ -74,9 +74,19 @@
     "sourceId": {
       "type": "string",
       "description": "The source id (DOI) of the enrichment record."
+    },
+    "key": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$",
+      "description": "Enrichment content key identifying the content being enriched, scoped by method, DOI, field, and action: xxh3-128 (hex) of the JCS-canonical [method, doi, field, action, value] array, where value is originalValue for updates and deletions, or enrichedValue for inserts."
+    },
+    "event": {
+      "type": "string",
+      "description": "Present only in diff releases. What changed for this content key relative to the previous release: asserted (apply), retracted (remove), superseded (replace in place).",
+      "enum": ["asserted", "retracted", "superseded"]
     }
   },
-  "required": ["doi", "action", "field", "sourceId"],
+  "required": ["doi", "action", "field", "sourceId", "key"],
   "allOf": [
     {
       "if": {
