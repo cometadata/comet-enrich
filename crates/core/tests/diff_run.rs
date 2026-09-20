@@ -2,7 +2,7 @@
 
 use comet_enrich_core::{DiffManifest, DiffOptions, EnrichmentAction, run_diff};
 use comet_enrich_test_support::{
-    METHOD, keyed_record, read_enrichment_parts, write_gz_lines, write_run_dir,
+    METHOD, enrichment_record, read_enrichment_parts, write_gz_lines, write_run_dir,
 };
 use serde_json::{Value, json};
 use std::fs;
@@ -24,9 +24,9 @@ fn write_empty_run(dir: &Path) {
     write_run_dir(dir, &[], Some("success"));
 }
 
-/// A keyed update record for `doi` with the given original/enriched types.
+/// An update record for `doi` with the given original/enriched types.
 fn record(doi: &str, original: &str, enriched: &str) -> Value {
-    keyed_record(
+    enrichment_record(
         METHOD,
         doi,
         "types",
@@ -36,9 +36,9 @@ fn record(doi: &str, original: &str, enriched: &str) -> Value {
     )
 }
 
-fn record_without_key(doi: &str, original: &str, enriched: &str) -> Value {
+fn record_without_content_key(doi: &str, original: &str, enriched: &str) -> Value {
     let mut rec = record(doi, original, enriched);
-    rec.as_object_mut().unwrap().remove("key");
+    rec.as_object_mut().unwrap().remove("contentKey");
     rec
 }
 
@@ -123,7 +123,7 @@ fn classifies_asserted_retracted_superseded_and_unchanged() {
     assert!(
         events
             .iter()
-            .all(|e| e["key"].as_str().unwrap().len() == 32)
+            .all(|e| e["contentKey"].as_str().unwrap().len() == 32)
     );
     assert!(!out.join("diff.failed.jsonl").exists());
 }
@@ -148,7 +148,7 @@ fn value_comparison_ignores_object_key_order() {
 }
 
 #[test]
-fn repeated_key_on_either_side_fails_the_diff() {
+fn repeated_content_key_on_either_side_fails_the_diff() {
     let clean = record("10.1/a", "Text", "Dataset");
     let same_answer = vec![clean.clone(), clean.clone()];
     let different_answer = vec![
@@ -181,10 +181,10 @@ fn repeated_key_on_either_side_fails_the_diff() {
 }
 
 #[test]
-fn record_without_key_on_either_side_is_a_hard_error() {
+fn record_without_content_key_on_either_side_is_a_hard_error() {
     for side in ["old", "new"] {
         let (_tmp, old, new, out) = dirs();
-        let keyless = record_without_key("10.1/x", "Text", "Dataset");
+        let keyless = record_without_content_key("10.1/x", "Text", "Dataset");
         let keyed = record("10.1/y", "Text", "Dataset");
         if side == "old" {
             write_run(&old, &[keyless]);
@@ -199,7 +199,7 @@ fn record_without_key_on_either_side_is_a_hard_error() {
             run_diff(&diff_options(&old, &new, &out)).unwrap_err()
         );
 
-        assert!(err.contains("no key"), "{side}: {err}");
+        assert!(err.contains("no contentKey"), "{side}: {err}");
         assert!(err.contains("10.1/x"), "{side}: {err}");
         assert!(err.contains(side), "{side}: {err}");
     }

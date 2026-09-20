@@ -9,7 +9,7 @@ use comet_enrich_core::{
 use comet_enrich_datacite_funders::{Config, Funders};
 use comet_enrich_test_support::{
     FakeMatchService, SOURCE_ID, assert_close, assert_content_key, enrichment_template,
-    gz_input_fixture, read_enrichment_parts, records_by_doi, run_options,
+    enrichments_by_doi, gz_input_fixture, read_enrichment_parts, run_options,
 };
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -151,7 +151,7 @@ fn funders_staged_pipeline_matches_golden_outcomes() {
         3
     );
 
-    let records = records_by_doi(&output);
+    let records = enrichments_by_doi(&output);
     assert_eq!(records.len(), 4);
     for rec in records.values() {
         assert_content_key(rec, "funders", EnrichmentAction::UpdateChild);

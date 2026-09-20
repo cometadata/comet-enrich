@@ -78,7 +78,7 @@ DataCite field to update, and the original and enriched values. The field is set
 record; this matters for `affiliations`, which can update either `creators` or `contributors`.
 
 Methods return only the value part of the enrichment. Core adds the `sourceId` and enrichment
-content `key`, validates the complete record, and writes it. Each method also exposes a frozen
+content key (`contentKey`), validates the complete record, and writes it. Each method also exposes a frozen
 `name()` (`funders`, `affiliations`, `resource-type-general`) that is hashed into every content key.
 
 ## DOI deduplication
@@ -95,7 +95,7 @@ line numbers are recorded and skipped during extraction.
 Even when records are de-duplicated, enrichment methods can produce duplicate enrichments when
 repeated items within a list are enriched, such as two identical funding references or
 two creators with the same name and affiliations. Each repeat produces an enrichment record
-with the same content `key` and canonical `enrichedValue`. Before enrichments are written,
+with the same `contentKey` and canonical `enrichedValue`. Before enrichments are written,
 duplicates are removed for each DOI. If an enrichment has the same content key and canonical
 `enrichedValue` as one already accepted for that DOI, it is skipped. If the same content key has
 a different canonical `enrichedValue`, the run fails because the conflicting results indicate
@@ -115,7 +115,7 @@ flowchart LR
     select -->|skip losing lines| scan
     scan --> extract["extract"]
     extract --> mapback["map_back (empty lookups)"]
-    mapback --> build["build_enrichment_record"]
+    mapback --> build["EnrichmentRecord::new"]
     build --> writer["rolling writer"]
     writer --> parts[("enrichments/")]
     scan -.->|"malformed line: count + skip"| counters["manifest counters"]
@@ -245,8 +245,8 @@ The value must be a DOI name, such as `10.1234/example`, and is stored in ASCII 
 
 ## Enrichment content keys
 
-Every enrichment record carries an enrichment content key in its `key` field. This identifies
-the content being enriched, scoped by method, DOI, field, and action.
+Every enrichment record carries an enrichment content key in its `contentKey` field. This
+identifies the content being enriched, scoped by method, DOI, field, and action.
 
 The content key is generated as `xxh3_128(JCS([method, doi, field, action, value]))` and stored
 as 32 lowercase hex characters.

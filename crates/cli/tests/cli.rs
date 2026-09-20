@@ -1,7 +1,7 @@
 use assert_cmd::Command;
 use comet_enrich_core::EnrichmentAction;
 use comet_enrich_test_support::{
-    METHOD, SOURCE_ID, config_path, gz_input_fixture, keyed_record, read_enrichment_parts,
+    METHOD, SOURCE_ID, config_path, enrichment_record, gz_input_fixture, read_enrichment_parts,
     write_run_dir,
 };
 use predicates::prelude::*;
@@ -213,7 +213,7 @@ fn cli_missing_args_are_rejected() {
 }
 
 fn diff_record(doi: &str) -> Value {
-    keyed_record(
+    enrichment_record(
         METHOD,
         doi,
         "types",
@@ -286,7 +286,7 @@ fn cli_diff_reports_progress_and_writes_events() {
 }
 
 #[test]
-fn cli_diff_refuses_a_side_with_a_repeated_key() {
+fn cli_diff_refuses_a_side_with_a_repeated_content_key() {
     let tmp = tempfile::tempdir().unwrap();
     let old = tmp.path().join("old");
     let new = tmp.path().join("new");

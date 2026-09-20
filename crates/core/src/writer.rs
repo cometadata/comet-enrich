@@ -4,7 +4,8 @@
 //! validation are diverted to a single shared failures file with their validator
 //! errors attached, so one bad record does not abort the whole run.
 
-use crate::key::KeyWindow;
+use crate::content_key::ContentKeyWindow;
+use crate::enrichment_record::EnrichmentRecord;
 
 use anyhow::{Context, Result};
 use flate2::Compression;
@@ -162,7 +163,7 @@ impl<'a> ParallelRollingWriter<'a> {
         if !self.validate(record)? {
             return Ok(());
         }
-        let lane = self.lane_for_record(record);
+        let lane = self.lane_for_enrichment(record);
         self.lanes[lane].lock().unwrap().push(record)
     }
 
@@ -179,7 +180,7 @@ impl<'a> ParallelRollingWriter<'a> {
         let mut by_lane: Vec<Vec<&Value>> = (0..self.lanes.len()).map(|_| Vec::new()).collect();
         for record in records {
             if self.validate(record)? {
-                by_lane[self.lane_for_record(record)].push(record);
+                by_lane[self.lane_for_enrichment(record)].push(record);
             }
         }
 
@@ -249,7 +250,7 @@ impl<'a> ParallelRollingWriter<'a> {
         Ok(records_written)
     }
 
-    fn lane_for_record(&self, record: &Value) -> usize {
+    fn lane_for_enrichment(&self, record: &Value) -> usize {
         if self.lanes.len() == 1 {
             return 0;
         }
@@ -261,27 +262,27 @@ impl<'a> ParallelRollingWriter<'a> {
     }
 }
 
-/// Accumulates records and flushes them in batches, dropping a record whose
+/// Accumulates enrichment records and flushes them in batches, dropping a record whose
 /// content key and canonical `enrichedValue` were already accepted for the same DOI.
 ///
 /// One batcher serves one worker's input file or extraction part; see
-/// [`KeyWindow`] for the full set of guarantees the dedup relies on.
-pub(crate) struct RecordBatcher<'w, 'v> {
+/// [`ContentKeyWindow`] for the full set of guarantees the dedup relies on.
+pub(crate) struct EnrichmentBatcher<'w, 'v> {
     writer: &'w ParallelRollingWriter<'v>,
-    batch: Vec<Value>,
+    batch: Vec<EnrichmentRecord>,
     capacity: usize,
-    window: KeyWindow,
+    window: ContentKeyWindow,
     duplicates: u64,
 }
 
-impl<'w, 'v> RecordBatcher<'w, 'v> {
+impl<'w, 'v> EnrichmentBatcher<'w, 'v> {
     pub(crate) fn new(writer: &'w ParallelRollingWriter<'v>, capacity: usize) -> Self {
         let capacity = capacity.max(1);
         Self {
             writer,
             batch: Vec::with_capacity(capacity),
             capacity,
-            window: KeyWindow::default(),
+            window: ContentKeyWindow::default(),
             duplicates: 0,
         }
     }
@@ -292,9 +293,9 @@ impl<'w, 'v> RecordBatcher<'w, 'v> {
     ///
     /// # Errors
     ///
-    /// Returns an error on a flush failure, or when a repeated key carries a
-    /// different `enrichedValue`.
-    pub(crate) fn push(&mut self, record: Value) -> Result<()> {
+    /// Returns an error on a flush failure, or when a repeated content key
+    /// carries a different `enrichedValue`.
+    pub(crate) fn push(&mut self, record: EnrichmentRecord) -> Result<()> {
         if !self.window.admit(&record)? {
             self.duplicates += 1;
             return Ok(());
@@ -313,7 +314,12 @@ impl<'w, 'v> RecordBatcher<'w, 'v> {
     }
 
     fn flush(&mut self) -> Result<()> {
-        self.writer.push_batch(&self.batch)?;
+        let values = self
+            .batch
+            .iter()
+            .map(EnrichmentRecord::to_value)
+            .collect::<Result<Vec<_>>>()?;
+        self.writer.push_batch(&values)?;
         self.batch.clear();
         Ok(())
     }
@@ -353,7 +359,7 @@ impl RollingLaneWriter {
     fn push(&mut self, record: &Value) -> Result<()> {
         self.ensure_current()?;
         let current = self.current.as_mut().expect("part opened above");
-        current.write_record(record)?;
+        current.write_enrichment(record)?;
         self.records_written += 1;
 
         if current.compressed_bytes() >= self.part_size_bytes {
@@ -410,7 +416,7 @@ impl OpenRollingPart {
         })
     }
 
-    fn write_record(&mut self, record: &Value) -> Result<()> {
+    fn write_enrichment(&mut self, record: &Value) -> Result<()> {
         serde_json::to_writer(&mut self.inner, record)?;
         self.inner.write_all(b"\n")?;
         Ok(())

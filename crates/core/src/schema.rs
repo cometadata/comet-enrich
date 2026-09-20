@@ -59,7 +59,7 @@ mod tests {
             "originalValue": {"resourceTypeGeneral": "Text"},
             "enrichedValue": {"resourceTypeGeneral": "Dataset"},
             "sourceId": "10.82461/bpzr-jd55",
-            "key": "0860ed77af682e5bbe343af4f5e0347c",
+            "contentKey": "0860ed77af682e5bbe343af4f5e0347c",
         });
         assert!(validator.is_valid(&rec));
         for event in ["asserted", "retracted", "superseded"] {

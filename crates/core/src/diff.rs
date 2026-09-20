@@ -2,18 +2,18 @@
 //!
 //! Both sides are read from `<dir>/enrichments/*.jsonl.gz`; `<dir>/manifest.json`
 //! supplies the method name and exit status. Both must be complete runs written
-//! by a current comet-enrich: every record carries an enrichment content `key`,
-//! and no content key appears twice on one side.
+//! by a current comet-enrich: every record parses as an [`EnrichmentRecord`]
+//! with a `contentKey`, and no content key appears twice on one side.
 //!
 //! Three passes: index the old side, stream the new side emitting `asserted`
 //! and `superseded`, then re-read the old side emitting `retracted`. Each
 //! index holds a content key and a canonical `enrichedValue` hash per record.
-//! A missing key, a repeated key, a malformed line, or a side that is not a
-//! successful run fails the diff.
+//! A missing or malformed content key, a repeated content key, a malformed
+//! line, or a side that is not a successful run fails the diff.
 
 use crate::artifact_lifecycle as lifecycle;
+use crate::enrichment_record::{DiffEvent, EnrichmentRecord};
 use crate::fanout::{FileError, list_jsonl_gz, open_gz, scan_jsonl_records};
-use crate::key::{embedded_key, enriched_value_hash};
 use crate::manifest::{EXIT_SUCCESS, MANIFEST_FILE, SourceRelease, write_manifest_json};
 use crate::progress::Progress;
 use crate::writer::{ENRICHMENTS_DIR, ParallelRollingWriter};
@@ -110,26 +110,9 @@ fn side_files(side_dir: &Path) -> Result<Vec<PathBuf>> {
     list_jsonl_gz(&dir)
 }
 
-/// The event a diff record carries; the strings are pinned by the schema.
-#[derive(Clone, Copy)]
-enum DiffEvent {
-    Asserted,
-    Superseded,
-    Retracted,
-}
-
-impl DiffEvent {
-    fn as_str(self) -> &'static str {
-        match self {
-            DiffEvent::Asserted => "asserted",
-            DiffEvent::Superseded => "superseded",
-            DiffEvent::Retracted => "retracted",
-        }
-    }
-}
-
-fn doi_of(rec: &Value) -> &str {
-    rec.get("doi").and_then(Value::as_str).unwrap_or("<no doi>")
+/// Parse one release line, naming the side on failure.
+fn parse_enrichment_record(rec: Value, side: &str) -> Result<EnrichmentRecord> {
+    EnrichmentRecord::from_value(rec).with_context(|| format!("in the {side} release"))
 }
 
 /// Invoke `f` for every record in every gz part of one side and return the
@@ -137,7 +120,7 @@ fn doi_of(rec: &Value) -> &str {
 ///
 /// A completed release must be fully readable, so a read error or a malformed
 /// line fails the diff instead of being counted.
-fn for_each_record(
+fn for_each_enrichment_record(
     files: &[PathBuf],
     phase: &'static str,
     mut f: impl FnMut(Value, &Path) -> Result<()>,
@@ -170,24 +153,27 @@ fn for_each_record(
     Ok(scanned)
 }
 
-/// The record with `event` appended, preserving field order. The record's own
-/// `key` was validated by [`embedded_key`] and passes through untouched.
-fn event_record(mut rec: Value, event: DiffEvent) -> Value {
-    if let Some(m) = rec.as_object_mut() {
-        m.insert("event".into(), Value::String(event.as_str().to_owned()));
-    }
-    rec
+/// The record with `event` set, as the JSON value to write. Every other
+/// property, including `contentKey`, is written back exactly as parsed.
+fn event_enrichment_record(mut rec: EnrichmentRecord, event: DiffEvent) -> Result<Value> {
+    rec.event = Some(event);
+    rec.to_value()
 }
 
-/// Record `rec` in `index`, failing if its key was already seen on this side.
-/// Returns the content key and the canonical `enrichedValue` hash.
-fn insert_unique(index: &mut Index, rec: &Value, side: &str, path: &Path) -> Result<(u128, u128)> {
-    let key = embedded_key(rec).with_context(|| format!("in the {side} release"))?;
-    let value = enriched_value_hash(rec);
+/// Record `rec` in `index`, failing if its content key was already seen on
+/// this side. Returns the content key and the canonical `enrichedValue` hash.
+fn insert_unique(
+    index: &mut Index,
+    rec: &EnrichmentRecord,
+    side: &str,
+    path: &Path,
+) -> Result<(u128, u128)> {
+    let key = rec.parse_content_key()?;
+    let value = rec.enriched_value_hash();
     match index.entry(key) {
         Entry::Occupied(_) => bail!(
-            "key {key:032x} (doi `{}`) appears twice in the {side} release; repeated in {}",
-            doi_of(rec),
+            "contentKey {key:032x} (doi `{}`) appears twice in the {side} release; repeated in {}",
+            rec.doi,
             path.display()
         ),
         Entry::Vacant(slot) => {
@@ -200,7 +186,8 @@ fn insert_unique(index: &mut Index, rec: &Value, side: &str, path: &Path) -> Res
 /// Pass 1: index the old side.
 fn index_old(files: &[PathBuf], stats: &mut DiffStats) -> Result<Index> {
     let mut index = Index::new();
-    stats.old_records = for_each_record(files, "Indexing old [1/3]", |rec, path| {
+    stats.old_records = for_each_enrichment_record(files, "Indexing old [1/3]", |rec, path| {
+        let rec = parse_enrichment_record(rec, "old")?;
         insert_unique(&mut index, &rec, "old", path)?;
         Ok(())
     })?;
@@ -215,7 +202,8 @@ fn emit_new(
     stats: &mut DiffStats,
 ) -> Result<Index> {
     let mut index = Index::new();
-    stats.new_records = for_each_record(files, "Comparing new [2/3]", |rec, path| {
+    stats.new_records = for_each_enrichment_record(files, "Comparing new [2/3]", |rec, path| {
+        let rec = parse_enrichment_record(rec, "new")?;
         let (key, value) = insert_unique(&mut index, &rec, "new", path)?;
         let event = match old.get(&key) {
             None => {
@@ -231,28 +219,30 @@ fn emit_new(
                 DiffEvent::Superseded
             }
         };
-        writer.push(&event_record(rec, event))
+        writer.push(&event_enrichment_record(rec, event)?)
     })?;
     Ok(index)
 }
 
-/// Pass 3: re-read the old side, emitting `retracted` for keys absent from new.
+/// Pass 3: re-read the old side, emitting `retracted` for content keys absent
+/// from new.
 ///
-/// Pass 1 proved every old key unique, so each retraction emits once.
+/// Pass 1 proved every old content key unique, so each retraction emits once.
 fn emit_retracted(
     files: &[PathBuf],
     new: &Index,
     writer: &ParallelRollingWriter<'_>,
     stats: &mut DiffStats,
 ) -> Result<()> {
-    for_each_record(files, "Finding retractions [3/3]", |rec, _| {
-        // Pass 1 already validated every old key, so this cannot fail.
-        let key = embedded_key(&rec)?;
+    for_each_enrichment_record(files, "Finding retractions [3/3]", |rec, _| {
+        // Pass 1 already validated every old record, so this cannot fail.
+        let rec = parse_enrichment_record(rec, "old")?;
+        let key = rec.parse_content_key()?;
         if new.contains_key(&key) {
             return Ok(());
         }
         stats.retracted += 1;
-        writer.push(&event_record(rec, DiffEvent::Retracted))
+        writer.push(&event_enrichment_record(rec, DiffEvent::Retracted)?)
     })?;
     Ok(())
 }
@@ -262,8 +252,8 @@ fn emit_retracted(
 /// # Errors
 ///
 /// Fails on unreadable inputs, malformed lines, mismatched method names, a
-/// side that is not a successful run, a record without a key, a key that
-/// appears twice on one side, or any write failure.
+/// side that is not a successful run, a record without a valid content key, a
+/// content key that appears twice on one side, or any write failure.
 pub fn run_diff(opts: &DiffOptions) -> Result<DiffOutcome> {
     lifecycle::ensure_disjoint(&opts.output, &[("old", &opts.old), ("new", &opts.new)])?;
     let old_manifest = read_side_manifest(&opts.old)?;

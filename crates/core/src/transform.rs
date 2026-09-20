@@ -8,15 +8,16 @@
 
 use crate::artifact_lifecycle as lifecycle;
 use crate::doi_dedup::find_duplicate_lines;
+use crate::enrichment_record::EnrichmentRecord;
 use crate::fanout::{
     FileError, input_files, make_pool, open_gz, own_skips, progress_bar, scan_jsonl_records,
 };
 use crate::method::{EnrichmentMethod, Extracted, Lookups};
 use crate::options::{RunOptions, RunStats};
-use crate::template::{EnrichmentTemplate, build_enrichment_record};
+use crate::template::EnrichmentTemplate;
 use crate::writer::{
-    ENRICHMENTS_DIR, ENRICHMENTS_FAILED_FILE, FailureSink, ParallelRollingWriter, RecordBatcher,
-    Validation,
+    ENRICHMENTS_DIR, ENRICHMENTS_FAILED_FILE, EnrichmentBatcher, FailureSink,
+    ParallelRollingWriter, Validation,
 };
 
 use anyhow::Result;
@@ -152,7 +153,7 @@ fn process_file<M: EnrichmentMethod>(
 
     // This runner handles the transform path, so there are no external lookups.
     let lookups: Lookups<M::Lookup> = HashMap::new();
-    let mut batcher = RecordBatcher::new(writer, batch_size);
+    let mut batcher = EnrichmentBatcher::new(writer, batch_size);
 
     let tally = scan_jsonl_records(reader, skip_lines, |rec| {
         match method.extract(&rec) {
@@ -163,7 +164,7 @@ fn process_file<M: EnrichmentMethod>(
                 for item in items {
                     for parts in method.map_back(item, &lookups) {
                         batcher
-                            .push(build_enrichment_record(template, method.name(), parts))
+                            .push(EnrichmentRecord::new(template, method.name(), parts))
                             .map_err(FileError::Fatal)?;
                     }
                 }

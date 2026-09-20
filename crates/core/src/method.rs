@@ -3,13 +3,18 @@
 //! An enrichment method extracts values from DataCite records, optionally resolves
 //! them through a lookup step, then maps the results back into enrichment records.
 //! Methods return only the enrichment value parts; run-level values such as the
-//! source id are added later by build_enrichment_record.
+//! source id and the content key are added by [`crate::enrichment_record::EnrichmentRecord::new`].
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 
 /// Action to apply to the enriched field.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Serializes to the schema's `action` values (`update`, `updateChild`, ...),
+/// which [`EnrichmentAction::as_str`] also returns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum EnrichmentAction {
     /// Replace the whole top-level field.
     Update,
@@ -68,7 +73,7 @@ pub trait EnrichmentMethod: Sync {
     type Lookup: Send;
 
     /// Stable method name, hashed into every enrichment content key. Frozen:
-    /// renaming a method changes every key it has ever produced.
+    /// renaming a method changes every content key it has ever produced.
     fn name(&self) -> &'static str;
 
     /// Extract values from one input record.
@@ -139,5 +144,20 @@ mod tests {
         assert_eq!(EnrichmentAction::UpdateChild.as_str(), "updateChild");
         assert_eq!(EnrichmentAction::Insert.as_str(), "insert");
         assert_eq!(EnrichmentAction::DeleteChild.as_str(), "deleteChild");
+    }
+
+    #[test]
+    fn enrichment_action_serde_agrees_with_as_str() {
+        for action in [
+            EnrichmentAction::Update,
+            EnrichmentAction::UpdateChild,
+            EnrichmentAction::Insert,
+            EnrichmentAction::DeleteChild,
+        ] {
+            let json = serde_json::to_value(action).unwrap();
+            assert_eq!(json, serde_json::json!(action.as_str()));
+            let back: EnrichmentAction = serde_json::from_value(json).unwrap();
+            assert_eq!(back, action);
+        }
     }
 }

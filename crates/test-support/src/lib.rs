@@ -4,7 +4,10 @@
 #![allow(clippy::doc_markdown)]
 
 pub use comet_enrich_core::FakeMatchService;
-use comet_enrich_core::{EnrichmentAction, EnrichmentTemplate, RunOptions, enrichment_content_key};
+use comet_enrich_core::{
+    EnrichmentAction, EnrichmentParts, EnrichmentRecord, EnrichmentTemplate, RunOptions,
+    enrichment_content_key,
+};
 
 use std::collections::HashMap;
 use std::fs::{self, File};
@@ -39,26 +42,27 @@ pub fn run_options(input: PathBuf, output: PathBuf, threads: usize) -> RunOption
     }
 }
 
-/// A keyed enrichment record for `doi`, as a run would write it.
+/// An enrichment record for `doi` with its content key, as a run for
+/// [`SOURCE_ID`] would write it.
 #[must_use]
-pub fn keyed_record(
+pub fn enrichment_record(
     method: &str,
     doi: &str,
-    field: &str,
+    field: &'static str,
     action: EnrichmentAction,
     original: &Value,
     enriched: &Value,
 ) -> Value {
-    let key = enrichment_content_key(method, doi, field, action, original, enriched);
-    json!({
-        "doi": doi,
-        "action": action.as_str(),
-        "field": field,
-        "originalValue": original,
-        "enrichedValue": enriched,
-        "sourceId": SOURCE_ID,
-        "key": key,
-    })
+    let parts = EnrichmentParts {
+        doi: doi.to_owned(),
+        action,
+        field,
+        original: original.clone(),
+        enriched: enriched.clone(),
+    };
+    EnrichmentRecord::new(&enrichment_template(), method, parts)
+        .to_value()
+        .unwrap()
 }
 
 /// Write a completed run directory: one `enrichments/part_NNNN.jsonl.gz` per
@@ -182,7 +186,7 @@ pub fn read_enrichment_parts(output: &Path) -> Vec<Value> {
 ///
 /// Panics if two records share a DOI, so tests stay one record per DOI.
 #[must_use]
-pub fn records_by_doi(output: &Path) -> HashMap<String, Value> {
+pub fn enrichments_by_doi(output: &Path) -> HashMap<String, Value> {
     let mut by_doi = HashMap::new();
     for rec in read_enrichment_parts(output) {
         let doi = rec["doi"].as_str().unwrap().to_owned();
@@ -194,7 +198,8 @@ pub fn records_by_doi(output: &Path) -> HashMap<String, Value> {
     by_doi
 }
 
-/// Assert a record's `key` is the expected enrichment content key for `method` and `action`.
+/// Assert a record's `contentKey` is the expected enrichment content key for
+/// `method` and `action`.
 #[track_caller]
 pub fn assert_content_key(rec: &Value, method: &str, action: EnrichmentAction) {
     let want = enrichment_content_key(
@@ -206,9 +211,9 @@ pub fn assert_content_key(rec: &Value, method: &str, action: EnrichmentAction) {
         &rec["enrichedValue"],
     );
     assert_eq!(
-        rec["key"],
+        rec["contentKey"],
         json!(want),
-        "key mismatch for doi {}",
+        "contentKey mismatch for doi {}",
         rec["doi"]
     );
 }

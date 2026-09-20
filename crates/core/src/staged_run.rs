@@ -249,7 +249,7 @@ fn warn_stage_version_mismatch(wd: &WorkDir, running: &[Stage]) {
         let name = stage.marker().trim_end_matches(".done");
         log::warn!(
             "reusing {name} artifacts written by {recorded} with comet-enrich {current}; \
-             the output may lack keys or repeat them, so rerun with --from-scratch \
+             the output may lack content keys or repeat them, so rerun with --from-scratch \
              or --stage extract before publishing"
         );
     }

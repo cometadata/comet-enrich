@@ -39,21 +39,21 @@ Run `comet-enrich diff --help` for the full option list.
 
 ## Output
 
-The diff matches enrichments by their content key (`key`) and writes an event when an
+The diff matches enrichments by their content key (`contentKey`) and writes an event when an
 enrichment is added, removed, or its enriched value changes:
 
-| Event        | Meaning                              | Consumer action        |
-|--------------|--------------------------------------|------------------------|
-| `asserted`   | Key present now, absent before.      | Apply the enrichment.  |
-| `retracted`  | Key present before, absent now.      | Remove the enrichment. |
-| `superseded` | Same key, different `enrichedValue`. | Replace it in place.   |
+| Event        | Meaning                                      | Consumer action        |
+|--------------|----------------------------------------------|------------------------|
+| `asserted`   | Content key present now, absent before.      | Apply the enrichment.  |
+| `retracted`  | Content key present before, absent now.      | Remove the enrichment. |
+| `superseded` | Same content key, different `enrichedValue`. | Replace it in place.   |
 
 Unchanged enrichments produce no events. Changes to `sourceId` alone do not produce events.
 
 For updates, changing only `enrichedValue` preserves the content key and produces a
 `superseded` event. Inserts use `enrichedValue` to derive their content key, so changing
-an inserted value produces a `retracted` event for the old key and an `asserted` event
-for the new key.
+an inserted value produces a `retracted` event for the old content key and an `asserted`
+event for the new content key.
 
 ```text
 <output>/
@@ -67,7 +67,7 @@ lines carry the new record; `retracted` lines carry the old record. This example
 `resource-type-general` method:
 
 ```json
-{"doi":"10.1/x","action":"update","field":"types","originalValue":{"resourceTypeGeneral":"Text"},"enrichedValue":{"resourceTypeGeneral":"Dataset"},"sourceId":"10.1234/example","key":"1dc558dae21181dcb1bff9c1c744244f","event":"asserted"}
+{"doi":"10.1/x","action":"update","field":"types","originalValue":{"resourceTypeGeneral":"Text"},"enrichedValue":{"resourceTypeGeneral":"Dataset"},"sourceId":"10.1234/example","contentKey":"1dc558dae21181dcb1bff9c1c744244f","event":"asserted"}
 ```
 
 `manifest.json` records the compared releases, event counts, and elapsed time. It is written

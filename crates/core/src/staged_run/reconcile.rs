@@ -1,12 +1,13 @@
 use super::query::LookupRow;
 use super::{EXTRACTIONS_DIR, LOOKUPS_FILE, RECONCILE_STATS_FILE, for_each_jsonl};
+use crate::enrichment_record::EnrichmentRecord;
 use crate::fanout::{make_pool, progress_bar};
 use crate::method::EnrichmentMethod;
 use crate::options::RunOptions;
-use crate::template::{EnrichmentTemplate, build_enrichment_record};
+use crate::template::EnrichmentTemplate;
 use crate::writer::{
-    ENRICHMENTS_DIR, ENRICHMENTS_FAILED_FILE, FailureSink, ParallelRollingWriter, RecordBatcher,
-    Validation,
+    ENRICHMENTS_DIR, ENRICHMENTS_FAILED_FILE, EnrichmentBatcher, FailureSink,
+    ParallelRollingWriter, Validation,
 };
 
 use anyhow::{Context, Result};
@@ -155,7 +156,7 @@ where
 {
     let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
     let reader = BufReader::new(file);
-    let mut batcher = RecordBatcher::new(writer, batch_size);
+    let mut batcher = EnrichmentBatcher::new(writer, batch_size);
 
     for line in reader.lines() {
         let line = line.with_context(|| format!("reading {}", path.display()))?;
@@ -165,7 +166,7 @@ where
         let extraction: M::Extraction =
             serde_json::from_str(&line).context("parsing extraction row")?;
         for parts in method.map_back(extraction, lookups) {
-            batcher.push(build_enrichment_record(template, method.name(), parts))?;
+            batcher.push(EnrichmentRecord::new(template, method.name(), parts))?;
         }
     }
     batcher.finish()

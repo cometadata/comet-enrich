@@ -388,7 +388,7 @@ fn output_equal_to_input_is_refused_and_input_survives() {
 }
 
 #[test]
-fn run_drops_repeated_keys_within_one_record() {
+fn run_drops_repeated_content_keys_within_one_record() {
     let dir = tempfile::tempdir().unwrap();
     let (template, opts) = transform_setup(&dir);
     write_gz_lines(

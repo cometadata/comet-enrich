@@ -2,8 +2,9 @@
 //!
 //! See `docs/architecture.md`, sections "Enrichment content keys" and "Duplicate enrichments".
 
+use crate::enrichment_record::EnrichmentRecord;
 use crate::method::EnrichmentAction;
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use serde::Serialize;
 use serde_json::Value;
 use xxhash_rust::xxh3::xxh3_128;
@@ -45,65 +46,43 @@ pub fn enrichment_content_key(
     format!("{:032x}", xxh3_128(&canonical_bytes(&input)))
 }
 
-/// The record's embedded content `key`, parsed from its 32 hex chars.
-///
-/// # Errors
-///
-/// Returns an error if the key is missing or is not 32 hex chars.
-pub(crate) fn embedded_key(rec: &Value) -> Result<u128> {
-    let doi = rec.get("doi").and_then(Value::as_str).unwrap_or("<no doi>");
-    let key = rec
-        .get("key")
-        .with_context(|| format!("record has no key (doi `{doi}`)"))?;
-    let hex = key
-        .as_str()
-        .filter(|k| k.len() == 32)
-        .with_context(|| format!("malformed key {key} (doi `{doi}`)"))?;
-    u128::from_str_radix(hex, 16).with_context(|| format!("malformed key `{hex}` (doi `{doi}`)"))
-}
-
-/// Hash of the record's canonical `enrichedValue` (Null when absent).
-#[must_use]
-pub(crate) fn enriched_value_hash(rec: &Value) -> u128 {
-    let ev = rec.get("enrichedValue").unwrap_or(&Value::Null);
-    xxh3_128(&canonical_bytes(ev))
-}
-
 /// Tracks content keys and enriched values accepted for the current DOI.
 ///
 /// DOI deduplication leaves one source record per DOI. Each worker processes
 /// that record's enrichments consecutively, including all its extraction rows
 /// in the staged pipeline. This lets the window reset when the DOI changes.
 #[derive(Debug, Default)]
-pub(crate) struct KeyWindow {
+pub(crate) struct ContentKeyWindow {
     doi: String,
-    /// `(key, canonical enrichedValue bytes)` for each record admitted under `doi`.
+    /// `(content key, canonical enrichedValue bytes)` for each record admitted under `doi`.
     seen: Vec<(String, Vec<u8>)>,
 }
 
-impl KeyWindow {
-    /// Returns true for a new key and false for a duplicate with the same
-    /// canonical `enrichedValue`.
+impl ContentKeyWindow {
+    /// Returns true for a new content key and false for a duplicate with the
+    /// same canonical `enrichedValue`.
     ///
     /// # Errors
     ///
-    /// Returns an error if the same key has a different `enrichedValue`
+    /// Returns an error if the same content key has a different `enrichedValue`
     /// within the current DOI.
-    pub(crate) fn admit(&mut self, rec: &Value) -> Result<bool> {
-        let doi = rec.get("doi").and_then(Value::as_str).unwrap_or_default();
-        let key = rec.get("key").and_then(Value::as_str).unwrap_or_default();
-        let enriched = canonical_bytes(rec.get("enrichedValue").unwrap_or(&Value::Null));
-        if doi != self.doi {
-            doi.clone_into(&mut self.doi);
+    pub(crate) fn admit(&mut self, rec: &EnrichmentRecord) -> Result<bool> {
+        let enriched = canonical_bytes(&rec.enriched_value);
+        if rec.doi != self.doi {
+            rec.doi.clone_into(&mut self.doi);
             self.seen.clear();
         }
-        if let Some((_, previous)) = self.seen.iter().find(|(seen, _)| seen == key) {
+        if let Some((_, previous)) = self.seen.iter().find(|(seen, _)| *seen == rec.content_key) {
             if *previous == enriched {
                 return Ok(false);
             }
-            bail!("key {key} (doi `{doi}`) has two different enrichedValues in one source record");
+            bail!(
+                "contentKey {} (doi `{}`) has two different enrichedValues in one source record",
+                rec.content_key,
+                rec.doi
+            );
         }
-        self.seen.push((key.to_owned(), enriched));
+        self.seen.push((rec.content_key.clone(), enriched));
         Ok(true)
     }
 }
@@ -202,13 +181,22 @@ mod tests {
         );
     }
 
-    fn stamped(doi: &str, key: &str, enriched: &Value) -> Value {
-        json!({"doi": doi, "key": key, "enrichedValue": enriched})
+    fn stamped(doi: &str, content_key: &str, enriched: &Value) -> EnrichmentRecord {
+        EnrichmentRecord {
+            doi: doi.to_owned(),
+            action: EnrichmentAction::UpdateChild,
+            field: "fundingReferences".to_owned(),
+            original_value: Value::Null,
+            enriched_value: enriched.clone(),
+            source_id: "10.82461/bpzr-jd55".to_owned(),
+            content_key: content_key.to_owned(),
+            event: None,
+        }
     }
 
     #[test]
-    fn key_window_drops_identical_repeat_within_one_doi() {
-        let mut window = KeyWindow::default();
+    fn content_key_window_drops_identical_repeat_within_one_doi() {
+        let mut window = ContentKeyWindow::default();
         let rec = stamped("10.1/a", "k1", &json!({"name": "NSF"}));
         assert!(window.admit(&rec).unwrap());
         assert!(!window.admit(&rec).unwrap());
@@ -220,8 +208,8 @@ mod tests {
     }
 
     #[test]
-    fn key_window_treats_jcs_equal_values_as_duplicates() {
-        let mut window = KeyWindow::default();
+    fn content_key_window_treats_jcs_equal_values_as_duplicates() {
+        let mut window = ContentKeyWindow::default();
         assert!(
             window
                 .admit(&stamped("10.1/a", "k1", &json!({"n": 1})))
@@ -235,8 +223,8 @@ mod tests {
     }
 
     #[test]
-    fn key_window_fails_on_same_key_with_different_enriched_value() {
-        let mut window = KeyWindow::default();
+    fn content_key_window_fails_on_same_key_with_different_enriched_value() {
+        let mut window = ContentKeyWindow::default();
         window
             .admit(&stamped("10.1/a", "k1", &json!({"name": "NSF"})))
             .unwrap();
@@ -247,7 +235,7 @@ mod tests {
         assert!(err.contains("k1") && err.contains("10.1/a"), "got: {err}");
     }
 
-    fn key(action: EnrichmentAction, original: &serde_json::Value) -> String {
+    fn content_key(action: EnrichmentAction, original: &serde_json::Value) -> String {
         enrichment_content_key(
             "funders",
             "10.5281/zenodo.123",
@@ -259,8 +247,8 @@ mod tests {
     }
 
     #[test]
-    fn key_is_32_lowercase_hex_chars() {
-        let k = key(EnrichmentAction::UpdateChild, &json!({"funderName": "nsf"}));
+    fn content_key_is_32_lowercase_hex_chars() {
+        let k = content_key(EnrichmentAction::UpdateChild, &json!({"funderName": "nsf"}));
         assert_eq!(k.len(), 32);
         assert!(
             k.chars()
@@ -269,12 +257,12 @@ mod tests {
     }
 
     #[test]
-    fn key_is_deterministic_and_ignores_original_key_order() {
-        let a = key(
+    fn content_key_ignores_original_value_property_order() {
+        let a = content_key(
             EnrichmentAction::UpdateChild,
             &json!({"funderName": "nsf", "awardNumber": "1"}),
         );
-        let b = key(
+        let b = content_key(
             EnrichmentAction::UpdateChild,
             &json!({"awardNumber": "1", "funderName": "nsf"}),
         );
@@ -282,10 +270,12 @@ mod tests {
     }
 
     #[test]
-    fn key_changes_with_each_input_component() {
-        let base = key(EnrichmentAction::UpdateChild, &json!({"funderName": "nsf"}));
-        let other_original = key(EnrichmentAction::UpdateChild, &json!({"funderName": "nih"}));
-        let other_action = key(EnrichmentAction::DeleteChild, &json!({"funderName": "nsf"}));
+    fn content_key_changes_with_each_input_component() {
+        let base = content_key(EnrichmentAction::UpdateChild, &json!({"funderName": "nsf"}));
+        let other_original =
+            content_key(EnrichmentAction::UpdateChild, &json!({"funderName": "nih"}));
+        let other_action =
+            content_key(EnrichmentAction::DeleteChild, &json!({"funderName": "nsf"}));
         let other_method = enrichment_content_key(
             "affiliations",
             "10.5281/zenodo.123",
@@ -308,7 +298,7 @@ mod tests {
     }
 
     #[test]
-    fn update_key_ignores_the_enriched_value() {
+    fn update_content_key_ignores_the_enriched_value() {
         let a = enrichment_content_key(
             "resource-type-general",
             "10.1/x",
@@ -418,7 +408,7 @@ mod tests {
     }
 
     #[test]
-    fn insert_key_uses_the_enriched_value() {
+    fn insert_content_key_uses_the_enriched_value() {
         let a = enrichment_content_key(
             "funders",
             "10.1/x",
@@ -436,46 +426,5 @@ mod tests {
             &json!({"funderName": "NIH"}),
         );
         assert_ne!(a, b);
-    }
-
-    fn keyed_record() -> Value {
-        json!({
-            "doi": "10.5281/zenodo.123",
-            "action": "updateChild",
-            "field": "fundingReferences",
-            "originalValue": {"funderName": "nsf"},
-            "enrichedValue": {"funderName": "NSF"},
-        })
-    }
-
-    #[test]
-    fn embedded_key_reads_the_key_field() {
-        let mut rec = keyed_record();
-        rec["key"] = json!("0860ed77af682e5bbe343af4f5e0347c");
-        let k = embedded_key(&rec).unwrap();
-        assert_eq!(k, 0x0860_ed77_af68_2e5b_be34_3af4_f5e0_347c);
-    }
-
-    #[test]
-    fn embedded_key_rejects_missing_or_malformed_keys() {
-        let err = format!("{:#}", embedded_key(&keyed_record()).unwrap_err());
-        assert!(
-            err.contains("no key") && err.contains("10.5281/zenodo.123"),
-            "{err}"
-        );
-        let mut rec = keyed_record();
-        rec["key"] = json!("nope");
-        assert!(embedded_key(&rec).is_err());
-    }
-
-    #[test]
-    fn enriched_value_hash_is_canonical_and_null_when_absent() {
-        let a = json!({"enrichedValue": {"b": 1, "a": {"d": 2, "c": 3}}});
-        let b = json!({"enrichedValue": {"a": {"c": 3, "d": 2}, "b": 1}});
-        assert_eq!(enriched_value_hash(&a), enriched_value_hash(&b));
-        assert_eq!(
-            enriched_value_hash(&json!({"doi": "10.1/a"})),
-            enriched_value_hash(&json!({"enrichedValue": null}))
-        );
     }
 }
