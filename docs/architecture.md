@@ -78,8 +78,9 @@ DataCite field to update, and the original and enriched values. The field is set
 record; this matters for `affiliations`, which can update either `creators` or `contributors`.
 
 Methods return only the value part of the enrichment. Core adds the `sourceId` and enrichment
-content key (`contentKey`), validates the complete record, and writes it. Each method also exposes a frozen
-`name()` (`funders`, `affiliations`, `resource-type-general`) that is hashed into every content key.
+content key (`contentKey`), validates the complete record, and writes it. Each method also exposes
+a frozen `name()` (`funders`, `affiliations`, `resource-type-general`) that is hashed into every
+content key.
 
 ## DOI deduplication
 
