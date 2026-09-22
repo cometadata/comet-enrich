@@ -1,6 +1,7 @@
 //! Filesystem helpers for run artifacts.
 
 use crate::manifest::MANIFEST_FILE;
+use crate::staged_run::WORK_DIR;
 use crate::writer::{ENRICHMENTS_DIR, ENRICHMENTS_FAILED_FILE};
 use anyhow::{Context, Result, bail};
 use std::fs;
@@ -12,6 +13,21 @@ pub(crate) fn clear_run_outputs(output: &Path) -> Result<()> {
     remove_file_if_exists(&output.join(MANIFEST_FILE))?;
     recreate_dir(&output.join(ENRICHMENTS_DIR))?;
     remove_file_if_exists(&output.join(ENRICHMENTS_FAILED_FILE))?;
+    Ok(())
+}
+
+/// Refuse output containing `.work`: replacing enrichments would leave stage
+/// markers referring to the previous output.
+pub(crate) fn ensure_no_staged_work(output: &Path) -> Result<()> {
+    let work = output.join(WORK_DIR);
+    if work.exists() {
+        bail!(
+            "--output {} contains a `{WORK_DIR}` directory left by a staged run; \
+             choose a different output directory, or remove `{WORK_DIR}` if that \
+             run is no longer needed",
+            output.display()
+        );
+    }
     Ok(())
 }
 
@@ -47,22 +63,27 @@ pub(crate) fn recreate_dir(path: &Path) -> Result<()> {
 /// input must exist; `output` need not, in which case symlinks and `..` are
 /// still resolved through its non-existent tail.
 ///
-/// `inputs` pairs each path with its CLI flag name (without the leading dashes)
-/// so the error names both sides, e.g. `--output overlaps --new`.
-pub(crate) fn ensure_disjoint(output: &Path, inputs: &[(&str, &Path)]) -> Result<()> {
+/// `inputs` pairs each path with the argument name to print, such as `--old`
+/// or `SNAPSHOT`, so the error names both sides, e.g. `--output overlaps --new`.
+///
+/// # Errors
+///
+/// Returns an error if an input does not exist, if any path cannot be
+/// resolved, or if two of the paths overlap.
+pub fn ensure_disjoint(output: &Path, inputs: &[(&str, &Path)]) -> Result<()> {
     let output_canon = soft_canonicalize::soft_canonicalize(output)
         .with_context(|| format!("resolving --output {}", output.display()))?;
     let mut inputs_canon = Vec::with_capacity(inputs.len());
     for (label, path) in inputs {
         let canon = fs::canonicalize(path)
-            .with_context(|| format!("resolving --{label} {}", path.display()))?;
+            .with_context(|| format!("resolving {label} {}", path.display()))?;
         inputs_canon.push((*label, canon));
     }
 
     for (label, canon) in &inputs_canon {
         if output_canon.starts_with(canon) || canon.starts_with(&output_canon) {
             bail!(
-                "--output overlaps --{label}: {} and {}",
+                "--output overlaps {label}: {} and {}",
                 output.display(),
                 canon.display()
             );
@@ -71,7 +92,7 @@ pub(crate) fn ensure_disjoint(output: &Path, inputs: &[(&str, &Path)]) -> Result
     for (i, (label_a, a)) in inputs_canon.iter().enumerate() {
         for (label_b, b) in &inputs_canon[i + 1..] {
             if a.starts_with(b) || b.starts_with(a) {
-                bail!("--{label_a} overlaps --{label_b}: {}", a.display());
+                bail!("{label_a} overlaps {label_b}: {}", a.display());
             }
         }
     }
@@ -126,14 +147,14 @@ mod tests {
         let (root, a, b) = inputs();
         let out = root.path().join("not-yet-created").join("out");
 
-        ensure_disjoint(&out, &[("old", &a), ("new", &b)]).unwrap();
+        ensure_disjoint(&out, &[("--old", &a), ("--new", &b)]).unwrap();
     }
 
     #[test]
     fn ensure_disjoint_rejects_output_equal_to_an_input() {
         let (_root, a, b) = inputs();
 
-        let err = ensure_disjoint(&b, &[("old", &a), ("new", &b)]).unwrap_err();
+        let err = ensure_disjoint(&b, &[("--old", &a), ("--new", &b)]).unwrap_err();
 
         let msg = format!("{err:#}");
         assert!(msg.contains("--output overlaps --new"), "{msg}");
@@ -145,7 +166,7 @@ mod tests {
         let out = a.join("nested").join("out");
 
         assert_err_contains(
-            ensure_disjoint(&out, &[("old", &a), ("new", &b)]),
+            ensure_disjoint(&out, &[("--old", &a), ("--new", &b)]),
             "--output overlaps --old",
         );
     }
@@ -156,7 +177,7 @@ mod tests {
         let out = root.path().to_path_buf();
 
         assert_err_contains(
-            ensure_disjoint(&out, &[("input", &a)]),
+            ensure_disjoint(&out, &[("--input", &a)]),
             "--output overlaps --input",
         );
     }
@@ -167,7 +188,7 @@ mod tests {
         let out = root.path().join("out");
 
         assert_err_contains(
-            ensure_disjoint(&out, &[("old", &a), ("new", &a)]),
+            ensure_disjoint(&out, &[("--old", &a), ("--new", &a)]),
             "--old overlaps --new",
         );
     }
@@ -182,7 +203,7 @@ mod tests {
         let out = link.join("out");
 
         assert_err_contains(
-            ensure_disjoint(&out, &[("old", &a), ("new", &b)]),
+            ensure_disjoint(&out, &[("--old", &a), ("--new", &b)]),
             "--output overlaps --old",
         );
     }
@@ -194,7 +215,7 @@ mod tests {
         let out = a.join("missing").join("..");
 
         assert_err_contains(
-            ensure_disjoint(&out, &[("old", &a), ("new", &b)]),
+            ensure_disjoint(&out, &[("--old", &a), ("--new", &b)]),
             "--output overlaps --old",
         );
     }
@@ -206,7 +227,7 @@ mod tests {
         let missing = root.path().join("missing");
 
         assert_err_contains(
-            ensure_disjoint(&out, &[("old", &a), ("new", &missing)]),
+            ensure_disjoint(&out, &[("--old", &a), ("--new", &missing)]),
             "--new",
         );
     }

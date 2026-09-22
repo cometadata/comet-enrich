@@ -16,6 +16,11 @@ Running `affiliations` without a stage runs the whole pipeline. Intermediate fil
 `.work` directory inside `--output`. A later run resumes from completed stages there unless
 `--from-scratch` is given.
 
+A run refuses to reuse stage artifacts written before comet-enrich 0.4.0, because they lack
+content keys; rerun with `--from-scratch`, or `--stage extract` and then resume. If
+`enrichments/` has been removed, the next run rebuilds it by rerunning reconcile from the
+existing work artifacts.
+
 ## Prerequisites
 
 - A running **Marple** match service, loaded with ROR data, that matches affiliation strings to

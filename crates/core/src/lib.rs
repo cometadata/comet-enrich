@@ -26,8 +26,10 @@ pub mod schema;
 pub mod staged_run;
 pub mod template;
 pub mod transform;
+pub mod version;
 pub mod writer;
 
+pub use artifact_lifecycle::ensure_disjoint;
 pub use content_key::enrichment_content_key;
 pub use dedup::{DedupStore, HashBits, hash_input};
 pub use diff::{DiffManifest, DiffOptions, DiffOutcome, DiffStats, run_diff};
@@ -36,7 +38,7 @@ pub use enrichment_record::{DiffEvent, EnrichmentRecord};
 pub use fanout::{input_files, make_pool};
 pub use manifest::{
     EXIT_PARTIAL, EXIT_SUCCESS, HashInfo, Manifest, Report, RunMeta, SourceRelease, StageTimings,
-    exit_status,
+    exit_status, stage_exit_status,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use match_service::FakeMatchService;
@@ -51,6 +53,7 @@ pub use schema::SCHEMA;
 pub use staged_run::{LookupConfig, Stage, WorkDir, pipeline_complete, run_staged, stages_to_run};
 pub use template::EnrichmentTemplate;
 pub use transform::run;
+pub use version::MIN_ARTIFACT_VERSION;
 pub use writer::{
     DEFAULT_OUTPUT_PART_SIZE_MIB, DEFAULT_OUTPUT_WRITER_LANES, ENRICHMENTS_DIR,
     ENRICHMENTS_FAILED_FILE,

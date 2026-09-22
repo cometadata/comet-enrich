@@ -21,11 +21,14 @@ when it is a non-blank string and otherwise falling back to `attributes.doi`.
 
 ## Options
 
-| Option                | Default    | Description                                  |
-|-----------------------|------------|----------------------------------------------|
-| `--output <FILE>`     | _required_ | File to write the JSON report to             |
-| `--threads <N>`       | `0`        | Worker threads; `0` uses all available CPUs  |
-| `--log-level <LEVEL>` | `info`     | Minimum log level                            |
+| Option                 | Default    | Description                                 |
+|------------------------|------------|---------------------------------------------|
+| `--output <FILE>`      | _required_ | JSON report file                            |
+| `--threads <N>`        | `0`        | Worker threads; `0` uses all available CPUs |
+| `--log-level <LEVEL>`  | `info`     | Minimum log level                           |
+
+The report must be outside the snapshot to avoid overwriting source parts. Paths are compared
+after resolving symlinks.
 
 ## Report
 

@@ -42,6 +42,14 @@ fn record_without_content_key(doi: &str, original: &str, enriched: &str) -> Valu
     rec
 }
 
+/// Rewrite `dir/manifest.json` after `write_run` with `edit` applied.
+fn patch_manifest(dir: &Path, edit: impl FnOnce(&mut Value)) {
+    let path = dir.join("manifest.json");
+    let mut manifest: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    edit(&mut manifest);
+    fs::write(&path, serde_json::to_string_pretty(&manifest).unwrap()).unwrap();
+}
+
 fn dirs() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
     let tmp = tempfile::tempdir().unwrap();
     let (old, new, out) = (
@@ -288,6 +296,22 @@ fn output_overlapping_an_input_is_refused_before_anything_is_deleted() {
 }
 
 #[test]
+fn output_holding_staged_work_is_refused() {
+    let (_tmp, old, new, out) = dirs();
+    let rec = record("10.1/a", "Text", "Dataset");
+    write_run(&old, std::slice::from_ref(&rec));
+    write_run(&new, &[rec]);
+    fs::create_dir_all(out.join(".work")).unwrap();
+
+    let err = format!(
+        "{:#}",
+        run_diff(&diff_options(&old, &new, &out)).unwrap_err()
+    );
+
+    assert!(err.contains(".work"), "{err}");
+}
+
+#[test]
 fn partial_new_side_is_refused() {
     let (_tmp, old, new, out) = dirs();
     let rec = record("10.1/a", "Text", "Dataset");
@@ -339,6 +363,78 @@ fn side_without_exit_status_is_refused() {
 
         assert!(err.contains("exit_status"), "{side}: {err}");
         assert!(err.contains(side), "{side}: {err}");
+    }
+}
+
+#[test]
+fn side_from_a_build_before_0_4_is_refused() {
+    for version in [Some("0.3.2"), None] {
+        let (_tmp, old, new, out) = dirs();
+        let rec = record("10.1/a", "Text", "Dataset");
+        write_run(&old, std::slice::from_ref(&rec));
+        write_run(&new, &[rec]);
+        patch_manifest(&old, |m| match version {
+            Some(v) => m["method"]["version"] = json!(v),
+            None => {
+                m["method"].as_object_mut().unwrap().remove("version");
+            }
+        });
+
+        let err = format!(
+            "{:#}",
+            run_diff(&diff_options(&old, &new, &out)).unwrap_err()
+        );
+
+        assert!(err.contains("old"), "{version:?}: {err}");
+        assert!(err.contains("0.4.0"), "{version:?}: {err}");
+    }
+}
+
+#[test]
+fn side_that_reused_a_legacy_stage_is_refused() {
+    let (_tmp, old, new, out) = dirs();
+    let rec = record("10.1/a", "Text", "Dataset");
+    write_run(&old, std::slice::from_ref(&rec));
+    write_run(&new, &[rec]);
+    // The manifest says 0.4.0 but the extract marker it reused was empty (pre-0.4).
+    patch_manifest(&new, |m| {
+        m["report"]["stage_versions"] = json!({
+            "extract": null,
+            "query": "0.4.0",
+            "reconcile": "0.4.0",
+        });
+    });
+
+    let err = format!(
+        "{:#}",
+        run_diff(&diff_options(&old, &new, &out)).unwrap_err()
+    );
+
+    assert!(err.contains("new"), "{err}");
+    assert!(err.contains("extract"), "{err}");
+}
+
+#[test]
+fn side_whose_part_count_disagrees_with_its_manifest_is_refused() {
+    for side in ["old", "new"] {
+        let (_tmp, old, new, out) = dirs();
+        let recs = [
+            record("10.1/a", "Text", "Dataset"),
+            record("10.1/b", "Text", "Dataset"),
+        ];
+        write_run(&old, &recs);
+        write_run(&new, &recs);
+        // A part went missing after the manifest was written.
+        let victim = if side == "old" { &old } else { &new };
+        fs::remove_file(victim.join("enrichments/part_0000.jsonl.gz")).unwrap();
+
+        let err = format!(
+            "{:#}",
+            run_diff(&diff_options(&old, &new, &out)).unwrap_err()
+        );
+
+        assert!(err.contains(side), "{side}: {err}");
+        assert!(err.contains("emitted"), "{side}: {err}");
     }
 }
 

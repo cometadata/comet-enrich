@@ -44,7 +44,9 @@ the run stops. See [architecture.md](architecture.md#doi-deduplication) for deta
 
 Each method writes gzip-compressed JSONL parts under `--output/enrichments/`, one record per line.
 Records are validated as they are written. Invalid records are diverted to
-`enrichments.failed.jsonl` with the validator error attached, and the run continues.
+`enrichments.failed.jsonl` with the validator error attached, and the run continues. A
+transform method refuses an `--output` that contains `.work` from a staged run; use a separate
+directory per method.
 
 Part files are storage chunks, not semantic partitions. Consumers should read every
 `*.jsonl.gz` file under `enrichments/`.
@@ -56,9 +58,14 @@ Use these options to change the validation behaviour:
 
 ### Partial runs
 
-If a run completes with errors or incomplete results, its manifest reports `exit_status: partial`.
-The output is retained for debugging, but should not be published and cannot be used with
-`comet-enrich diff`.
+A partial run is one where an input file failed to read, a source line could not be parsed, a
+record failed schema validation, a lookup was lost to a timeout or error, no enrichment records
+were emitted, or the staged pipeline did not complete. Its manifest reports
+`exit_status: partial` and the command exits non-zero. The output is retained for debugging,
+but should not be published and cannot be used with `comet-enrich diff`.
+
+A standalone `--stage extract` or `--stage query` writes no manifest and exits 0 when the stage
+completes without errors.
 
 ## Source ID
 

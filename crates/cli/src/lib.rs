@@ -14,7 +14,7 @@ use clap::{CommandFactory, Parser, Subcommand, ValueHint};
 use comet_enrich_core::{
     EXIT_PARTIAL, EnrichmentMethod, HashInfo, LookupConfig, Manifest, MarpleClient, MatchHit,
     MatchService, RunMeta, RunStats, Stage, StageTimings, exit_status, pipeline_complete,
-    run_staged,
+    run_staged, stage_exit_status,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -240,6 +240,7 @@ fn run_diff_command(a: &DiffArgs) -> Result<()> {
 pub struct PartialRun {
     method: String,
     files_failed: u64,
+    lines_malformed: u64,
     schema_failures: u64,
     match_errors: u64,
     emitted: u64,
@@ -250,9 +251,10 @@ impl std::fmt::Display for PartialRun {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{} run is partial (manifest exit_status `{EXIT_PARTIAL}`): {} file(s) failed, {} schema failure(s), {} lost match(es), {} emitted, pipeline complete: {}; the manifest and parts written so far are kept",
+            "{} run is partial (manifest exit_status `{EXIT_PARTIAL}`): {} file(s) failed, {} malformed line(s), {} schema failure(s), {} lost match(es), {} emitted, pipeline complete: {}; the manifest and parts written so far are kept",
             self.method,
             self.files_failed,
+            self.lines_malformed,
             self.schema_failures,
             self.match_errors,
             self.emitted,
@@ -302,6 +304,7 @@ fn run_method<M: EnrichmentMethod>(
     // The transform path is complete unless it lost records or emitted none.
     let manifest_status = exit_status(
         stats.files_failed,
+        stats.lines_malformed,
         stats.schema_failures,
         0,
         true,
@@ -326,6 +329,7 @@ fn finish_run(
         return Err(PartialRun {
             method: name.to_owned(),
             files_failed: stats.files_failed,
+            lines_malformed: stats.lines_malformed,
             schema_failures: stats.schema_failures,
             match_errors,
             emitted: stats.emitted,
@@ -387,13 +391,26 @@ where
         .as_ref()
         .map_or(0, |m| m.failure_taxonomy.lost());
     let complete = pipeline_complete(&io.output);
-    let manifest_status = exit_status(
-        report.counters.files_failed,
-        report.counters.schema_failures,
-        match_errors,
-        complete,
-        report.counters.emitted,
-    );
+    let counters = &report.counters;
+    // A standalone stage leaves the pipeline incomplete by design and is
+    // judged on its own errors; a full or completing run needs every stage.
+    let manifest_status = if stage.is_some() && !complete {
+        stage_exit_status(
+            counters.files_failed,
+            counters.lines_malformed,
+            counters.schema_failures,
+            match_errors,
+        )
+    } else {
+        exit_status(
+            counters.files_failed,
+            counters.lines_malformed,
+            counters.schema_failures,
+            match_errors,
+            complete,
+            counters.emitted,
+        )
+    };
     let stats = report.counters.clone();
     if complete {
         Manifest::from_report(

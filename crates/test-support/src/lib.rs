@@ -74,11 +74,13 @@ pub fn write_run_dir(dir: &Path, parts: &[&[Value]], exit_status: Option<&str>) 
     for (idx, records) in parts.iter().enumerate() {
         write_gz_part(&enrich.join(format!("part_{idx:04}.jsonl.gz")), records);
     }
+    let emitted: usize = parts.iter().map(|records| records.len()).sum();
     let mut manifest = json!({
         "schema_version": 1,
-        "method": {"name": METHOD, "version": "0.0.0"},
+        "method": {"name": METHOD, "version": env!("CARGO_PKG_VERSION")},
         "source_id": SOURCE_ID,
         "sources": {"datacite": {"release_date": "2026-01-02"}},
+        "report": {"counters": {"emitted": emitted}},
     });
     if let Some(status) = exit_status {
         manifest["exit_status"] = json!(status);

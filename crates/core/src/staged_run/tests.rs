@@ -426,6 +426,23 @@ fn resume_after_deleting_reconcile_marker_reproduces_output() {
 }
 
 #[test]
+fn resume_after_deleting_enrichments_reruns_reconcile() {
+    let t = TestRun::new();
+    t.run(true).unwrap();
+
+    // The marker survives but the output it certifies is gone.
+    fs::remove_dir_all(t.output.join(ENRICHMENTS_DIR)).unwrap();
+    assert!(!pipeline_complete(&t.output));
+
+    let report = t.run(false).unwrap();
+
+    assert_eq!(report.counters.emitted, 2);
+    assert!(report.stage_timings_ms.reconcile.is_some());
+    assert!(report.stage_timings_ms.extract.is_none());
+    assert_eq!(read_output_dois(&t.output).len(), 2);
+}
+
+#[test]
 fn from_scratch_failure_invalidates_old_downstream_markers() {
     let mut t = TestRun::new();
 
@@ -466,6 +483,7 @@ fn corrupt_input_file_is_counted_failed_not_hung() {
     assert_eq!(
         crate::exit_status(
             report.counters.files_failed,
+            report.counters.lines_malformed,
             0,
             0,
             true,
@@ -513,6 +531,8 @@ fn single_stage_extract_invalidates_downstream_artifacts() {
 
     t.run(true).unwrap();
     fs::write(t.output.join(MANIFEST_FILE), "stale").unwrap();
+    fs::write(t.work().join("query.done"), "").unwrap();
+    fs::write(t.work().join("reconcile.done"), "").unwrap();
 
     t.run_stage(Stage::Extract).unwrap();
 
@@ -532,6 +552,7 @@ fn single_stage_query_invalidates_reconcile_artifacts() {
 
     t.run(true).unwrap();
     fs::write(t.output.join(MANIFEST_FILE), "stale").unwrap();
+    fs::write(t.work().join("reconcile.done"), "").unwrap();
 
     t.run_stage(Stage::Query).unwrap();
 
@@ -855,38 +876,59 @@ fn resume_with_uppercase_variant_of_source_id_is_a_noop() {
 
 #[test]
 fn resume_with_changed_source_id_does_not_need_input_corpus() {
-    let t = TestRun::new();
-    t.run(true).unwrap();
+    for remove_output in [false, true] {
+        let t = TestRun::new();
+        t.run(true).unwrap();
 
-    // Re-stamping reads only work artifacts, so a deleted corpus must not
-    // block it.
-    fs::remove_dir_all(&t.input).unwrap();
+        // Re-stamping needs only work artifacts, even if the output is gone.
+        fs::remove_dir_all(&t.input).unwrap();
+        if remove_output {
+            fs::remove_dir_all(t.output.join(ENRICHMENTS_DIR)).unwrap();
+        }
 
-    let changed_source_id = "10.82461/no-corpus";
-    let changed = EnrichmentTemplate::new(changed_source_id).unwrap();
-    let report = t
-        .run_with_template(&changed, &cfg(HashBits::Bits64, false), None, None)
-        .unwrap();
+        let changed_source_id = "10.82461/no-corpus";
+        let changed = EnrichmentTemplate::new(changed_source_id).unwrap();
+        let report = t
+            .run_with_template(&changed, &cfg(HashBits::Bits64, false), None, None)
+            .unwrap();
 
-    assert!(report.stage_timings_ms.extract.is_none());
-    assert!(report.stage_timings_ms.query.is_none());
-    assert!(report.stage_timings_ms.reconcile.is_some());
-    let records = read_enrichment_parts(&t.output);
-    assert_eq!(records.len(), 2);
-    for record in records {
-        assert_eq!(record["sourceId"], changed_source_id);
+        assert!(report.stage_timings_ms.extract.is_none());
+        assert!(report.stage_timings_ms.query.is_none());
+        assert!(report.stage_timings_ms.reconcile.is_some());
+        let records = read_enrichment_parts(&t.output);
+        assert_eq!(records.len(), 2);
+        for record in records {
+            assert_eq!(record["sourceId"], changed_source_id);
+        }
+        assert_eq!(reconcile_stats(&t)["source_id"], changed_source_id);
     }
 }
 
 #[test]
-fn resume_reusing_stage_from_another_version_warns_and_reports_it() {
-    capture_warnings();
+fn resume_over_a_legacy_stage_marker_is_refused() {
     let t = TestRun::new();
     t.run(true).unwrap();
 
     // A marker written before 0.4 is empty; make extract look like one and
-    // force reconcile to rerun.
+    // force reconcile to rerun so extract would be reused.
     fs::write(t.work().join("extract.done"), "").unwrap();
+    fs::remove_file(t.work().join("reconcile.done")).unwrap();
+
+    let err = format!("{:#}", t.run(false).unwrap_err());
+
+    assert!(err.contains("extract"), "{err}");
+    assert!(err.contains("--from-scratch"), "{err}");
+    // Nothing was rebuilt.
+    assert!(!t.work().join("reconcile.done").exists());
+}
+
+#[test]
+fn resume_reusing_a_stage_from_a_newer_compatible_build_warns_and_reports_it() {
+    capture_warnings();
+    let t = TestRun::new();
+    t.run(true).unwrap();
+
+    fs::write(t.work().join("extract.done"), "9.9.9").unwrap();
     fs::remove_file(t.work().join("reconcile.done")).unwrap();
 
     let report = t.run(false).unwrap();
@@ -894,8 +936,7 @@ fn resume_reusing_stage_from_another_version_warns_and_reports_it() {
     assert!(!warnings_mentioning("reusing extract artifacts").is_empty());
     assert!(warnings_mentioning("reusing query artifacts").is_empty());
     let versions = report.stage_versions.unwrap();
-    assert_eq!(versions.extract, None);
-    assert_eq!(versions.query.as_deref(), Some(env!("CARGO_PKG_VERSION")));
+    assert_eq!(versions.extract.as_deref(), Some("9.9.9"));
     assert_eq!(
         versions.reconcile.as_deref(),
         Some(env!("CARGO_PKG_VERSION"))
@@ -1023,6 +1064,7 @@ fn rejecting_validator_surfaces_schema_failures() {
     assert_eq!(
         crate::exit_status(
             0,
+            0,
             report.counters.schema_failures,
             0,
             true,
@@ -1046,6 +1088,7 @@ fn batch_error_is_recorded_not_certified_as_success() {
     assert_eq!(report.counters.emitted, 0);
     let status = crate::exit_status(
         report.counters.files_failed,
+        report.counters.lines_malformed,
         0,
         m.failure_taxonomy.lost(),
         true,
@@ -1067,6 +1110,7 @@ fn batch_timeout_is_lost_data_not_success() {
     assert_eq!(m.failure_taxonomy.error, 0);
     assert_eq!(m.failure_taxonomy.lost(), 3);
     let status = crate::exit_status(
+        0,
         0,
         0,
         m.failure_taxonomy.lost(),
@@ -1106,6 +1150,7 @@ fn item_error_is_recorded_not_certified_as_no_match() {
     assert_eq!(m.failure_taxonomy.no_match, 0);
     assert_eq!(m.failure_taxonomy.lost(), 1);
     let status = crate::exit_status(
+        0,
         0,
         0,
         m.failure_taxonomy.lost(),
@@ -1173,12 +1218,20 @@ fn classify_failure_bins_by_kind_not_message() {
 
 #[test]
 fn exit_status_is_success_only_when_clean_and_complete() {
-    assert_eq!(crate::exit_status(0, 0, 0, true, 1), "success");
-    assert_eq!(crate::exit_status(1, 0, 0, true, 1), "partial");
-    assert_eq!(crate::exit_status(0, 1, 0, true, 1), "partial");
-    assert_eq!(crate::exit_status(0, 0, 1, true, 1), "partial");
-    assert_eq!(crate::exit_status(0, 0, 0, false, 1), "partial");
-    assert_eq!(crate::exit_status(0, 0, 0, true, 0), "partial");
+    assert_eq!(crate::exit_status(0, 0, 0, 0, true, 1), "success");
+    assert_eq!(crate::exit_status(1, 0, 0, 0, true, 1), "partial");
+    assert_eq!(crate::exit_status(0, 1, 0, 0, true, 1), "partial");
+    assert_eq!(crate::exit_status(0, 0, 1, 0, true, 1), "partial");
+    assert_eq!(crate::exit_status(0, 0, 0, 1, true, 1), "partial");
+    assert_eq!(crate::exit_status(0, 0, 0, 0, false, 1), "partial");
+    assert_eq!(crate::exit_status(0, 0, 0, 0, true, 0), "partial");
+}
+
+#[test]
+fn stage_exit_status_ignores_pipeline_completeness_and_empty_output() {
+    assert_eq!(crate::stage_exit_status(0, 0, 0, 0), "success");
+    assert_eq!(crate::stage_exit_status(1, 0, 0, 0), "partial");
+    assert_eq!(crate::stage_exit_status(0, 0, 0, 1), "partial");
 }
 
 #[test]

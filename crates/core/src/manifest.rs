@@ -90,7 +90,7 @@ pub struct Report {
 }
 
 /// Crate version recorded by each completed stage.
-#[derive(Debug, Default, Clone, Serialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct StageVersions {
     pub extract: Option<String>,
     pub query: Option<String>,
@@ -176,25 +176,42 @@ impl MatchFailureTaxonomy {
 
 /// Manifest `exit_status` for a run that made a complete pass with no data loss.
 pub const EXIT_SUCCESS: &str = "success";
-/// Manifest `exit_status` for a run that lost data, emitted no records, or did
-/// not complete all stages.
+/// Manifest `exit_status` for a run that lost data (a failed file, a source
+/// line that could not be parsed, a schema failure, or a lost lookup),
+/// emitted no records, or did not complete all stages.
 pub const EXIT_PARTIAL: &str = "partial";
 
 /// Derive a run's manifest `exit_status`.
 #[must_use]
 pub fn exit_status(
     files_failed: u64,
+    lines_malformed: u64,
     schema_failures: u64,
     match_errors: u64,
     pipeline_complete: bool,
     emitted: u64,
 ) -> &'static str {
-    if files_failed > 0
-        || schema_failures > 0
-        || match_errors > 0
+    if stage_exit_status(files_failed, lines_malformed, schema_failures, match_errors)
+        == EXIT_PARTIAL
         || !pipeline_complete
         || emitted == 0
     {
+        EXIT_PARTIAL
+    } else {
+        EXIT_SUCCESS
+    }
+}
+
+/// Derive a standalone stage's status from errors alone. Extract and query
+/// need not complete the pipeline or emit enrichment records to succeed.
+#[must_use]
+pub fn stage_exit_status(
+    files_failed: u64,
+    lines_malformed: u64,
+    schema_failures: u64,
+    match_errors: u64,
+) -> &'static str {
+    if files_failed > 0 || lines_malformed > 0 || schema_failures > 0 || match_errors > 0 {
         EXIT_PARTIAL
     } else {
         EXIT_SUCCESS

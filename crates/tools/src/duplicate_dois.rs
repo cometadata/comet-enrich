@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result, ensure};
 use comet_enrich_core::{
-    Occurrence, Progress, input_files, make_pool, scan_doi_occurrences, winner,
+    Occurrence, Progress, ensure_disjoint, input_files, make_pool, scan_doi_occurrences, winner,
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -57,6 +57,8 @@ struct Scan {
 
 pub(crate) fn run(args: &Args) -> Result<()> {
     let files = snapshot_files(&args.snapshot)?;
+    // The report must not replace a part it is about to describe.
+    ensure_disjoint(&args.output, &[("SNAPSHOT", &args.snapshot)])?;
     let scan = scan_snapshot(&files, args.threads)?;
     let report = scan.report(&files);
     report.write_json(&args.output)?;

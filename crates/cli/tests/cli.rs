@@ -351,3 +351,30 @@ fn cli_partial_run_writes_manifest_and_exits_non_zero() {
     assert_eq!(manifest["exit_status"], json!("partial"));
     assert_eq!(manifest["report"]["counters"]["files_failed"], json!(1));
 }
+
+#[test]
+fn cli_standalone_extract_exits_zero_without_a_manifest() {
+    let (_tmp, input, output) =
+        gz_input_fixture(&[json!({ "id": "10.1/a", "attributes": { "name": "MIT" } })]);
+
+    // Extract never contacts the match service, so a closed port is fine.
+    cli()
+        .args([
+            "affiliations",
+            "-i",
+            input.to_str().unwrap(),
+            "-o",
+            output.to_str().unwrap(),
+            "--source-id",
+            SOURCE_ID,
+            "--stage",
+            "extract",
+            "--ror-service-url",
+            "http://127.0.0.1:9",
+        ])
+        .assert()
+        .success();
+
+    assert!(output.join(".work/extract.done").exists());
+    assert!(!output.join("manifest.json").exists());
+}

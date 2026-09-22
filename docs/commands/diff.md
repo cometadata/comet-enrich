@@ -3,11 +3,19 @@
 `comet-enrich diff` compares two successful runs of the same method and writes events
 describing which enrichments were added, removed, or changed.
 
-Both input directories must contain `enrichments/` and a `manifest.json` reporting
-`exit_status: success`. Method versions may differ.
+Input requirements:
+
+- Both directories contain `enrichments/` and a `manifest.json` reporting `exit_status: success`.
+- Both releases and any reused stages (`report.stage_versions`) were written by comet-enrich
+  0.4.0 or later. Versions may differ.
+- Each input's record count matches its manifest's `report.counters.emitted`, preventing
+  missing data from being interpreted as retractions.
+
+Older releases lack content keys and require a `--from-scratch` rerun before they can be diffed.
 
 Use separate directories for `--old`, `--new`, and `--output`; none may contain another.
-Existing enrichment output and the manifest under `--output` are replaced.
+Existing enrichment output and the manifest under `--output` are replaced. `--output` must not
+contain `.work` from a staged run.
 
 ## Synopsis
 

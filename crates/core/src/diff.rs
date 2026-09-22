@@ -1,21 +1,20 @@
 //! Diff two completed enrichment runs into asserted/retracted/superseded events.
 //!
 //! Both sides are read from `<dir>/enrichments/*.jsonl.gz`; `<dir>/manifest.json`
-//! supplies the method name and exit status. Both must be complete runs written
-//! by a current comet-enrich: every record parses as an [`EnrichmentRecord`]
-//! with a `contentKey`, and no content key appears twice on one side.
+//! supplies the method name and exit status. See [`run_diff`] for input requirements.
 //!
 //! Three passes: index the old side, stream the new side emitting `asserted`
 //! and `superseded`, then re-read the old side emitting `retracted`. Each
 //! index holds a content key and a canonical `enrichedValue` hash per record.
-//! A missing or malformed content key, a repeated content key, a malformed
-//! line, or a side that is not a successful run fails the diff.
 
 use crate::artifact_lifecycle as lifecycle;
 use crate::enrichment_record::{DiffEvent, EnrichmentRecord};
 use crate::fanout::{FileError, list_jsonl_gz, open_gz, scan_jsonl_records};
-use crate::manifest::{EXIT_SUCCESS, MANIFEST_FILE, SourceRelease, write_manifest_json};
+use crate::manifest::{
+    EXIT_SUCCESS, MANIFEST_FILE, SourceRelease, StageVersions, write_manifest_json,
+};
 use crate::progress::Progress;
+use crate::version::{MIN_ARTIFACT_VERSION, is_at_least};
 use crate::writer::{ENRICHMENTS_DIR, ParallelRollingWriter};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -61,13 +60,32 @@ pub struct SideManifest {
     /// `success` or `partial`. Absent only in manifests written before the
     /// field existed, which the diff refuses.
     pub exit_status: Option<String>,
+    /// Absent only in manifests older than the diff supports.
+    #[serde(default)]
+    pub report: Option<SideReport>,
 }
 
 /// Method identity from a side's manifest.
 #[derive(Debug, Clone, Deserialize)]
 pub struct SideMethod {
     pub name: String,
+    /// Empty in manifests written before the field existed, which the diff refuses.
+    #[serde(default)]
     pub version: String,
+}
+
+/// The subset of a side's `report` the diff reads.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SideReport {
+    pub counters: SideCounters,
+    #[serde(default)]
+    pub stage_versions: Option<StageVersions>,
+}
+
+/// The subset of a side's `report.counters` the diff reads.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SideCounters {
+    pub emitted: u64,
 }
 
 /// Result of a diff run.
@@ -86,6 +104,67 @@ fn read_side_manifest(dir: &Path) -> Result<SideManifest> {
     let text =
         std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
     serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))
+}
+
+/// Require a release, and every stage artifact it reused, to come from a build
+/// that writes content keys. The method version alone is not enough: a rerun
+/// over legacy `.work` artifacts stamps the current version on old records.
+fn ensure_current_release(side: &str, manifest: &SideManifest) -> Result<()> {
+    let v = manifest.method.version.as_str();
+    if v.is_empty() {
+        bail!(
+            "the {side} release manifest has no method version; releases before \
+             comet-enrich {MIN_ARTIFACT_VERSION} cannot be diffed"
+        );
+    }
+    if !is_at_least(v, MIN_ARTIFACT_VERSION) {
+        bail!(
+            "the {side} release was written by comet-enrich {v}; releases before \
+             {MIN_ARTIFACT_VERSION} cannot be diffed (rerun it with --from-scratch)"
+        );
+    }
+    let Some(versions) = manifest
+        .report
+        .as_ref()
+        .and_then(|r| r.stage_versions.as_ref())
+    else {
+        return Ok(());
+    };
+    for (stage, recorded) in [
+        ("extract", &versions.extract),
+        ("query", &versions.query),
+        ("reconcile", &versions.reconcile),
+    ] {
+        let ok = recorded
+            .as_deref()
+            .is_some_and(|v| is_at_least(v, MIN_ARTIFACT_VERSION));
+        if !ok {
+            let fallback = format!("a build before {MIN_ARTIFACT_VERSION}");
+            let recorded = recorded.as_deref().unwrap_or(&fallback);
+            bail!(
+                "the {side} release reused {stage} artifacts written by {recorded}; \
+                 its records may lack content keys, so rerun it with --from-scratch"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Refuse a side whose parts hold a different number of records than its
+/// manifest says were emitted: a missing or truncated part would otherwise
+/// read as retractions.
+fn ensure_count(side: &str, scanned: u64, manifest: &SideManifest) -> Result<()> {
+    let Some(report) = &manifest.report else {
+        bail!("the {side} release manifest has no report.counters.emitted");
+    };
+    let emitted = report.counters.emitted;
+    if scanned != emitted {
+        bail!(
+            "the {side} release has {scanned} record(s) in enrichments/ but its manifest \
+             reports {emitted} emitted; the release is incomplete or was modified"
+        );
+    }
+    Ok(())
 }
 
 /// Require a successful run so missing records are not mistaken for retractions.
@@ -251,13 +330,19 @@ fn emit_retracted(
 ///
 /// # Errors
 ///
-/// Fails on unreadable inputs, malformed lines, mismatched method names, a
-/// side that is not a successful run, a record without a valid content key, a
-/// content key that appears twice on one side, or any write failure.
+/// Fails on unreadable inputs, an output directory that holds a staged run's
+/// `.work`, malformed lines, mismatched method names, a
+/// side written by a build before [`MIN_ARTIFACT_VERSION`], a side that is not a successful run,
+/// a side whose record count differs from its manifest, a record without a
+/// valid content key, a content key that appears twice on one side, or any
+/// write failure.
 pub fn run_diff(opts: &DiffOptions) -> Result<DiffOutcome> {
-    lifecycle::ensure_disjoint(&opts.output, &[("old", &opts.old), ("new", &opts.new)])?;
+    lifecycle::ensure_disjoint(&opts.output, &[("--old", &opts.old), ("--new", &opts.new)])?;
+    lifecycle::ensure_no_staged_work(&opts.output)?;
     let old_manifest = read_side_manifest(&opts.old)?;
     let new_manifest = read_side_manifest(&opts.new)?;
+    ensure_current_release("old", &old_manifest)?;
+    ensure_current_release("new", &new_manifest)?;
     if old_manifest.method.name != new_manifest.method.name {
         bail!(
             "method mismatch: old is `{}`, new is `{}`",
@@ -282,7 +367,9 @@ pub fn run_diff(opts: &DiffOptions) -> Result<DiffOutcome> {
 
     let mut stats = DiffStats::default();
     let old = index_old(&old_files, &mut stats)?;
+    ensure_count("old", stats.old_records, &old_manifest)?;
     let new = emit_new(&new_files, &old, &writer, &mut stats)?;
+    ensure_count("new", stats.new_records, &new_manifest)?;
     emit_retracted(&old_files, &new, &writer, &mut stats)?;
     let progress = Progress::new("Finalizing output", None)?;
     writer.finish()?;

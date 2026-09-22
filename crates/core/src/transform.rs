@@ -45,7 +45,8 @@ struct Counters {
 /// # Errors
 ///
 /// Returns an error if input files cannot be discovered (including when none are
-/// found), the output directory or files cannot be created, the progress bar
+/// found), the output overlaps the input or holds a staged run's `.work`, the
+/// output directory or files cannot be created, the progress bar
 /// template is invalid, or the rayon pool cannot be built. A write or flush
 /// failure also aborts the run, since the output would be incomplete. File read
 /// failures are counted in [`RunStats::files_failed`]; records already written
@@ -60,7 +61,8 @@ pub fn run<M: EnrichmentMethod>(
     log::info!("found {} input files", files.len());
 
     let enrich_dir = opts.output.join(ENRICHMENTS_DIR);
-    lifecycle::ensure_disjoint(&opts.output, &[("input", &opts.input)])?;
+    lifecycle::ensure_disjoint(&opts.output, &[("--input", &opts.input)])?;
+    lifecycle::ensure_no_staged_work(&opts.output)?;
     let pool = make_pool(opts.threads)?;
     let skip_lines = find_duplicate_lines(&files, &pool)?;
     lifecycle::clear_run_outputs(&opts.output)?;

@@ -388,6 +388,28 @@ fn output_equal_to_input_is_refused_and_input_survives() {
 }
 
 #[test]
+fn output_holding_staged_work_is_refused_and_left_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    write_gz_lines(
+        &dir.path().join("input/updated_2024-01/part_0000.jsonl.gz"),
+        &[r#"{"id":"10.1/a","attributes":{"types":{"resourceType":"Spreadsheet"}}}"#],
+    );
+    let (template, opts) = transform_setup(&dir);
+    // A staged run left its work directory and a marker behind.
+    let marker = opts.output.join(".work").join("reconcile.done");
+    fs::create_dir_all(marker.parent().unwrap()).unwrap();
+    fs::write(&marker, "0.4.0").unwrap();
+
+    let err = format!(
+        "{:#}",
+        run(&DatasetTagger, &opts, &template, None).unwrap_err()
+    );
+
+    assert!(err.contains(".work"), "got: {err}");
+    assert!(marker.is_file(), "staged marker was removed");
+}
+
+#[test]
 fn run_drops_repeated_content_keys_within_one_record() {
     let dir = tempfile::tempdir().unwrap();
     let (template, opts) = transform_setup(&dir);

@@ -104,3 +104,19 @@ fn rejects_a_parent_of_snapshots() {
     assert!(String::from_utf8_lossy(&result.stderr).contains("no updated_YYYY-MM directories"));
     assert!(!output.exists());
 }
+
+#[test]
+fn refuses_to_write_the_report_over_a_source_part() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("snapshot");
+    let part = root.join("updated_2026-07/part_0000.jsonl.gz");
+    write_gz_lines(&part, &[r#"{"id":"10.1/a"}"#]);
+    let before = fs::read(&part).unwrap();
+
+    let result = run(&root, &part);
+
+    assert!(!result.status.success());
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(stderr.contains("--output overlaps SNAPSHOT"), "{stderr}");
+    assert_eq!(fs::read(&part).unwrap(), before, "source part was modified");
+}
