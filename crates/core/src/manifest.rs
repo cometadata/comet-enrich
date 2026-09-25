@@ -191,6 +191,11 @@ pub fn exit_status(
     pipeline_complete: bool,
     emitted: u64,
 ) -> &'static str {
+    // We currently treat an empty enrichment result as an error to prevent a bug
+    // from causing the diff to retract all previous enrichments. However, an empty
+    // result can be valid: if an upstream provider has accepted all enrichments
+    // from the previous release, the current release may produce none. This may
+    // need to be revisited again in the future.
     if stage_exit_status(files_failed, lines_malformed, schema_failures, match_errors)
         == EXIT_PARTIAL
         || !pipeline_complete
