@@ -26,6 +26,7 @@ assert_cmd = "2"
 comet-enrich-test-support = { workspace = true }
 predicates = "3"
 serde_json = { workspace = true }
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

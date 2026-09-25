@@ -9,22 +9,37 @@
 #![allow(clippy::doc_markdown)]
 
 mod artifact_lifecycle;
+pub mod content_key;
 pub mod datacite;
 pub mod dedup;
+pub mod diff;
+pub mod doi_dedup;
+pub mod enrichment_record;
 mod fanout;
 pub mod identifiers;
 pub mod manifest;
 pub mod match_service;
 pub mod method;
 pub mod options;
+pub mod progress;
 pub mod schema;
 pub mod staged_run;
 pub mod template;
 pub mod transform;
+pub mod version;
 pub mod writer;
 
+pub use artifact_lifecycle::ensure_disjoint;
+pub use content_key::enrichment_content_key;
 pub use dedup::{DedupStore, HashBits, hash_input};
-pub use manifest::{HashInfo, Manifest, Report, RunMeta, SourceRelease, StageTimings, exit_status};
+pub use diff::{DiffManifest, DiffOptions, DiffOutcome, DiffStats, run_diff};
+pub use doi_dedup::{DoiOccurrence, FileScan, Occurrence, scan_doi_occurrences, winner};
+pub use enrichment_record::{DiffEvent, EnrichmentRecord};
+pub use fanout::{input_files, make_pool};
+pub use manifest::{
+    EXIT_PARTIAL, EXIT_SUCCESS, HashInfo, Manifest, Report, RunMeta, SourceRelease, StageTimings,
+    exit_status, stage_exit_status,
+};
 #[cfg(any(test, feature = "test-support"))]
 pub use match_service::FakeMatchService;
 pub use match_service::{
@@ -33,10 +48,12 @@ pub use match_service::{
 };
 pub use method::{EnrichmentAction, EnrichmentMethod, EnrichmentParts, Extracted, Lookups};
 pub use options::{RunOptions, RunStats};
+pub use progress::Progress;
 pub use schema::SCHEMA;
 pub use staged_run::{LookupConfig, Stage, WorkDir, pipeline_complete, run_staged, stages_to_run};
-pub use template::{EnrichmentTemplate, build_enrichment_record};
+pub use template::EnrichmentTemplate;
 pub use transform::run;
+pub use version::MIN_ARTIFACT_VERSION;
 pub use writer::{
     DEFAULT_OUTPUT_PART_SIZE_MIB, DEFAULT_OUTPUT_WRITER_LANES, ENRICHMENTS_DIR,
     ENRICHMENTS_FAILED_FILE,

@@ -9,11 +9,12 @@
 pub mod args;
 
 use anyhow::Result;
-use args::{IoArgs, LookupArgs, RunArgs, StageArg, init_logging};
+use args::{IoArgs, LookupArgs, RunArgs, StageArg, WriterArgs, init_logging};
 use clap::{CommandFactory, Parser, Subcommand, ValueHint};
 use comet_enrich_core::{
-    EnrichmentMethod, HashInfo, LookupConfig, Manifest, MarpleClient, MatchHit, MatchService,
-    RunMeta, RunStats, Stage, StageTimings, exit_status, pipeline_complete, run_staged,
+    EXIT_PARTIAL, EnrichmentMethod, HashInfo, LookupConfig, Manifest, MarpleClient, MatchHit,
+    MatchService, RunMeta, RunStats, Stage, StageTimings, exit_status, pipeline_complete,
+    run_staged, stage_exit_status,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -60,9 +61,38 @@ pub enum Command {
     /// Runs the extract, query, and reconcile stages.
     Funders(FundersArgs),
 
+    /// Diff two completed runs into asserted/retracted/superseded events.
+    ///
+    /// Reads enrichments/ and manifest.json from each side and writes a diff
+    /// release (enrichments/, manifest.json) to --output.
+    Diff(DiffArgs),
+
     /// Generate a shell completion script on stdout.
     #[command(after_long_help = COMPLETIONS_HELP)]
     Completions(CompletionsArgs),
+}
+
+/// Arguments for the diff subcommand.
+#[derive(clap::Args, Debug)]
+pub struct DiffArgs {
+    /// Previous run's output directory (contains enrichments/ and manifest.json).
+    #[arg(long, value_name = "DIR", value_hint = ValueHint::DirPath, help_heading = "Input/output")]
+    pub old: PathBuf,
+
+    /// Current run's output directory (contains enrichments/ and manifest.json).
+    #[arg(long, value_name = "DIR", value_hint = ValueHint::DirPath, help_heading = "Input/output")]
+    pub new: PathBuf,
+
+    /// Output directory for the diff release.
+    #[arg(short, long, value_name = "DIR", value_hint = ValueHint::DirPath, help_heading = "Input/output")]
+    pub output: PathBuf,
+
+    #[command(flatten)]
+    pub writer: WriterArgs,
+
+    /// Minimum log level
+    #[arg(long, default_value_t = log::LevelFilter::Info, value_name = "LEVEL", help_heading = "Options")]
+    pub log_level: log::LevelFilter,
 }
 
 /// Reclassify resource types from `types.resourceType`.
@@ -144,26 +174,12 @@ pub fn run(cli: Cli) -> Result<()> {
                 rules: a.rules.clone(),
             })?;
             // Skip reasons where the extractor did not select the record.
-            run_method(
-                "resource-type-general",
-                &method,
-                &a.io,
-                &a.run,
-                &["not_in_scope", "malformed_types"],
-            )
+            run_method(&method, &a.io, &a.run, &["not_in_scope", "malformed_types"])
         }
         Command::Affiliations(a) => {
             init_logging(a.run.log_level)?;
             let method = affiliations::Affiliations::try_new((&a.lookup).into())?;
-            run_lookup_method(
-                "affiliations",
-                &method,
-                &a.io,
-                &a.lookup,
-                &a.run,
-                "affiliation",
-                a.stage,
-            )
+            run_lookup_method(&method, &a.io, &a.lookup, &a.run, "affiliation", a.stage)
         }
         Command::Funders(a) => {
             init_logging(a.run.log_level)?;
@@ -171,25 +187,97 @@ pub fn run(cli: Cli) -> Result<()> {
                 lookup: (&a.lookup).into(),
                 ror_file: a.ror_file.clone(),
             })?;
-            run_lookup_method(
-                "funders", &method, &a.io, &a.lookup, &a.run, "funder", a.stage,
-            )
+            run_lookup_method(&method, &a.io, &a.lookup, &a.run, "funder", a.stage)
+        }
+        Command::Diff(a) => {
+            init_logging(a.log_level)?;
+            run_diff_command(&a)
         }
     }
 }
+
+/// Run the diff subcommand and write its manifest.
+///
+/// # Errors
+///
+/// Propagates any error from [`comet_enrich_core::run_diff`] or the manifest
+/// write.
+fn run_diff_command(a: &DiffArgs) -> Result<()> {
+    use comet_enrich_core::{DiffManifest, DiffOptions, run_diff};
+
+    let opts = DiffOptions {
+        old: a.old.clone(),
+        new: a.new.clone(),
+        output: a.output.clone(),
+        output_part_size_bytes: a.writer.part_size_bytes(),
+        output_writer_lanes: a.writer.output_writer_lanes,
+    };
+
+    let started = Instant::now();
+    let outcome = run_diff(&opts)?;
+    let total_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+
+    DiffManifest::build(&outcome, env!("CARGO_PKG_VERSION"), total_ms).write(&a.output)?;
+
+    let s = &outcome.stats;
+    log::info!(
+        "diff ({}): {} asserted, {} superseded, {} retracted, {} unchanged; elapsed {:.1}s",
+        outcome.new_manifest.method.name,
+        s.asserted,
+        s.superseded,
+        s.retracted,
+        s.unchanged,
+        started.elapsed().as_secs_f64(),
+    );
+    Ok(())
+}
+
+/// A run that finished but lost data, emitted nothing, or skipped stages.
+///
+/// Completed runs retain a partial manifest and output for debugging;
+/// incomplete staged runs do not write a manifest.
+#[derive(Debug)]
+pub struct PartialRun {
+    method: String,
+    files_failed: u64,
+    lines_malformed: u64,
+    schema_failures: u64,
+    match_errors: u64,
+    emitted: u64,
+    pipeline_complete: bool,
+}
+
+impl std::fmt::Display for PartialRun {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} run is partial (manifest exit_status `{EXIT_PARTIAL}`): {} file(s) failed, {} malformed line(s), {} schema failure(s), {} lost match(es), {} emitted, pipeline complete: {}; the manifest and parts written so far are kept",
+            self.method,
+            self.files_failed,
+            self.lines_malformed,
+            self.schema_failures,
+            self.match_errors,
+            self.emitted,
+            self.pipeline_complete,
+        )
+    }
+}
+
+impl std::error::Error for PartialRun {}
 
 /// Run a transform method and write its manifest.
 ///
 /// # Errors
 /// Propagates any error from [`comet_enrich_core::run`] (including schema
 /// compilation), from building the manifest sources, or from writing the manifest.
+/// Returns [`PartialRun`] after writing a `partial` manifest.
 fn run_method<M: EnrichmentMethod>(
-    name: &str,
     method: &M,
     io: &IoArgs,
     run: &RunArgs,
     out_of_scope: &[&str],
 ) -> Result<()> {
+    let name = method.name();
     let validator = run.validator()?;
     // Validate CLI metadata before scanning the corpus.
     let sources = io.sources()?;
@@ -213,21 +301,52 @@ fn run_method<M: EnrichmentMethod>(
         total: Some(total_ms),
         ..StageTimings::default()
     };
-    // The transform path is complete unless it lost input or output records.
-    let manifest_status = exit_status(stats.files_failed, stats.schema_failures, 0, true);
+    // The transform path is complete unless it lost records or emitted none.
+    let manifest_status = exit_status(
+        stats.files_failed,
+        stats.lines_malformed,
+        stats.schema_failures,
+        0,
+        true,
+        stats.emitted,
+    );
     Manifest::build(&stats, &meta, out_of_scope, &timings, manifest_status).write(&io.output)?;
 
-    report_stats(name, &stats);
+    finish_run(name, &stats, 0, true, manifest_status)
+}
+
+/// Log the run summary, then return [`PartialRun`] for data loss, no output, or
+/// incomplete stages.
+fn finish_run(
+    name: &str,
+    stats: &RunStats,
+    match_errors: u64,
+    pipeline_complete: bool,
+    manifest_status: &str,
+) -> Result<()> {
+    report_stats(name, stats);
+    if manifest_status == EXIT_PARTIAL {
+        return Err(PartialRun {
+            method: name.to_owned(),
+            files_failed: stats.files_failed,
+            lines_malformed: stats.lines_malformed,
+            schema_failures: stats.schema_failures,
+            match_errors,
+            emitted: stats.emitted,
+            pipeline_complete,
+        }
+        .into());
+    }
     Ok(())
 }
 
-/// Run a lookup method and write its manifest.
+/// Run a lookup method and write its manifest only when all stages are complete.
 ///
 /// # Errors
 /// Propagates any error from schema compilation, source validation, building the
-/// match client, the staged run itself, or writing the manifest.
+/// match client, the staged run itself, or writing the manifest. Returns
+/// [`PartialRun`] when the run lost data or did not complete every stage.
 fn run_lookup_method<M>(
-    name: &str,
     method: &M,
     io: &IoArgs,
     lookup: &LookupArgs,
@@ -240,6 +359,7 @@ where
     M::Extraction: Serialize + DeserializeOwned,
     M::Lookup: Serialize + DeserializeOwned + From<MatchHit> + Send + Sync + 'static,
 {
+    let name = method.name();
     let validator = run.validator()?;
     // Validate CLI metadata before scanning the corpus.
     let sources = io.sources()?;
@@ -265,18 +385,32 @@ where
         source_id: io.template().source_id().to_owned(),
         sources,
     };
-    // Mark partial for data loss or incomplete staged runs.
+    // Mark partial for data loss, no output, or incomplete staged runs.
     let match_errors = report
         .match_
         .as_ref()
         .map_or(0, |m| m.failure_taxonomy.lost());
     let complete = pipeline_complete(&io.output);
-    let manifest_status = exit_status(
-        report.counters.files_failed,
-        report.counters.schema_failures,
-        match_errors,
-        complete,
-    );
+    let counters = &report.counters;
+    // A standalone stage leaves the pipeline incomplete by design and is
+    // judged on its own errors; a full or completing run needs every stage.
+    let manifest_status = if stage.is_some() && !complete {
+        stage_exit_status(
+            counters.files_failed,
+            counters.lines_malformed,
+            counters.schema_failures,
+            match_errors,
+        )
+    } else {
+        exit_status(
+            counters.files_failed,
+            counters.lines_malformed,
+            counters.schema_failures,
+            match_errors,
+            complete,
+            counters.emitted,
+        )
+    };
     let stats = report.counters.clone();
     if complete {
         Manifest::from_report(
@@ -290,18 +424,19 @@ where
         log::info!("staged pipeline incomplete; not writing manifest.json");
     }
 
-    report_stats(name, &stats);
-    Ok(())
+    finish_run(name, &stats, match_errors, complete, manifest_status)
 }
 
 /// Log the summary counters for a completed run.
 fn report_stats(method: &str, stats: &RunStats) {
     log::info!(
-        "{method}: {} files processed ({} failed), {} records scanned, {} emitted, {} failed validation, {} malformed",
+        "{method}: {} files processed ({} failed), {} records scanned, {} duplicate records, {} emitted, {} duplicate enrichments, {} failed validation, {} malformed",
         stats.files_processed,
         stats.files_failed,
         stats.records_scanned,
+        stats.duplicate_records,
         stats.emitted,
+        stats.duplicate_enrichments,
         stats.schema_failures,
         stats.lines_malformed,
     );
@@ -334,8 +469,8 @@ mod tests {
         assert_eq!(a.lookup.ror_concurrency, 50);
         assert_eq!(a.lookup.ror_batch_size, 50);
         assert_eq!(a.run.threads, 0);
-        assert_eq!(a.run.output_part_size_mib, 256);
-        assert_eq!(a.run.output_writer_lanes, 1);
+        assert_eq!(a.run.writer.output_part_size_mib, 256);
+        assert_eq!(a.run.writer.output_writer_lanes, 1);
         assert_eq!(a.run.log_level, log::LevelFilter::Info);
         assert_eq!(a.lookup.hash_bits, args::HashBitsArg::Bits64);
         assert!(a.stage.is_none());
@@ -456,8 +591,8 @@ mod tests {
         let Command::ResourceTypeGeneral(a) = cli.command else {
             panic!("expected resource-type-general");
         };
-        assert_eq!(a.run.output_part_size_mib, 16);
-        assert_eq!(a.run.output_writer_lanes, 4);
+        assert_eq!(a.run.writer.output_part_size_mib, 16);
+        assert_eq!(a.run.writer.output_writer_lanes, 4);
 
         assert!(parse_rtg(&["--output-part-size-mib", "0"]).is_err());
         assert!(parse_rtg(&["--output-writer-lanes", "0"]).is_err());
@@ -512,6 +647,36 @@ mod tests {
         ];
         args.extend_from_slice(extra);
         parse(&args)
+    }
+
+    #[test]
+    fn diff_parses_paths_and_defaults() {
+        let cli = parse(&[
+            "comet-enrich",
+            "diff",
+            "--old",
+            "prev",
+            "--new",
+            "cur",
+            "--output",
+            "out",
+        ])
+        .unwrap();
+        let Command::Diff(a) = cli.command else {
+            panic!("expected diff");
+        };
+        assert_eq!(a.old, PathBuf::from("prev"));
+        assert_eq!(a.new, PathBuf::from("cur"));
+        assert_eq!(a.output, PathBuf::from("out"));
+        assert_eq!(a.writer.output_part_size_mib, 256);
+        assert_eq!(a.writer.output_writer_lanes, 1);
+    }
+
+    #[test]
+    fn diff_requires_old_new_and_output() {
+        assert!(parse(&["comet-enrich", "diff", "--new", "cur", "--output", "out"]).is_err());
+        assert!(parse(&["comet-enrich", "diff", "--old", "prev", "--output", "out"]).is_err());
+        assert!(parse(&["comet-enrich", "diff", "--old", "prev", "--new", "cur"]).is_err());
     }
 
     #[test]

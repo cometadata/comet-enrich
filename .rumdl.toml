@@ -1,5 +1,7 @@
 [global]
 include = ["README.md", "docs/**/*.md"]
+# Superpowers specs and plans are working documents, not published docs.
+exclude = ["docs/superpowers/**"]
 respect-gitignore = true
 
 [MD013]

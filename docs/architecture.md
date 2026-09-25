@@ -77,22 +77,46 @@ An enrichment change contains an action (`update`, `updateChild`, `insert`, or `
 DataCite field to update, and the original and enriched values. The field is set on each output
 record; this matters for `affiliations`, which can update either `creators` or `contributors`.
 
-Methods return only the value part of the enrichment. Core adds the `sourceId`, validates the
-complete record, and writes it.
+Methods return only the value part of the enrichment. Core adds the `sourceId` and enrichment
+content key (`contentKey`), validates the complete record, and writes it. Each method also exposes
+a frozen `name()` (`funders`, `affiliations`, `resource-type-general`) that is hashed into every
+content key.
+
+## DOI deduplication
+
+Before extraction, records are de-duplicated to guard against multiple records written with
+different updated dates (which could have differing metadata), and also exact copies of records.
+The DataCite files are scanned with the DOI and `attributes.updated` parsed and tracking the file
+index and line number. For each DOI, the record with the latest timestamp is kept. When timestamps
+are the same the last record in sorted path order and within a given file are kept. The losing
+line numbers are recorded and skipped during extraction.
+
+## Duplicate enrichments
+
+Even when records are de-duplicated, enrichment methods can produce duplicate enrichments when
+repeated items within a list are enriched, such as two identical funding references or
+two creators with the same name and affiliations. Each repeat produces an enrichment record
+with the same `contentKey` and canonical `enrichedValue`. Before enrichments are written,
+duplicates are removed for each DOI. If an enrichment has the same content key and canonical
+`enrichedValue` as one already accepted for that DOI, it is skipped. If the same content key has
+a different canonical `enrichedValue`, the run fails because the conflicting results indicate
+a possible logic error.
 
 ## Transform path
 
-`resource-type-general` uses the single-pass transform runner (`crates/core/src/transform.rs`).
-The runner finds every `*.jsonl.gz` file under `--input`, scans them in parallel with rayon, calls
-the method for each DataCite record, and sends the resulting enrichment records to the rolling
-writer. There is no lookup step, so this path does not write staged lookup files under `.work/`.
+`resource-type-general` uses the transform runner (`crates/core/src/transform.rs`). The runner finds
+every `*.jsonl.gz` file under `--input`, finds duplicate records, scans the files again in parallel
+with rayon, and sends the resulting enrichment records to the rolling writer. There is no lookup
+step, so this path does not write staged lookup files under `.work/`.
 
 ```mermaid
 flowchart LR
-    input[("--input/*.jsonl.gz")] --> scan["rayon workers"]
+    input[("--input/*.jsonl.gz")] --> select["DOI deduplication"]
+    input --> scan["rayon workers"]
+    select -->|skip losing lines| scan
     scan --> extract["extract"]
     extract --> mapback["map_back (empty lookups)"]
-    mapback --> build["build_enrichment_record"]
+    mapback --> build["EnrichmentRecord::new"]
     build --> writer["rolling writer"]
     writer --> parts[("enrichments/")]
     scan -.->|"malformed line: count + skip"| counters["manifest counters"]
@@ -107,7 +131,7 @@ removed; the manifest marks the run `partial`.
 `affiliations` and `funders` use the staged lookup runner (`crates/core/src/staged_run/`). The
 runner writes its work files under `<output>/.work/` and runs three stages:
 
-1. `extract` scans the input files, writes one extraction row per in-scope unit to
+1. `extract` finds duplicate records, then reads the files again writing the de-duplicated records to
    `extractions/part_NNNN.jsonl`, and writes unique lookup inputs to `inputs.jsonl`, keyed by
    xxh3 hash. The same affiliation and funder strings appear many times in DataCite, so Marple
    only needs to see each unique string once.
@@ -119,7 +143,9 @@ runner writes its work files under `<output>/.work/` and runs three stages:
 
 ```mermaid
 flowchart TD
-    input[("--input/*.jsonl.gz")] --> extract["extract: scan + dedup"]
+    input[("--input/*.jsonl.gz")] --> select["DOI deduplication"]
+    input --> extract["extract + deduplicate lookup inputs"]
+    select -->|skip losing lines| extract
     extract --> extparts[(".work/extractions/part_NNNN.jsonl")]
     extract --> inputs[(".work/inputs.jsonl")]
     extract --> fp[(".work/inputs.fingerprint.json")]
@@ -134,10 +160,11 @@ flowchart TD
 
 ### Resume and safety
 
-Each completed stage writes a marker: `extract.done`, `query.done`, or `reconcile.done`. A later
-run in the same output directory starts at the first missing marker. If a stage needs to run, it is
-rerun from the beginning. There is no checkpoint inside a stage, which avoids treating half-written
-query output as complete.
+Each completed stage writes a marker: `extract.done`, `query.done`, or `reconcile.done`. The
+comet-enrich version that completed the stage is written into the marker from version 0.4 onwards.
+A later run in the same output directory starts at the first missing marker. If a stage was written
+by a different version, a warning is logged. If a stage needs to run, it is rerun from the beginning.
+There is no checkpoint inside a stage, which avoids treating half-written query output as complete.
 
 Resume checks keep staged artifacts and public output in sync:
 
@@ -152,7 +179,8 @@ Resume checks keep staged artifacts and public output in sync:
   it is present it must still match the fingerprint, so a replaced corpus is rejected.
 
 `--from-scratch` clears the work directory and starts again. A single stage can also be rerun, for
-example `comet-enrich affiliations --stage query`, but only if the previous stage files already exist.
+example `comet-enrich affiliations --stage query`, but only if the previous stage files already
+exist.
 
 ### Match service client
 
@@ -193,9 +221,9 @@ part reaches 256 MiB compressed. Parts are first written under `enrichments/.tmp
 `part_NNNN.jsonl.gz` only after the run finishes.
 
 Records are validated against the enrichment input schema just before they are written, unless
-`--no-validate` is used. Invalid records are written to `enrichments.failed.jsonl` with the
-validator errors, and the run continues as `partial`. The failures file is created only if there is
-at least one failed record.
+`--no-validate` is used. Invalid records are written to `enrichments.failed.jsonl` as
+`{"reason": "schema_failure", "record": ..., "errors": [...]}` lines, and the run continues as
+`partial`. The failures file is created only if there is at least one failed record.
 
 ```mermaid
 flowchart LR
@@ -216,6 +244,44 @@ Every record carries a `sourceId` identifying the enrichment project that produc
 It is provided via the `--source-id` command-line argument and is copied into each record.
 The value must be a DOI name, such as `10.1234/example`, and is stored in ASCII lowercase.
 
+## Enrichment content keys
+
+Every enrichment record carries an enrichment content key in its `contentKey` field. This
+identifies the content being enriched, scoped by method, DOI, field, and action.
+
+The content key is generated as `xxh3_128(JCS([method, doi, field, action, value]))` and stored
+as 32 lowercase hex characters.
+
+`xxh3_128` is a fast, non-cryptographic hash function that produces a 128-bit hash. `JCS`
+produces canonical JSON according to RFC 8785, so differences such as object property
+order do not affect the content key.
+
+`method` is the method name. For updates and deletions, `value` is `originalValue`. For an
+`insert` action, `value` is `enrichedValue`, so different values inserted into the same field
+have different content keys.
+
+For updates, changing only `enrichedValue` preserves the content key, allowing the diff to
+report the enrichment as `superseded`. For example, if the original creator or contributor
+object is unchanged, a new ROR match changes `enrichedValue` while preserving the content key.
+Changing an inserted value changes its content key, producing a retraction and an assertion.
+
+## Diff
+
+`comet-enrich diff` compares two successful runs of the same method and writes enrichment
+records labeled with one of the three events:
+
+- `asserted`: the content key appears only in the new run.
+- `retracted`: the content key appears only in the old run.
+- `superseded`: the content key appears in both runs, but its `enrichedValue` has changed.
+
+Unchanged enrichments produce no output.
+See [commands/diff.md](commands/diff.md) for command usage and output details.
+
+The diff command makes three passes. First, it reads the old run and stores each content key
+alongside a hash of its canonical `enrichedValue` in memory. Next, it reads the new run, builds
+a similar index, and writes `asserted` and `superseded` events by comparing against the old index. Finally,
+it reads the old run again and writes `retracted` events for content keys absent from the new index.
+
 ## Manifest and status
 
 Every completed full run writes `manifest.json` at the output root, with `schema_version` 1. The
@@ -235,15 +301,20 @@ manifest records:
 The transform runner builds the manifest from its run stats. The staged runner builds it from the
 stage stats, and only after all three stages are complete.
 
-| Condition                                       | Status    |
-|-------------------------------------------------|-----------|
-| Complete pass, no data loss                     | `success` |
-| At least one input file failed                  | `partial` |
-| At least one record failed schema validation    | `partial` |
-| At least one lookup input lost to timeout/error | `partial` |
-| Staged pipeline incomplete                      | `partial` |
+| Condition                                       | Run status                      |
+|-------------------------------------------------|---------------------------------|
+| Complete pass, no data loss                     | `success`                       |
+| At least one input file failed                  | `partial`                       |
+| At least one record failed schema validation    | `partial`                       |
+| At least one lookup input lost to timeout/error | `partial`                       |
+| No enrichment records emitted                   | `partial`                       |
+| Staged pipeline incomplete                      | `partial`, no manifest written  |
 
 The run summary is embedded in the manifest instead of being written as a separate report file.
+
+Every failure exits non-zero. Completed partial runs keep the manifest and the output parts
+written so far for debugging. Incomplete staged runs write no manifest, including a successful
+standalone `affiliations --stage extract`.
 
 ## Methods
 
@@ -287,8 +358,8 @@ for the Batch setup.
 `comet-enrich` does not start Marple or seed the OpenSearch index. The lookup methods expect a
 running service at `--ror-service-url`. In COMET runs, this is the
 [`feature/comet-marple-enhancements`](https://gitlab.com/jdiprose/marple/-/tree/feature/comet-marple-enhancements)
-branch of `https://gitlab.com/jdiprose/marple.git`. Funders also needs the ROR registry JSON file
-so it can skip references already identified by Crossref Funder ID.
+branch of `https://gitlab.com/jdiprose/marple.git`. Funders also needs the ROR registry JSON file so
+it can skip references already identified by Crossref Funder ID.
 
 ## Extending
 

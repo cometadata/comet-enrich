@@ -97,6 +97,10 @@ impl EnrichmentMethod for ResourceTypeGeneral {
     type Extraction = EnrichmentParts;
     type Lookup = ();
 
+    fn name(&self) -> &'static str {
+        "resource-type-general"
+    }
+
     fn extract(&self, record: &Value) -> Extracted<Self::Extraction> {
         let Some(attributes) = record.get("attributes").filter(|v| !v.is_null()) else {
             return Extracted::Skip("malformed_types");

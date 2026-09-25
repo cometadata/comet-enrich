@@ -8,6 +8,7 @@ rust-version.workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
+time = { workspace = true }
 flate2 = { workspace = true }
 indicatif = "0.17"
 jsonschema = { workspace = true }
@@ -15,6 +16,8 @@ log = { workspace = true }
 num_cpus = "1"
 rayon = "1"
 serde = { workspace = true }
+serde_json_canonicalizer = { workspace = true }
+soft-canonicalize = "0.5"
 serde_json = { workspace = true }
 xxhash-rust = { workspace = true }
 tokio = { workspace = true }

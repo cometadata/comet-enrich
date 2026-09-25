@@ -53,6 +53,9 @@ usage, and building from source.
   - [resource-type-general](docs/commands/resource-type-general.md)
   - [affiliations](docs/commands/affiliations.md)
   - [funders](docs/commands/funders.md)
+  - [diff](docs/commands/diff.md)
+- Developer tools:
+  - [duplicate-dois](docs/commands/duplicate-dois.md): locate repeated DOIs in a source snapshot.
 
 ## Acknowledgements
 

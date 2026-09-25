@@ -16,6 +16,11 @@ Running `affiliations` without a stage runs the whole pipeline. Intermediate fil
 `.work` directory inside `--output`. A later run resumes from completed stages there unless
 `--from-scratch` is given.
 
+A run refuses to reuse stage artifacts written before comet-enrich 0.4.0, because they lack
+content keys; rerun with `--from-scratch`, or `--stage extract` and then resume. If
+`enrichments/` has been removed, the next run rebuilds it by rerunning reconcile from the
+existing work artifacts.
+
 ## Prerequisites
 
 - A running **Marple** match service, loaded with ROR data, that matches affiliation strings to
@@ -35,15 +40,15 @@ comet-enrich affiliations \
 
 In addition to the [global options](../usage.md#global-options):
 
-| Option                    | Default                 | Description                                                                                |
-|---------------------------|-------------------------|--------------------------------------------------------------------------------------------|
-| `--ror-service-url <URL>` | `http://localhost:8000` | Base URL of the ROR match service / Marple                                                 |
-| `--ror-batch-size <N>`    | `50`                    | Inputs per ROR match-service bulk request                                                  |
-| `--ror-concurrency <N>`   | `50`                    | Concurrent ROR match-service requests                                                      |
-| `--ror-timeout <SECS>`    | `30`                    | ROR match-service request timeout in seconds                                               |
-| `--hash-bits <N>`         | `64`                    | Dedup hash width (`64` or `128`)                                                          |
-| `--from-scratch`          | off                     | Ignore existing stage outputs in `.work` and rerun all stages                             |
-| `--stage <STAGE>`         | all stages              | Run a single stage: `extract`, `query`, or `reconcile`                                    |
+| Option                    | Default                 | Description                                                    |
+|---------------------------|-------------------------|----------------------------------------------------------------|
+| `--ror-service-url <URL>` | `http://localhost:8000` | Base URL of the ROR match service / Marple                     |
+| `--ror-batch-size <N>`    | `50`                    | Inputs per ROR match-service bulk request                      |
+| `--ror-concurrency <N>`   | `50`                    | Concurrent ROR match-service requests                          |
+| `--ror-timeout <SECS>`    | `30`                    | ROR match-service request timeout in seconds                   |
+| `--hash-bits <N>`         | `64`                    | Dedup hash width (`64` or `128`)                               |
+| `--from-scratch`          | off                     | Ignore existing stage outputs in `.work` and rerun all stages  |
+| `--stage <STAGE>`         | all stages              | Run a single stage: `extract`, `query`, or `reconcile`         |
 
 ## Stages
 

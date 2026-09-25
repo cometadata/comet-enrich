@@ -23,6 +23,8 @@ use crate::match_service::{MatchHit, MatchService};
 use crate::method::EnrichmentMethod;
 use crate::options::RunOptions;
 use crate::template::EnrichmentTemplate;
+use crate::version::{MIN_ARTIFACT_VERSION, is_at_least};
+use crate::writer::ENRICHMENTS_DIR;
 
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
@@ -111,25 +113,39 @@ where
         stages_to_run(work_path, cfg.from_scratch)
     };
 
-    // A complete pipeline whose recorded source id differs from the requested
-    // one is re-stamped by rerunning reconcile alone.
-    let restamp_from = if only_stage.is_none() && stages.is_empty() {
+    // Reconcile is scheduled only because `enrichments/` was deleted.
+    let output_missing = only_stage.is_none()
+        && stages == [Stage::Reconcile]
+        && wd.marker_path(Stage::Reconcile).exists();
+    if output_missing {
+        log::warn!(
+            "{} is missing although reconcile is marked complete; rerunning reconcile \
+             from the existing work artifacts",
+            io.output.join(ENRICHMENTS_DIR).display()
+        );
+    }
+
+    let restamp_from = if only_stage.is_none() && (stages.is_empty() || output_missing) {
         recorded_source_id_if_changed(work_path, template)?
     } else {
         None
     };
-    if restamp_from.is_some() {
+    if restamp_from.is_some() && stages.is_empty() {
         stages.push(Stage::Reconcile);
     }
 
-    // A re-stamp rebuilds the output from the existing work artifacts without
-    // re-reading the corpus, so it may proceed when the input directory has
-    // been deleted or rotated away. A corpus that is present must still match
-    // the fingerprint: reconcile would otherwise rebuild from the extractions
-    // of a different snapshot and the manifest would describe data the run
-    // never read. Only a missing path counts as absent; a path that cannot be
-    // inspected, such as one without read permission, is an error.
-    let restamp_without_corpus = restamp_from.is_some()
+    // Refuse legacy artifacts before any guard mutates the output directory.
+    check_stage_versions(&wd, &stages)?;
+
+    // A re-stamp or a standalone stage rebuilds from the existing work
+    // artifacts without re-reading the corpus, so it may proceed when the
+    // input directory has been deleted or rotated away. A corpus that is
+    // present must still match the fingerprint on a re-stamp: reconcile would
+    // otherwise rebuild from the extractions of a different snapshot and the
+    // manifest would describe data the run never read. Only a missing path
+    // counts as absent; a path that cannot be inspected, such as one without
+    // read permission, is an error.
+    let input_absent = (restamp_from.is_some() || only_stage.is_some())
         && !io
             .input
             .try_exists()
@@ -139,10 +155,16 @@ where
     // input path cannot destroy a previous run's outputs.
     if stages.contains(&Stage::Extract) {
         input_files(&io.input)?;
-    } else if only_stage.is_none() && !restamp_without_corpus {
+    } else if only_stage.is_none() && !input_absent {
         // When extract is skipped, verify the input still matches the saved
         // fingerprint. Single-stage runs only use existing work artifacts.
         fingerprint::validate_input_fingerprint(work_path, &io.input)?;
+    }
+
+    // Only check overlap while the input still exists; a missing input cannot
+    // be destroyed by clearing the output.
+    if !input_absent {
+        lifecycle::ensure_disjoint(&io.output, &[("--input", &io.input)])?;
     }
 
     if cfg.from_scratch {
@@ -222,6 +244,42 @@ fn warn_source_id_restamp(recorded: &str, requested: &str) {
              replacing the existing enrichment output ({RESTAMP_NOTE})"
         );
     }
+}
+
+/// Check every stage this run reuses. Artifacts from before
+/// [`MIN_ARTIFACT_VERSION`] lack content keys and DOI deduplication, so reusing
+/// them is an error; a different but compatible version only warns.
+fn check_stage_versions(wd: &WorkDir, running: &[Stage]) -> Result<()> {
+    let current = env!("CARGO_PKG_VERSION");
+    for stage in Stage::ALL {
+        // Rerunning a stage invalidates its artifacts and every later stage.
+        if running.contains(&stage) {
+            break;
+        }
+        if !wd.is_complete(stage) {
+            continue;
+        }
+        let recorded = wd.stage_version(stage);
+        if recorded.as_deref() == Some(current) {
+            continue;
+        }
+        let name = stage.marker().trim_end_matches(".done");
+        match recorded.as_deref() {
+            Some(v) if is_at_least(v, MIN_ARTIFACT_VERSION) => {
+                log::warn!("reusing {name} artifacts written by {v} with comet-enrich {current}");
+            }
+            recorded => {
+                let fallback = format!("a build before {MIN_ARTIFACT_VERSION}");
+                let recorded = recorded.unwrap_or(&fallback);
+                bail!(
+                    "cannot reuse {name} artifacts written by {recorded} with comet-enrich \
+                     {current}: artifacts before {MIN_ARTIFACT_VERSION} lack content keys; \
+                     rerun with --from-scratch, or --stage extract and then resume"
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Read non-empty JSONL rows from an optional file.

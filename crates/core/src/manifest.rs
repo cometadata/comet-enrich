@@ -8,7 +8,7 @@ use crate::options::RunStats;
 use crate::writer::{ENRICHMENTS_DIR, ENRICHMENTS_FAILED_FILE};
 
 use anyhow::{Context, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -61,7 +61,7 @@ impl From<HashBits> for HashInfo {
 }
 
 /// One data source and the date of the release the run consumed.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SourceRelease {
     pub release_date: String,
 }
@@ -82,7 +82,19 @@ pub struct Report {
     #[serde(rename = "match", skip_serializing_if = "Option::is_none")]
     pub match_: Option<MatchSummary>,
     pub validation: Validation,
+    /// Crate version that completed each stage. Present only for the staged
+    /// path; `null` for a stage whose marker predates 0.4.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stage_versions: Option<StageVersions>,
     pub stage_timings_ms: StageTimings,
+}
+
+/// Crate version recorded by each completed stage.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct StageVersions {
+    pub extract: Option<String>,
+    pub query: Option<String>,
+    pub reconcile: Option<String>,
 }
 
 /// How much of the in-scope input was enriched.
@@ -164,18 +176,47 @@ impl MatchFailureTaxonomy {
 
 /// Manifest `exit_status` for a run that made a complete pass with no data loss.
 pub const EXIT_SUCCESS: &str = "success";
-/// Manifest `exit_status` for a run that lost data or did not complete all stages.
+/// Manifest `exit_status` for a run that lost data (a failed file, a source
+/// line that could not be parsed, a schema failure, or a lost lookup),
+/// emitted no records, or did not complete all stages.
 pub const EXIT_PARTIAL: &str = "partial";
 
 /// Derive a run's manifest `exit_status`.
 #[must_use]
 pub fn exit_status(
     files_failed: u64,
+    lines_malformed: u64,
     schema_failures: u64,
     match_errors: u64,
     pipeline_complete: bool,
+    emitted: u64,
 ) -> &'static str {
-    if files_failed > 0 || schema_failures > 0 || match_errors > 0 || !pipeline_complete {
+    // We currently treat an empty enrichment result as an error to prevent a bug
+    // from causing the diff to retract all previous enrichments. However, an empty
+    // result can be valid: if an upstream provider has accepted all enrichments
+    // from the previous release, the current release may produce none. This may
+    // need to be revisited again in the future.
+    if stage_exit_status(files_failed, lines_malformed, schema_failures, match_errors)
+        == EXIT_PARTIAL
+        || !pipeline_complete
+        || emitted == 0
+    {
+        EXIT_PARTIAL
+    } else {
+        EXIT_SUCCESS
+    }
+}
+
+/// Derive a standalone stage's status from errors alone. Extract and query
+/// need not complete the pipeline or emit enrichment records to succeed.
+#[must_use]
+pub fn stage_exit_status(
+    files_failed: u64,
+    lines_malformed: u64,
+    schema_failures: u64,
+    match_errors: u64,
+) -> &'static str {
+    if files_failed > 0 || lines_malformed > 0 || schema_failures > 0 || match_errors > 0 {
         EXIT_PARTIAL
     } else {
         EXIT_SUCCESS
@@ -219,13 +260,17 @@ impl Manifest {
             .iter()
             .filter_map(|reason| stats.skipped.get(*reason).copied())
             .sum();
-        let records_in_scope = stats.records_scanned.saturating_sub(out_of_scope_total);
+        let records_in_scope = stats
+            .records_scanned
+            .saturating_sub(stats.duplicate_records)
+            .saturating_sub(out_of_scope_total);
 
         let report = Report {
             counters: stats.clone(),
             coverage: Coverage::new(records_in_scope, stats.emitted),
             match_: None,
             validation: Validation::new(stats.emitted, stats.schema_failures),
+            stage_versions: None,
             stage_timings_ms: timings.clone(),
         };
         Self::envelope(meta, None, exit_status, report)
@@ -264,11 +309,23 @@ impl Manifest {
     /// Returns an error if the manifest cannot be serialized or the file cannot be
     /// written.
     pub fn write(&self, output_dir: &Path) -> Result<()> {
-        let path = output_dir.join(MANIFEST_FILE);
-        let json = serde_json::to_string_pretty(self).context("serializing manifest")?;
-        std::fs::write(&path, json).with_context(|| format!("writing {}", path.display()))?;
-        Ok(())
+        write_manifest_json(self, output_dir, "manifest")
     }
+}
+
+/// Serialize `value` as pretty JSON to `<output_dir>/manifest.json`.
+///
+/// `what` names the manifest kind in the serialization error context.
+pub(crate) fn write_manifest_json<T: Serialize>(
+    value: &T,
+    output_dir: &Path,
+    what: &str,
+) -> Result<()> {
+    let path = output_dir.join(MANIFEST_FILE);
+    let json =
+        serde_json::to_string_pretty(value).with_context(|| format!("serializing {what}"))?;
+    std::fs::write(&path, json).with_context(|| format!("writing {}", path.display()))?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -318,6 +375,7 @@ mod tests {
             coverage: Coverage::new(3, 2),
             match_: None,
             validation: Validation::new(2, 0),
+            stage_versions: None,
             stage_timings_ms: StageTimings {
                 query: Some(10),
                 ..StageTimings::default()

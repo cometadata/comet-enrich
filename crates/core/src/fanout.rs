@@ -1,9 +1,11 @@
 //! Shared input-file scanning helpers for the transform and staged runners.
 
 use anyhow::{Context, Result, bail};
+use flate2::read::MultiGzDecoder;
 use serde_json::Value;
 use std::collections::BTreeMap;
-use std::io::BufRead;
+use std::fs::File;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
@@ -25,11 +27,19 @@ pub(crate) enum FileError {
 /// Returns an error when no input files are found: an empty corpus is
 /// indistinguishable from a mistyped `--input` path, and must not become a
 /// clean-looking empty run.
-pub(crate) fn input_files(dir: &Path) -> Result<Vec<PathBuf>> {
+pub fn input_files(dir: &Path) -> Result<Vec<PathBuf>> {
     if !dir.is_dir() {
         bail!("input path is not a directory: {}", dir.display());
     }
+    let files = list_jsonl_gz(dir)?;
+    if files.is_empty() {
+        bail!("no *.jsonl.gz input files found under {}", dir.display());
+    }
+    Ok(files)
+}
 
+/// All `*.jsonl.gz` files under `dir`, recursively and in sorted order.
+pub(crate) fn list_jsonl_gz(dir: &Path) -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();
     for entry in WalkDir::new(dir) {
         let entry = entry.with_context(|| format!("walking input directory {}", dir.display()))?;
@@ -38,10 +48,6 @@ pub(crate) fn input_files(dir: &Path) -> Result<Vec<PathBuf>> {
         }
     }
     files.sort();
-
-    if files.is_empty() {
-        bail!("no *.jsonl.gz input files found under {}", dir.display());
-    }
     Ok(files)
 }
 
@@ -49,6 +55,11 @@ fn is_jsonl_gz(path: &Path) -> bool {
     path.file_name()
         .and_then(|name| name.to_str())
         .is_some_and(|name| name.ends_with(".jsonl.gz"))
+}
+
+/// Open a gzip (possibly multi-member) JSONL file for buffered reading.
+pub(crate) fn open_gz(path: &Path) -> std::io::Result<BufReader<MultiGzDecoder<File>>> {
+    Ok(BufReader::new(MultiGzDecoder::new(File::open(path)?)))
 }
 
 /// Own the skip-reason keys collected during a run.
@@ -62,13 +73,18 @@ pub(crate) fn own_skips(skipped: BTreeMap<&'static str, u64>) -> BTreeMap<String
 /// Per-file tally produced while scanning a JSONL input.
 #[derive(Default)]
 pub(crate) struct ScanTally {
-    /// Lines that parsed into a JSON record.
+    /// Lines that parsed into a JSON record, plus skipped lines.
     pub scanned: u64,
     /// Lines that could not be parsed as JSON (blank lines are ignored, not counted).
     pub malformed: u64,
+    /// Lines in `skip_lines`: counted as scanned, never parsed.
+    pub skipped_lines: u64,
 }
 
 /// Scan a JSONL reader, skipping blank lines and counting malformed lines.
+///
+/// `skip_lines` holds sorted physical line numbers (starting at one) to count
+/// without parsing, such as losing duplicate source records.
 ///
 /// # Errors
 ///
@@ -76,21 +92,29 @@ pub(crate) struct ScanTally {
 /// failures from `on_record`.
 pub(crate) fn scan_jsonl_records(
     reader: impl BufRead,
-    mut on_record: impl FnMut(&Value) -> Result<(), FileError>,
+    skip_lines: &[u64],
+    mut on_record: impl FnMut(Value) -> Result<(), FileError>,
 ) -> Result<ScanTally, FileError> {
     let mut tally = ScanTally::default();
-    for line in reader.lines() {
+    let mut skip = skip_lines.iter().copied().peekable();
+    for (idx, line) in reader.lines().enumerate() {
         let line = match line {
             Ok(l) if !l.trim().is_empty() => l,
             Ok(_) => continue,
             Err(e) => return Err(FileError::Read(e.into())),
         };
+        if skip.peek() == Some(&(idx as u64 + 1)) {
+            skip.next();
+            tally.scanned += 1;
+            tally.skipped_lines += 1;
+            continue;
+        }
         let Ok(rec) = serde_json::from_str::<Value>(&line) else {
             tally.malformed += 1;
             continue;
         };
         tally.scanned += 1;
-        on_record(&rec)?;
+        on_record(rec)?;
     }
     Ok(tally)
 }
@@ -108,7 +132,7 @@ pub(crate) fn progress_bar(len: u64) -> Result<indicatif::ProgressBar> {
 
 /// Build a rayon pool with `threads` workers, or all available CPUs when
 /// `threads == 0`.
-pub(crate) fn make_pool(threads: usize) -> Result<rayon::ThreadPool> {
+pub fn make_pool(threads: usize) -> Result<rayon::ThreadPool> {
     let n = if threads == 0 {
         num_cpus::get()
     } else {
@@ -145,7 +169,7 @@ mod tests {
     fn scan_counts_parse_failures_as_malformed_and_continues() {
         let input = "{bad json\n{\"a\":1}\n\n";
         let mut records = 0;
-        let tally = scan_jsonl_records(Cursor::new(input), |_| {
+        let tally = scan_jsonl_records(Cursor::new(input), &[], |_| {
             records += 1;
             Ok(())
         })
@@ -162,7 +186,7 @@ mod tests {
             data: Cursor::new(b"{\"a\":1}\n".to_vec()),
         });
         let mut records = 0;
-        let result = scan_jsonl_records(reader, |_| {
+        let result = scan_jsonl_records(reader, &[], |_| {
             records += 1;
             Ok(())
         });

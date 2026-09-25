@@ -106,6 +106,10 @@ impl EnrichmentMethod for Affiliations {
     type Extraction = PersonExtraction;
     type Lookup = RorLookup;
 
+    fn name(&self) -> &'static str {
+        "affiliations"
+    }
+
     fn extract(&self, record: &Value) -> Extracted<Self::Extraction> {
         let Some(doi) = datacite::doi(record) else {
             return Extracted::Skip("no_doi");

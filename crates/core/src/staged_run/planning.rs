@@ -4,6 +4,7 @@ use super::{
 };
 use crate::artifact_lifecycle as lifecycle;
 use crate::dedup::HashBits;
+use crate::writer::ENRICHMENTS_DIR;
 
 use anyhow::{Context, Result, bail};
 use std::fs;
@@ -58,16 +59,37 @@ impl WorkDir {
         self.path.join(stage.marker())
     }
 
-    /// Return whether the stage marker exists.
+    /// A stage is complete when its marker exists. Reconcile also requires
+    /// `enrichments/` beside `.work`, so deleted output is rebuilt on resume.
     #[must_use]
     pub fn is_complete(&self, stage: Stage) -> bool {
-        self.marker_path(stage).exists()
+        if !self.marker_path(stage).exists() {
+            return false;
+        }
+        match stage {
+            Stage::Reconcile => self.output_dir().join(ENRICHMENTS_DIR).is_dir(),
+            Stage::Extract | Stage::Query => true,
+        }
+    }
+
+    /// The run output directory that holds this `.work`.
+    fn output_dir(&self) -> &Path {
+        self.path.parent().unwrap_or(&self.path)
     }
 
     /// Return whether every stage of the pipeline has completed.
     #[must_use]
     pub fn all_complete(&self) -> bool {
         Stage::ALL.iter().all(|&s| self.is_complete(s))
+    }
+
+    /// The crate version recorded in a completed stage's marker. `None` when
+    /// the stage has not completed or its marker predates 0.4 and is empty.
+    #[must_use]
+    pub fn stage_version(&self, stage: Stage) -> Option<String> {
+        let body = fs::read_to_string(self.marker_path(stage)).ok()?;
+        let version = body.trim();
+        (!version.is_empty()).then(|| version.to_owned())
     }
 }
 
