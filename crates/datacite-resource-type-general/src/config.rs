@@ -85,7 +85,7 @@ pub struct ScopeConfig {
 pub fn load_rules<P: AsRef<Path>>(path: P) -> Result<RulesConfig> {
     let text = std::fs::read_to_string(path.as_ref())
         .with_context(|| format!("reading {}", path.as_ref().display()))?;
-    let cfg: RulesConfig = serde_yaml_ng::from_str(&text)
+    let cfg: RulesConfig = serde_saphyr::from_str(&text)
         .with_context(|| format!("parsing {}", path.as_ref().display()))?;
     validate_rules(&cfg)?;
     Ok(cfg)
@@ -118,7 +118,16 @@ fn validate_rules(cfg: &RulesConfig) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use comet_enrich_test_support::{assert_err_contains, config_path};
     use std::collections::HashSet;
+
+    fn write_temp_yaml(contents: &str) -> tempfile::NamedTempFile {
+        use std::io::Write;
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(contents.as_bytes()).unwrap();
+        file.flush().unwrap();
+        file
+    }
 
     #[test]
     fn load_rules_parses_sample_yaml() {
@@ -140,7 +149,7 @@ scope:
     - Other
     - null
 ";
-        let cfg: RulesConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        let cfg: RulesConfig = serde_saphyr::from_str(yaml).unwrap();
         assert!((cfg.threshold - 0.85).abs() < f64::EPSILON);
         assert_eq!(cfg.reference_values.len(), 3);
         assert_eq!(
@@ -165,7 +174,7 @@ redundancy_exclusions: []
 scope:
   target_resource_type_general: [Text]
 ";
-        let cfg: RulesConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        let cfg: RulesConfig = serde_saphyr::from_str(yaml).unwrap();
         let err = validate_rules(&cfg).unwrap_err().to_string();
         assert!(err.contains("FakeType"));
     }
@@ -180,8 +189,50 @@ redundancy_exclusions: []
 scope:
   target_resource_type_general: [Text]
 ";
-        let cfg: RulesConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        let cfg: RulesConfig = serde_saphyr::from_str(yaml).unwrap();
         assert!(validate_rules(&cfg).is_err());
+    }
+
+    #[test]
+    fn load_rules_parses_shipped_rules_file() {
+        let cfg = load_rules(config_path("reclassification_rules.yaml")).unwrap();
+        assert_eq!(cfg.reference_values.len(), RESOURCE_TYPE_GENERAL.len());
+    }
+
+    #[test]
+    fn load_rules_rejects_duplicate_keys() {
+        let file = write_temp_yaml(
+            r"
+threshold: 0.85
+reference_values: [Dataset]
+typo_corrections:
+  otput: output
+  otput: output
+redundancy_exclusions: []
+scope:
+  target_resource_type_general: [Text]
+",
+        );
+        assert_err_contains(load_rules(file.path()), "duplicate mapping key: otput");
+    }
+
+    #[test]
+    fn load_rules_reports_path_on_parse_error() {
+        let file = write_temp_yaml("threshold: [\n");
+        assert_err_contains(load_rules(file.path()), &file.path().display().to_string());
+    }
+
+    #[test]
+    fn load_rules_rejects_missing_field() {
+        let file = write_temp_yaml(
+            r"
+threshold: 0.85
+reference_values: [Dataset]
+typo_corrections: {}
+redundancy_exclusions: []
+",
+        );
+        assert_err_contains(load_rules(file.path()), "missing field `scope`");
     }
 
     #[test]

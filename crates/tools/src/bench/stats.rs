@@ -113,10 +113,10 @@ pub(crate) fn read_inputs(path: &Path, limit: Option<usize>) -> Result<Vec<Strin
         if line.is_empty() {
             continue;
         }
-        if let Some(lim) = limit {
-            if values.len() >= lim {
-                break;
-            }
+        if let Some(lim) = limit
+            && values.len() >= lim
+        {
+            break;
         }
         let rec: InputRecord = serde_json::from_str(line).context("parsing jsonl row")?;
         values.push(rec.value);

@@ -123,10 +123,10 @@ pub fn write_gz_lines(path: &Path, lines: &[&str]) {
 }
 
 fn create_parent(path: &Path) {
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent).unwrap();
-        }
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent).unwrap();
     }
 }
 
@@ -238,6 +238,9 @@ pub fn assert_close(actual: f64, expected: f64) {
 }
 
 /// Assert that `result` is an `Err` whose `Display` text contains `needle`.
+///
+/// Uses alternate `Display`, so an `anyhow::Error` is searched through its whole
+/// context chain, not just the outermost message.
 #[track_caller]
 pub fn assert_err_contains<T, E: std::fmt::Display>(
     result: std::result::Result<T, E>,
@@ -246,7 +249,7 @@ pub fn assert_err_contains<T, E: std::fmt::Display>(
     match result {
         Ok(_) => panic!("expected Err containing {needle:?}, got Ok"),
         Err(e) => {
-            let text = e.to_string();
+            let text = format!("{e:#}");
             assert!(
                 text.contains(needle),
                 "error {text:?} did not contain {needle:?}"

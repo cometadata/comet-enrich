@@ -52,7 +52,7 @@ images.
 
 The rest of this page covers building from source, which requires:
 
-- [Rust 1.85+](https://rustup.rs/) (edition 2024) with `cargo`, installed via rustup.
+- [Rust 1.89+](https://rustup.rs/) (edition 2024) with `cargo`, installed via rustup.
 - `git`.
 
 `comet-enrich` is a Cargo workspace: the command line tool crate lives in `crates/cli` and the enrichment
