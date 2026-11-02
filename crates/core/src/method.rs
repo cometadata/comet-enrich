@@ -134,7 +134,7 @@ mod tests {
         assert!(
             matches!(method.extract(&Value::Null), Extracted::Items(items) if items == vec![()])
         );
-        assert!(method.inputs(&()).is_empty());
+        assert_eq!(method.inputs(&()), Vec::<String>::new());
         assert!(method.map_back((), &lookups).is_empty());
     }
 

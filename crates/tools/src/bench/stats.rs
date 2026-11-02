@@ -258,7 +258,10 @@ mod tests {
             ["one", "two", "three"]
         );
         assert_eq!(read_inputs(f.path(), Some(2)).unwrap(), ["one", "two"]);
-        assert!(read_inputs(f.path(), Some(0)).unwrap().is_empty());
+        assert_eq!(
+            read_inputs(f.path(), Some(0)).unwrap(),
+            Vec::<String>::new()
+        );
     }
 
     #[test]

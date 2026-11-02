@@ -561,7 +561,7 @@ mod tests {
         let entry: Value = serde_json::from_str(fail.lines().next().unwrap()).unwrap();
         assert_eq!(entry["reason"], json!("schema_failure"));
         assert_eq!(entry["record"], json!({"doi":"10.3/b","b":2}));
-        assert!(!entry["errors"].as_array().unwrap().is_empty());
+        assert_ne!(*entry["errors"].as_array().unwrap(), Vec::<Value>::new());
     }
 
     #[test]
