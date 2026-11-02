@@ -25,7 +25,7 @@ usage, and building from source.
 
 ## Requirements
 
-- **Rust 1.85+ (edition 2024)**: install via [rustup](https://rustup.rs/)
+- **Rust 1.89+ (edition 2024)**: install via [rustup](https://rustup.rs/)
   or the [Rust install page](https://www.rust-lang.org/tools/install).
 - **Marple match service**: only for the ROR-matching methods (`affiliations`, `funders`).
   Run COMET's branch:

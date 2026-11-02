@@ -933,8 +933,17 @@ fn resume_reusing_a_stage_from_a_newer_compatible_build_warns_and_reports_it() {
 
     let report = t.run(false).unwrap();
 
-    assert!(!warnings_mentioning("reusing extract artifacts").is_empty());
-    assert!(warnings_mentioning("reusing query artifacts").is_empty());
+    assert_eq!(
+        warnings_mentioning("reusing extract artifacts"),
+        vec![format!(
+            "reusing extract artifacts written by 9.9.9 with comet-enrich {}",
+            env!("CARGO_PKG_VERSION")
+        )]
+    );
+    assert_eq!(
+        warnings_mentioning("reusing query artifacts"),
+        Vec::<String>::new()
+    );
     let versions = report.stage_versions.unwrap();
     assert_eq!(versions.extract.as_deref(), Some("9.9.9"));
     assert_eq!(

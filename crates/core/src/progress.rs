@@ -74,7 +74,7 @@ impl Progress {
 
     pub fn record_processed(&mut self) {
         self.records += 1;
-        if self.records % REFRESH_EVERY != 0 {
+        if !self.records.is_multiple_of(REFRESH_EVERY) {
             return;
         }
         self.refresh_if_due();

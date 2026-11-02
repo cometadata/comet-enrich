@@ -117,10 +117,10 @@ impl Matcher {
                 best_ref = Some(n_ref);
             }
         }
-        if let Some(n_ref) = best_ref {
-            if let Some(outcome) = self.resolve(n_ref, &normalized) {
-                return outcome;
-            }
+        if let Some(n_ref) = best_ref
+            && let Some(outcome) = self.resolve(n_ref, &normalized)
+        {
+            return outcome;
         }
         MatchOutcome::NoMatch
     }

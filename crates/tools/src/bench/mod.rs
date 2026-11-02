@@ -276,10 +276,10 @@ pub(crate) async fn run(args: Args) -> Result<()> {
 
 /// Write the result document as pretty JSON, creating the parent directory.
 fn write_output(path: &std::path::Path, doc: &Output) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
-        }
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
     }
     let json = serde_json::to_string_pretty(doc).context("serialising results")?;
     fs::write(path, json).with_context(|| format!("writing {}", path.display()))
@@ -314,15 +314,15 @@ fn print_summary(doc: &Output, output_path: &std::path::Path) {
             r.error, r.records
         );
     }
-    if let Some(cal) = &doc.calibration {
-        if cal.client_limited {
-            eprintln!(
-                "WARNING: throughput is within {CLIENT_CEILING_FACTOR}x of the client's own \
-                 ceiling ({} req/s) - the client, not the server, may be the bottleneck. \
-                 Confirm with a faster client.",
-                fmt_opt(cal.client_ceiling_rps)
-            );
-        }
+    if let Some(cal) = &doc.calibration
+        && cal.client_limited
+    {
+        eprintln!(
+            "WARNING: throughput is within {CLIENT_CEILING_FACTOR}x of the client's own \
+             ceiling ({} req/s) - the client, not the server, may be the bottleneck. \
+             Confirm with a faster client.",
+            fmt_opt(cal.client_ceiling_rps)
+        );
     }
     println!("results written to {}", output_path.display());
 }
