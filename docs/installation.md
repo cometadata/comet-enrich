@@ -53,6 +53,10 @@ images.
 The rest of this page covers building from source, which requires:
 
 - [Rust 1.89+](https://rustup.rs/) (edition 2024) with `cargo`, installed via rustup.
+- [`cargo-auditable`](https://github.com/rust-secure-code/cargo-auditable), used by
+  `make build-release` and `./install-local.sh`: install with `make setup-release`,
+  which uses [`cargo-binstall`](https://github.com/cargo-bins/cargo-binstall) for a
+  prebuilt binary when it is installed and falls back to `cargo install`.
 - `git`.
 
 `comet-enrich` is a Cargo workspace: the command line tool crate lives in `crates/cli` and the enrichment

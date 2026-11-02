@@ -59,6 +59,12 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install make
 
+      - name: Install cargo-binstall
+        uses: cargo-bins/cargo-binstall@v1.26.2
+
+      - name: Install cargo-auditable
+        run: ${{ matrix.make }} setup-release
+
       - name: Build release binary
         run: ${{ matrix.make }} build-release RUST_TARGET=${{ matrix.target }} RUST_TARGET_CPU=${{ matrix.target_cpu }}
 
@@ -90,6 +96,12 @@ jobs:
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Install cargo-binstall
+        uses: cargo-bins/cargo-binstall@v1.26.2
+
+      - name: Install cargo-auditable
+        run: make setup-release
 
       - name: Build release binary
         run: |
