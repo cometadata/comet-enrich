@@ -308,7 +308,7 @@ dependencies = [
 
 [[package]]
 name = "comet-enrich"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -330,7 +330,7 @@ dependencies = [
 
 [[package]]
 name = "comet-enrich-core"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -357,7 +357,7 @@ dependencies = [
 
 [[package]]
 name = "comet-enrich-datacite-affiliations"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "comet-enrich-core",
@@ -369,7 +369,7 @@ dependencies = [
 
 [[package]]
 name = "comet-enrich-datacite-funders"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "comet-enrich-core",
@@ -381,7 +381,7 @@ dependencies = [
 
 [[package]]
 name = "comet-enrich-datacite-resource-type-general"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "comet-enrich-core",
@@ -397,7 +397,7 @@ dependencies = [
 
 [[package]]
 name = "comet-enrich-test-support"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "comet-enrich-core",
  "flate2",
@@ -407,7 +407,7 @@ dependencies = [
 
 [[package]]
 name = "comet-enrich-tools"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "clap",
